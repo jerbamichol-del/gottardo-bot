@@ -32,7 +32,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 try: model = genai.GenerativeModel('gemini-flash-latest')
 except: model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- FUNZIONI PARSING AI (INVARIATE) ---
+# --- FUNZIONI PARSING AI ---
 def clean_json_response(text):
     try:
         text = re.sub(r"```json|```", "", text).strip()
@@ -77,82 +77,43 @@ def scarica_documenti_veloce(mese_nome, anno):
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     })
+    
+    # Inizializza browser variabile fuori dal try per poterlo chiudere nel finally
+    browser = None
 
-    # FASE 1: LOGIN VELOCE CON PLAYWRIGHT (Solo per autenticazione)
-    # Usiamo Playwright solo per superare il login form complesso, poi rubiamo i cookie.
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
-            page = browser.new_page()
+            # 1. Browser Super Stealth & Fast (NO IMMAGINI)
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
+            )
+            context = browser.new_context()
+            page = context.new_page()
             
-            st_status.info("🔐 Autenticazione...")
+            # LOGIN
+            st_status.info("🔐 Login...")
             page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=60000)
             page.fill('input[type="text"]', ZK_USER)
             page.fill('input[type="password"]', ZK_PASS)
             page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('networkidle')
+            page.wait_for_load_state('domcontentloaded') # Veloce
             
-            # RUBIAMO I COOKIE!
-            cookies = page.context.cookies()
-            for cookie in cookies:
-                session.cookies.set(cookie['name'], cookie['value'])
-            
-            # Estraiamo URL base dinamico se serve (spesso Zucchetti fa redirect)
-            base_url = page.url
-            browser.close()
-            
-    except Exception as e:
-        st_status.error(f"Errore Login: {e}")
-        return None, None
-
-    st_status.info("⚡ Connessione Diretta Stabilita. Scarico...")
-
-    # FASE 2: DOWNLOAD BUSTA (Ricerca API simulata)
-    # Zucchetti carica i documenti via chiamate POST/GET interne.
-    # Dato che l'URL diretto è difficile da indovinare senza ID documento,
-    # qui usiamo una tecnica ibrida: se conosciamo l'endpoint di download diretto bene,
-    # altrimenti dobbiamo navigare "headless" ma senza renderizzare nulla (usando requests-html o parsing leggero).
-    
-    # Purtroppo, senza analizzare il traffico di rete specifico del TUO account, l'URL diretto è impossibile da indovinare (contiene ID hash).
-    # TORNIAMO AL PIANO B MIGLIORATO: Playwright MINIMALE.
-    # Non renderizziamo CSS/Immagini e andiamo diretti agli URL.
-    
-    # Reset per approccio ibrido Playwright Ottimizzato
-    try:
-        with sync_playwright() as p:
-            # 1. Browser Super Stealth & Fast
-            browser = p.chromium.launch(
-                headless=True,
-                args=['--disable-gpu', '--blink-settings=imagesEnabled=false'] # NO IMMAGINI = VELOCITÀ
-            )
-            # Riusiamo i cookie della sessione requests se volessimo, ma qui facciamo login diretto pulito
-            context = browser.new_context()
-            page = context.new_page()
-            
-            # Login rapido (senza immagini è un lampo)
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-            page.fill('input[type="text"]', ZK_USER)
-            page.fill('input[type="password"]', ZK_PASS)
-            page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('domcontentloaded') # Non aspettiamo networkidle completo
-            
-            # 2. BUSTA PAGA (Navigazione diretta URL se possibile, o click rapidi)
+            # 2. BUSTA PAGA
             st_status.info("💰 Busta...")
             page.click("text=I miei dati")
-            page.click("text=Documenti") # Senza wait espliciti, Playwright auto-waita
+            # Wait implicito invece di sleep
+            page.click("text=Documenti") 
             
-            # Cerchiamo cedolino
             try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
             except: page.click("text=Cedolino")
             
-            # Logica stringa ricerca
             target_busta = f"{mese_nome} {anno}"
             
-            # Cerchiamo direttamente nel DOM senza aspettare rendering grafico
-            # Usiamo locator testuale che è più veloce
+            # Cerca nel DOM
             row = page.locator(f"tr:has-text('{target_busta}')").first
             if row.count() > 0:
-                with page.expect_download() as dl:
+                with page.expect_download(timeout=30000) as dl:
                     if row.locator("text=Download").count(): row.locator("text=Download").click()
                     else: row.locator(".z-image").last.click()
                 path_busta = f"busta_{mese_num}_{anno}.pdf"
@@ -161,32 +122,22 @@ def scarica_documenti_veloce(mese_nome, anno):
             else:
                 st_status.warning("Busta non trovata")
 
-            # 3. CARTELLINO (IL PROBLEMA REALE)
-            # Invece di navigare il menu Time che è lento, iniettiamo JS per aprire la maschera direttamente?
-            # No, Zucchetti è bastardo.
-            # MA possiamo iniettare l'evento di apertura!
-            
-            st_status.info("📅 Cartellino (Direct Access)...")
-            
-            # TRUCCO: Forziamo il browser ad andare all'URL del cartellino se lo troviamo nei menu
-            # Oppure usiamo l'approccio standard ma senza immagini e con date iniettate subito
+            # 3. CARTELLINO (FAST MODE)
+            st_status.info("📅 Cartellino...")
             
             page.evaluate("window.scrollTo(0,0)")
             page.click("text=Time")
             page.click("text=Cartellino presenze")
-            # Niente sleep fissi!
             
-            # Aspettiamo solo che appaia UN campo data
-            page.wait_for_selector(".dijitInputInner", timeout=15000)
+            # Aspetta campo data
+            page.wait_for_selector(".dijitInputInner", timeout=20000)
             
             # Date
             last_day = calendar.monthrange(anno, mese_num)[1]
-            d_from = f"01/{mese_num:02d}/{anno}"
-            d_to = f"{last_day}/{mese_num:02d}/{anno}"
             d_from_iso = f"{anno}-{mese_num:02d}-01"
             d_to_iso = f"{anno}-{mese_num:02d}-{last_day}"
 
-            # Iniezione JS fulminea
+            # Iniezione JS Date
             page.evaluate(f"""
                 var w = dijit.registry.toArray().filter(x => x.declaredClass == "dijit.form.DateTextBox" && x.domNode.offsetParent);
                 var start = w.length >= 3 ? 1 : 0;
@@ -196,21 +147,16 @@ def scarica_documenti_veloce(mese_nome, anno):
                 }}
             """)
             
-            # Click Ricerca Immediato
+            # Click Ricerca
             try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
             except: page.keyboard.press("Enter")
             
-            # Qui il trucco: Intercettiamo la richiesta di download invece di aspettare la nuova pagina
-            # Zucchetti apre un popup che fa una GET. Intercettiamola.
-            
             st_status.info("📄 Download Cartellino...")
-            
-            # Aspettiamo che appaia la riga nella griglia
             target_row = f"{mese_num:02d}/{anno}"
-            page.wait_for_selector(f"tr:has-text('{target_row}')", timeout=15000)
+            page.wait_for_selector(f"tr:has-text('{target_row}')", timeout=20000)
             
-            # Click lente con gestione popup
-            with context.expect_page() as new_p:
+            # Click lente
+            with context.expect_page(timeout=30000) as new_p:
                 page.locator(f"tr:has-text('{target_row}')").locator("img[src*='search16.png']").click()
             
             np = new_p.value
@@ -218,8 +164,7 @@ def scarica_documenti_veloce(mese_nome, anno):
             
             path_cart = f"cartellino_{mese_num}_{anno}.pdf"
             if ".pdf" in np.url.lower():
-                # Download diretto veloce usando i cookie del browser
-                import requests
+                # USO REQUESTS GLOBALE (IMPORTATO IN CIMA)
                 cookies = {c['name']: c['value'] for c in context.cookies()}
                 r = requests.get(np.url, cookies=cookies)
                 with open(path_cart, 'wb') as f: f.write(r.content)
@@ -271,7 +216,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
         if db:
             dg = db.get('dati_generali', {})
             st.metric("NETTO", f"€ {dg.get('netto', 0):.2f}")
-            st.json(db) # Debug vista completa
+            st.json(db) 
         else: st.warning("No Busta")
 
     with t2:
