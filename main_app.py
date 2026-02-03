@@ -72,18 +72,10 @@ def scarica_documenti_veloce(mese_nome, anno):
     path_busta = None
     path_cart = None
     
-    # Sessione HTTP persistente
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-    })
-    
-    # Inizializza browser variabile fuori dal try per poterlo chiudere nel finally
-    browser = None
-
     try:
         with sync_playwright() as p:
             # 1. Browser Super Stealth & Fast (NO IMMAGINI)
+            # Lanciamo il browser dentro il context manager così si chiude da solo alla fine
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
@@ -97,12 +89,11 @@ def scarica_documenti_veloce(mese_nome, anno):
             page.fill('input[type="text"]', ZK_USER)
             page.fill('input[type="password"]', ZK_PASS)
             page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('domcontentloaded') # Veloce
+            page.wait_for_load_state('domcontentloaded') 
             
             # 2. BUSTA PAGA
             st_status.info("💰 Busta...")
             page.click("text=I miei dati")
-            # Wait implicito invece di sleep
             page.click("text=Documenti") 
             
             try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
@@ -164,7 +155,7 @@ def scarica_documenti_veloce(mese_nome, anno):
             
             path_cart = f"cartellino_{mese_num}_{anno}.pdf"
             if ".pdf" in np.url.lower():
-                # USO REQUESTS GLOBALE (IMPORTATO IN CIMA)
+                # USO REQUESTS GLOBALE
                 cookies = {c['name']: c['value'] for c in context.cookies()}
                 r = requests.get(np.url, cookies=cookies)
                 with open(path_cart, 'wb') as f: f.write(r.content)
@@ -172,11 +163,11 @@ def scarica_documenti_veloce(mese_nome, anno):
                 np.pdf(path=path_cart)
             
             st_status.success("✅ Cartellino OK")
-            browser.close()
+            # NON CHIUDERE IL BROWSER QUI MANUALMENTE, CI PENSA IL CONTEXT MANAGER "with"
 
     except Exception as e:
         st_status.error(f"Errore: {str(e)[:100]}")
-        if browser: browser.close()
+        # NON CHIUDERE IL BROWSER QUI MANUALMENTE
 
     return path_busta, path_cart
 
