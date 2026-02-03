@@ -11,30 +11,26 @@ import time
 import calendar
 import locale
 
-# --- SETUP CLOUD (Installa Chromium se manca) ---
+# --- SETUP CLOUD ---
 os.system("playwright install chromium")
 
-# Fix Event Loop per Windows (utile se lo testi anche in locale)
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# --- CONFIGURAZIONE LOCALE ---
+# --- CONFIGURAZIONE ---
 try: locale.setlocale(locale.LC_TIME, 'it_IT.UTF-8')
 except: pass 
 
-# --- RECUPERO CREDENZIALI (SEGRETI) ---
-# Tenta di prendere i segreti da Streamlit Cloud, altrimenti usa fallback (per test locale)
+# --- CREDENZIALI ---
 try:
     ZK_USER = st.secrets["ZK_USER"]
     ZK_PASS = st.secrets["ZK_PASS"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    # Fallback per test locale se non hai secrets.toml impostato
     ZK_USER = "10021450" 
-    ZK_PASS = "Diocane3!" # Sostituisci se serve testare in locale
+    ZK_PASS = "Diocane3!"
     GOOGLE_API_KEY = "AIzaSyA1OMmdyg-mLrZKO0WFErurf_Q4mfqKKNM"
 
-# Configura AI
 genai.configure(api_key=GOOGLE_API_KEY)
 try: model = genai.GenerativeModel('gemini-flash-latest')
 except: model = genai.GenerativeModel('gemini-1.5-flash')
@@ -65,9 +61,7 @@ def estrai_dati_busta_dettagliata(file_path):
         """
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
-    except Exception as e:
-        print(f"AI Error: {e}")
-        return None
+    except Exception as e: return None
 
 def estrai_dati_cartellino(file_path):
     if not file_path: return None
@@ -78,7 +72,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- BOT AUTOMAZIONE (CLOUD READY) ---
+# --- BOT AUTOMAZIONE (ROBUSTO PER CLOUD) ---
 def scarica_documenti_automatici(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -101,48 +95,53 @@ def scarica_documenti_automatici(mese_nome, anno):
 
     try:
         with sync_playwright() as p:
-            # CONFIGURAZIONE HEADLESS PER CLOUD
             browser = p.chromium.launch(
-                headless=True, # IMPORTANTE: True per il server
-                slow_mo=300,
-                args=['--disable-blink-features=AutomationControlled']
+                headless=True,
+                slow_mo=500, # Più lento per stabilità su server cheap
+                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
             )
             context = browser.new_context(
                 accept_downloads=True,
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
             )
-            context.set_default_timeout(60000)
+            # TIMEOUT AUMENTATO A 2 MINUTI E MEZZO
+            context.set_default_timeout(150000) 
             page = context.new_page()
-            # Risoluzione standard desktop
             page.set_viewport_size({"width": 1920, "height": 1080})
 
             # 1. LOGIN
             st_status.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-            page.fill('input[type="text"]', ZK_USER)
-            page.fill('input[type="password"]', ZK_PASS)
-            page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('networkidle')
+            try:
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=90000)
+                page.wait_for_selector('input[type="text"]', state="visible")
+                page.fill('input[type="text"]', ZK_USER)
+                page.fill('input[type="password"]', ZK_PASS)
+                page.press('input[type="password"]', 'Enter')
+                page.wait_for_load_state('networkidle', timeout=90000)
+            except Exception as e:
+                st_status.error(f"Errore Login: {e}")
+                browser.close()
+                return None, None
             
-            # 2. BUSTA PAGA (PRIORITÀ)
+            # 2. BUSTA PAGA
             st_status.info("💰 Busta Paga...")
             try:
                 page.click("text=I miei dati")
                 page.wait_for_selector("text=Documenti").click()
                 
                 try: 
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=10000)
                 except: 
                     page.click("text=Cedolino")
                 
-                time.sleep(3) # Attesa caricamento lista
+                time.sleep(3)
                 
                 rows = page.locator(f"tr:has-text('{target_busta}')")
                 found = False
                 for i in range(rows.count()):
                     txt = rows.nth(i).inner_text()
                     if "Tredicesima" not in txt and "Quattordicesima" not in txt:
-                        with page.expect_download(timeout=15000) as dl_info:
+                        with page.expect_download(timeout=30000) as dl_info:
                             if rows.nth(i).locator("text=Download").count():
                                 rows.nth(i).locator("text=Download").click()
                             else: 
@@ -162,11 +161,10 @@ def scarica_documenti_automatici(mese_nome, anno):
             try:
                 page.evaluate("window.scrollTo(0, 0)")
                 page.click("text=Time")
-                page.wait_for_selector("text=Cartellino presenze").click()
-                time.sleep(5)
+                page.wait_for_selector("text=Cartellino presenze", timeout=30000).click()
+                time.sleep(6) # Attesa lunga per Dojo su server lento
 
                 st_status.info("✍️ Imposto date...")
-                # Scrittura mista (Input ID + Dojo Injection)
                 try:
                     inp_dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     inp_al  = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
@@ -180,7 +178,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                     force_write(inp_al, d_to_vis)
                 except: pass
 
-                # Iniezione JS (Sicurezza)
+                # Iniezione JS Sicura
                 page.evaluate(f"""
                     () => {{
                         try {{
@@ -201,7 +199,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
                 except: page.keyboard.press("Enter")
-                time.sleep(4)
+                time.sleep(5)
 
                 st_status.info("📄 Scarico PDF...")
                 with context.expect_page() as new_page_info:
@@ -214,7 +212,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 np = new_page_info.value
                 np.wait_for_load_state()
-                time.sleep(2)
+                time.sleep(3)
                 
                 path_cart = f"cartellino_{mese_num}_{anno}.pdf"
                 if ".pdf" in np.url.lower():
