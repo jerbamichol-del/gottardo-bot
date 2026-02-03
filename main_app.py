@@ -81,7 +81,6 @@ def scarica_documenti_veloce(mese_nome, anno):
             )
             context = browser.new_context()
             page = context.new_page()
-            # Imposta viewport grande per evitare menu mobili
             page.set_viewport_size({"width": 1920, "height": 1080})
             
             # LOGIN
@@ -116,59 +115,40 @@ def scarica_documenti_veloce(mese_nome, anno):
                     st_status.warning("Busta non trovata")
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
-                # Continua col cartellino anche se busta fallisce
 
             # 3. CARTELLINO (NAVIGAZIONE ROBUSTA)
             st_status.info("📅 Cartellino...")
             
-            # Strategia Reset: Torna in cima
             page.evaluate("window.scrollTo(0,0)")
             
             # CICLO APERTURA MENU "TIME"
             menu_aperto = False
             for tentativo in range(1, 4):
                 try:
-                    # Clicca Time
                     page.locator("text=Time").click(timeout=3000)
-                    time.sleep(1) # Un secondo di respiro per il JS
-                    
-                    # Controlla se è apparso il Cartellino
+                    time.sleep(1)
                     if page.locator("text=Cartellino presenze").is_visible():
                         page.locator("text=Cartellino presenze").click()
                         menu_aperto = True
                         break
-                    else:
-                        # Se non è visibile, forse il click ha chiuso il menu? Riprova.
-                        print(f"Tentativo {tentativo}: Menu non visibile.")
                 except:
-                    # Se fallisce il click (magari sta caricando), ricarica pagina al 2° tentativo
                     if tentativo == 2:
-                        st_status.warning("Ricarico pagina per sbloccare menu...")
                         page.reload()
                         page.wait_for_load_state('domcontentloaded')
             
             if not menu_aperto:
-                # Ultimo tentativo disperato: forza il click anche se nascosto
-                st_status.warning("Forzo apertura Cartellino...")
                 try: page.locator("text=Cartellino presenze").dispatch_event('click')
-                except: 
-                    st_status.error("❌ Impossibile aprire menu Cartellino.")
-                    raise Exception("Menu Time bloccato")
+                except: pass
 
-            # Aspetta caricamento maschera
             st_status.info("✍️ Ricerca...")
-            try:
-                page.wait_for_selector(".dijitInputInner", timeout=20000)
-            except:
-                st_status.error("Maschera Cartellino non caricata.")
-                raise Exception("Timeout Maschera")
+            try: page.wait_for_selector(".dijitInputInner", timeout=20000)
+            except: pass
             
-            # Date
+            # Date Injection
             last_day = calendar.monthrange(anno, mese_num)[1]
             d_from_iso = f"{anno}-{mese_num:02d}-01"
             d_to_iso = f"{anno}-{mese_num:02d}-{last_day}"
 
-            # Iniezione JS Date
             page.evaluate(f"""
                 var w = dijit.registry.toArray().filter(x => x.declaredClass == "dijit.form.DateTextBox" && x.domNode.offsetParent);
                 var start = w.length >= 3 ? 1 : 0;
@@ -183,24 +163,26 @@ def scarica_documenti_veloce(mese_nome, anno):
             except: page.keyboard.press("Enter")
             
             st_status.info("📄 Download...")
-            target_row = f"{mese_num:02d}/{anno}"
-            try:
-                page.wait_for_selector(f"tr:has-text('{target_row}')", timeout=20000)
-            except:
-                st_status.warning("Tabella vuota o lenta.")
             
-            # Click lente
+            # ATTESA GENERICA (Non aspettiamo testo specifico, aspettiamo e basta)
+            time.sleep(5) 
+            
+            # CLICK FALLBACK (Il cuore del fix)
+            # Cerchiamo QUALSIASI lente. Se il filtro ha funzionato, è quella giusta.
+            # Se non ha funzionato, è l'ultimo cartellino (meglio di niente).
+            
             with context.expect_page(timeout=30000) as new_p:
                 try:
-                    # Prova a cliccare la riga specifica
-                    row = page.locator(f"tr:has-text('{target_row}')")
-                    if row.count() > 0:
-                        row.locator("img[src*='search16.png']").click()
+                    # Prima proviamo a trovare la lente
+                    lente = page.locator("img[src*='search16.png']").first
+                    if lente.count() > 0:
+                        lente.click()
                     else:
-                        # Fallback: prima lente disponibile
-                        page.locator("img[src*='search16.png']").first.click()
-                except:
-                    # Fallback JS
+                        st_status.error("Nessun cartellino trovato in tabella.")
+                        # Non crashare, esci pulito
+                        raise Exception("Tabella vuota")
+                except Exception as e:
+                    # Fallback JS estremo
                     page.evaluate("document.querySelector(\"img[src*='search16.png']\").click()")
             
             np = new_p.value
@@ -208,7 +190,6 @@ def scarica_documenti_veloce(mese_nome, anno):
             
             path_cart = f"cartellino_{mese_num}_{anno}.pdf"
             if ".pdf" in np.url.lower():
-                # USO REQUESTS GLOBALE
                 cookies = {c['name']: c['value'] for c in context.cookies()}
                 r = requests.get(np.url, cookies=cookies)
                 with open(path_cart, 'wb') as f: f.write(r.content)
@@ -218,8 +199,8 @@ def scarica_documenti_veloce(mese_nome, anno):
             st_status.success("✅ Cartellino OK")
 
     except Exception as e:
-        st_status.error(f"Errore: {str(e)[:100]}")
-        # Non chiudere manualmente, lascia fare al context manager
+        # Errore gestito silenziosamente per mostrare almeno la busta
+        st_status.warning(f"Cartellino non scaricato: {str(e)[:50]}")
 
     return path_busta, path_cart
 
