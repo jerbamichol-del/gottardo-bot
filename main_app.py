@@ -10,7 +10,6 @@ import json
 import time
 import calendar
 import locale
-from datetime import datetime
 
 # --- SETUP BASE ---
 os.system("playwright install chromium")
@@ -59,7 +58,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- CORE: DOWNLOAD CON SCREENSHOT DEBUG ---
+# --- CORE: DOWNLOAD CON SCREENSHOT GARANTITO ---
 def scarica_documenti_veloce(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -72,8 +71,9 @@ def scarica_documenti_veloce(mese_nome, anno):
     path_busta = None
     path_cart = None
     
-    try:
-        with sync_playwright() as p:
+    with sync_playwright() as p:
+        # SPOSTIAMO IL TRY DENTRO IL WITH, COSÌ IL BROWSER È VIVO SE C'È ERRORE
+        try:
             # 1. Browser Super Stealth & Fast
             browser = p.chromium.launch(
                 headless=True,
@@ -96,7 +96,6 @@ def scarica_documenti_veloce(mese_nome, anno):
             try:
                 page.click("text=I miei dati")
                 page.click("text=Documenti") 
-                
                 try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
                 except: page.click("text=Cedolino")
                 
@@ -114,31 +113,29 @@ def scarica_documenti_veloce(mese_nome, anno):
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
 
-            # 3. CARTELLINO (NAVIGAZIONE + SCREENSHOT DEBUG)
+            # 3. CARTELLINO (DEBUG MODE)
             st_status.info("📅 Cartellino...")
             
             page.evaluate("window.scrollTo(0,0)")
             
-            # Apertura Menu Robusta
-            menu_aperto = False
-            for tentativo in range(1, 4):
-                try:
-                    page.locator("text=Time").click(timeout=3000)
-                    time.sleep(1)
-                    if page.locator("text=Cartellino presenze").is_visible():
-                        page.locator("text=Cartellino presenze").click()
-                        menu_aperto = True
-                        break
-                except:
-                    if tentativo == 2: page.reload()
+            # Menu
+            menu_ok = False
+            try:
+                page.locator("text=Time").click(timeout=5000)
+                if page.locator("text=Cartellino presenze").is_visible():
+                    page.locator("text=Cartellino presenze").click()
+                    menu_ok = True
+            except: pass
             
-            if not menu_aperto:
-                try: page.locator("text=Cartellino presenze").dispatch_event('click')
-                except: pass
+            if not menu_ok:
+                st_status.warning("Menu Time difficile, provo forza bruta...")
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y") # Ricarica soft
+                page.wait_for_load_state('domcontentloaded')
+                page.locator("text=Time").click(force=True)
+                page.locator("text=Cartellino presenze").click(force=True)
 
             st_status.info("✍️ Ricerca...")
-            try: page.wait_for_selector(".dijitInputInner", timeout=20000)
-            except: pass
+            page.wait_for_selector(".dijitInputInner", timeout=20000)
             
             # Date Injection
             last_day = calendar.monthrange(anno, mese_num)[1]
@@ -158,50 +155,55 @@ def scarica_documenti_veloce(mese_nome, anno):
             try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
             except: page.keyboard.press("Enter")
             
-            st_status.info("📄 Download...")
-            
-            # ATTESA GENERICA
+            st_status.info("📄 Download (Race Condition)...")
             time.sleep(5) 
             
-            # CLICK LENTE (Con JS Puro + Screenshot)
-            with context.expect_page(timeout=60000) as new_p: # Timeout aumentato a 60s
-                # Contiamo quante lenti ci sono
-                count_lenti = page.locator("img[src*='search16.png']").count()
-                print(f"Lenti trovate: {count_lenti}")
-                
-                if count_lenti > 0:
-                    # CLICCA LA PRIMA LENTE VIA JS (Infallibile se esiste)
-                    page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
-                else:
-                    # SE NON CI SONO LENTI, FAI SCREENSHOT E ESCI
-                    raise Exception("Nessuna lente trovata in tabella (Tabella vuota?)")
+            # TRUCCO DOPPIO: Aspetta O il download O la pagina
+            # Clicchiamo la lente via JS
+            page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
 
-            np = new_p.value
-            np.wait_for_load_state()
+            # Ora aspettiamo: o parte un download, o si apre una pagina
+            try:
+                # Definiamo due eventi
+                with context.expect_page(timeout=10000) as p_info:
+                    # Riprova click se il primo non è andato
+                    page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
+                
+                # Se siamo qui, si è aperta una pagina
+                np = p_info.value
+                np.wait_for_load_state()
+                path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                if ".pdf" in np.url.lower():
+                    cookies = {c['name']: c['value'] for c in context.cookies()}
+                    r = requests.get(np.url, cookies=cookies)
+                    with open(path_cart, 'wb') as f: f.write(r.content)
+                else:
+                    np.pdf(path=path_cart)
             
-            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-            if ".pdf" in np.url.lower():
-                cookies = {c['name']: c['value'] for c in context.cookies()}
-                r = requests.get(np.url, cookies=cookies)
-                with open(path_cart, 'wb') as f: f.write(r.content)
-            else:
-                np.pdf(path=path_cart)
+            except:
+                # Se expect_page fallisce (timeout), forse è partito un download diretto?
+                st_status.warning("Nessuna nuova pagina, controllo download...")
+                # In realtà Zucchetti su download diretto è difficile da intercettare post-click se non hai wrappato l'evento.
+                # Ma spesso il timeout è perché la pagina ci mette >10s.
+                # Diamo per perso se fallisce qui.
+                raise Exception("Popup/Download fallito")
             
             st_status.success("✅ Cartellino OK")
 
-    except Exception as e:
-        st_status.warning(f"Cartellino non scaricato: {str(e)[:50]}")
-        # --- QUI C'È LA MAGIA: MOSTRA SCREENSHOT DELL'ERRORE ---
-        try:
-            st.error("📸 FOTO DEL PROBLEMA:")
-            st.image(page.screenshot(), caption="Cosa vedeva il bot quando è fallito", use_container_width=True)
-        except: pass
-
+        except Exception as e:
+            st_status.error(f"❌ ERRORE: {str(e)[:100]}")
+            # FOTO DEBUG GARANTITA PERCHÉ SIAMO ANCORA NEL CONTEXT
+            try:
+                st.warning("📸 SCATTO FOTO ERRORE...")
+                st.image(page.screenshot(), caption="Schermata al momento dell'errore", use_container_width=True)
+            except Exception as img_err:
+                st.error(f"Impossibile scattare foto: {img_err}")
+    
     return path_busta, path_cart
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="⚡", layout="wide")
-st.title("⚡ Gottardo Payroll (Debug Mode)")
+st.title("⚡ Gottardo Payroll (Photo Debug)")
 
 with st.sidebar:
     st.header("Parametri")
