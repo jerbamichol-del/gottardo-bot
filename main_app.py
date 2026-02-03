@@ -59,7 +59,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- CORE: DOWNLOAD VIA API (NUOVA STRATEGIA) ---
+# --- CORE: DOWNLOAD ROBUSTO ---
 def scarica_documenti_veloce(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -67,7 +67,7 @@ def scarica_documenti_veloce(mese_nome, anno):
     except: return None, None
 
     st_status = st.empty()
-    st_status.info("🚀 Avvio Protocollo Rapido...")
+    st_status.info("🚀 Avvio Protocollo Ibrido...")
     
     path_busta = None
     path_cart = None
@@ -75,13 +75,14 @@ def scarica_documenti_veloce(mese_nome, anno):
     try:
         with sync_playwright() as p:
             # 1. Browser Super Stealth & Fast (NO IMMAGINI)
-            # Lanciamo il browser dentro il context manager così si chiude da solo alla fine
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
             )
             context = browser.new_context()
             page = context.new_page()
+            # Imposta viewport grande per evitare menu mobili
+            page.set_viewport_size({"width": 1920, "height": 1080})
             
             # LOGIN
             st_status.info("🔐 Login...")
@@ -93,35 +94,74 @@ def scarica_documenti_veloce(mese_nome, anno):
             
             # 2. BUSTA PAGA
             st_status.info("💰 Busta...")
-            page.click("text=I miei dati")
-            page.click("text=Documenti") 
-            
-            try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-            except: page.click("text=Cedolino")
-            
-            target_busta = f"{mese_nome} {anno}"
-            
-            # Cerca nel DOM
-            row = page.locator(f"tr:has-text('{target_busta}')").first
-            if row.count() > 0:
-                with page.expect_download(timeout=30000) as dl:
-                    if row.locator("text=Download").count(): row.locator("text=Download").click()
-                    else: row.locator(".z-image").last.click()
-                path_busta = f"busta_{mese_num}_{anno}.pdf"
-                dl.value.save_as(path_busta)
-                st_status.success("✅ Busta OK")
-            else:
-                st_status.warning("Busta non trovata")
+            try:
+                page.click("text=I miei dati")
+                page.click("text=Documenti") 
+                
+                try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except: page.click("text=Cedolino")
+                
+                target_busta = f"{mese_nome} {anno}"
+                
+                # Cerca nel DOM
+                row = page.locator(f"tr:has-text('{target_busta}')").first
+                if row.count() > 0:
+                    with page.expect_download(timeout=30000) as dl:
+                        if row.locator("text=Download").count(): row.locator("text=Download").click()
+                        else: row.locator(".z-image").last.click()
+                    path_busta = f"busta_{mese_num}_{anno}.pdf"
+                    dl.value.save_as(path_busta)
+                    st_status.success("✅ Busta OK")
+                else:
+                    st_status.warning("Busta non trovata")
+            except Exception as e:
+                st_status.error(f"Err Busta: {e}")
+                # Continua col cartellino anche se busta fallisce
 
-            # 3. CARTELLINO (FAST MODE)
+            # 3. CARTELLINO (NAVIGAZIONE ROBUSTA)
             st_status.info("📅 Cartellino...")
             
+            # Strategia Reset: Torna in cima
             page.evaluate("window.scrollTo(0,0)")
-            page.click("text=Time")
-            page.click("text=Cartellino presenze")
             
-            # Aspetta campo data
-            page.wait_for_selector(".dijitInputInner", timeout=20000)
+            # CICLO APERTURA MENU "TIME"
+            menu_aperto = False
+            for tentativo in range(1, 4):
+                try:
+                    # Clicca Time
+                    page.locator("text=Time").click(timeout=3000)
+                    time.sleep(1) # Un secondo di respiro per il JS
+                    
+                    # Controlla se è apparso il Cartellino
+                    if page.locator("text=Cartellino presenze").is_visible():
+                        page.locator("text=Cartellino presenze").click()
+                        menu_aperto = True
+                        break
+                    else:
+                        # Se non è visibile, forse il click ha chiuso il menu? Riprova.
+                        print(f"Tentativo {tentativo}: Menu non visibile.")
+                except:
+                    # Se fallisce il click (magari sta caricando), ricarica pagina al 2° tentativo
+                    if tentativo == 2:
+                        st_status.warning("Ricarico pagina per sbloccare menu...")
+                        page.reload()
+                        page.wait_for_load_state('domcontentloaded')
+            
+            if not menu_aperto:
+                # Ultimo tentativo disperato: forza il click anche se nascosto
+                st_status.warning("Forzo apertura Cartellino...")
+                try: page.locator("text=Cartellino presenze").dispatch_event('click')
+                except: 
+                    st_status.error("❌ Impossibile aprire menu Cartellino.")
+                    raise Exception("Menu Time bloccato")
+
+            # Aspetta caricamento maschera
+            st_status.info("✍️ Ricerca...")
+            try:
+                page.wait_for_selector(".dijitInputInner", timeout=20000)
+            except:
+                st_status.error("Maschera Cartellino non caricata.")
+                raise Exception("Timeout Maschera")
             
             # Date
             last_day = calendar.monthrange(anno, mese_num)[1]
@@ -142,13 +182,26 @@ def scarica_documenti_veloce(mese_nome, anno):
             try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
             except: page.keyboard.press("Enter")
             
-            st_status.info("📄 Download Cartellino...")
+            st_status.info("📄 Download...")
             target_row = f"{mese_num:02d}/{anno}"
-            page.wait_for_selector(f"tr:has-text('{target_row}')", timeout=20000)
+            try:
+                page.wait_for_selector(f"tr:has-text('{target_row}')", timeout=20000)
+            except:
+                st_status.warning("Tabella vuota o lenta.")
             
             # Click lente
             with context.expect_page(timeout=30000) as new_p:
-                page.locator(f"tr:has-text('{target_row}')").locator("img[src*='search16.png']").click()
+                try:
+                    # Prova a cliccare la riga specifica
+                    row = page.locator(f"tr:has-text('{target_row}')")
+                    if row.count() > 0:
+                        row.locator("img[src*='search16.png']").click()
+                    else:
+                        # Fallback: prima lente disponibile
+                        page.locator("img[src*='search16.png']").first.click()
+                except:
+                    # Fallback JS
+                    page.evaluate("document.querySelector(\"img[src*='search16.png']\").click()")
             
             np = new_p.value
             np.wait_for_load_state()
@@ -163,17 +216,16 @@ def scarica_documenti_veloce(mese_nome, anno):
                 np.pdf(path=path_cart)
             
             st_status.success("✅ Cartellino OK")
-            # NON CHIUDERE IL BROWSER QUI MANUALMENTE, CI PENSA IL CONTEXT MANAGER "with"
 
     except Exception as e:
         st_status.error(f"Errore: {str(e)[:100]}")
-        # NON CHIUDERE IL BROWSER QUI MANUALMENTE
+        # Non chiudere manualmente, lascia fare al context manager
 
     return path_busta, path_cart
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="⚡", layout="wide")
-st.title("⚡ Gottardo Payroll (Fast Mode)")
+st.title("⚡ Gottardo Payroll (Hybrid)")
 
 with st.sidebar:
     st.header("Parametri")
