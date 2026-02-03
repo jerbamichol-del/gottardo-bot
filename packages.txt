@@ -1,0 +1,5 @@
+chromium-driver
+libnss3-dev
+libgconf-2-4
+libfontconfig1
+libxrender1
