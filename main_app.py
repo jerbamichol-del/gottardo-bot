@@ -59,7 +59,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- CORE: DOWNLOAD ROBUSTO ---
+# --- CORE: DOWNLOAD CON SCREENSHOT DEBUG ---
 def scarica_documenti_veloce(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -74,7 +74,7 @@ def scarica_documenti_veloce(mese_nome, anno):
     
     try:
         with sync_playwright() as p:
-            # 1. Browser Super Stealth & Fast (NO IMMAGINI)
+            # 1. Browser Super Stealth & Fast
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
@@ -101,8 +101,6 @@ def scarica_documenti_veloce(mese_nome, anno):
                 except: page.click("text=Cedolino")
                 
                 target_busta = f"{mese_nome} {anno}"
-                
-                # Cerca nel DOM
                 row = page.locator(f"tr:has-text('{target_busta}')").first
                 if row.count() > 0:
                     with page.expect_download(timeout=30000) as dl:
@@ -116,12 +114,12 @@ def scarica_documenti_veloce(mese_nome, anno):
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
 
-            # 3. CARTELLINO (NAVIGAZIONE ROBUSTA)
+            # 3. CARTELLINO (NAVIGAZIONE + SCREENSHOT DEBUG)
             st_status.info("📅 Cartellino...")
             
             page.evaluate("window.scrollTo(0,0)")
             
-            # CICLO APERTURA MENU "TIME"
+            # Apertura Menu Robusta
             menu_aperto = False
             for tentativo in range(1, 4):
                 try:
@@ -132,9 +130,7 @@ def scarica_documenti_veloce(mese_nome, anno):
                         menu_aperto = True
                         break
                 except:
-                    if tentativo == 2:
-                        page.reload()
-                        page.wait_for_load_state('domcontentloaded')
+                    if tentativo == 2: page.reload()
             
             if not menu_aperto:
                 try: page.locator("text=Cartellino presenze").dispatch_event('click')
@@ -164,27 +160,22 @@ def scarica_documenti_veloce(mese_nome, anno):
             
             st_status.info("📄 Download...")
             
-            # ATTESA GENERICA (Non aspettiamo testo specifico, aspettiamo e basta)
+            # ATTESA GENERICA
             time.sleep(5) 
             
-            # CLICK FALLBACK (Il cuore del fix)
-            # Cerchiamo QUALSIASI lente. Se il filtro ha funzionato, è quella giusta.
-            # Se non ha funzionato, è l'ultimo cartellino (meglio di niente).
-            
-            with context.expect_page(timeout=30000) as new_p:
-                try:
-                    # Prima proviamo a trovare la lente
-                    lente = page.locator("img[src*='search16.png']").first
-                    if lente.count() > 0:
-                        lente.click()
-                    else:
-                        st_status.error("Nessun cartellino trovato in tabella.")
-                        # Non crashare, esci pulito
-                        raise Exception("Tabella vuota")
-                except Exception as e:
-                    # Fallback JS estremo
-                    page.evaluate("document.querySelector(\"img[src*='search16.png']\").click()")
-            
+            # CLICK LENTE (Con JS Puro + Screenshot)
+            with context.expect_page(timeout=60000) as new_p: # Timeout aumentato a 60s
+                # Contiamo quante lenti ci sono
+                count_lenti = page.locator("img[src*='search16.png']").count()
+                print(f"Lenti trovate: {count_lenti}")
+                
+                if count_lenti > 0:
+                    # CLICCA LA PRIMA LENTE VIA JS (Infallibile se esiste)
+                    page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
+                else:
+                    # SE NON CI SONO LENTI, FAI SCREENSHOT E ESCI
+                    raise Exception("Nessuna lente trovata in tabella (Tabella vuota?)")
+
             np = new_p.value
             np.wait_for_load_state()
             
@@ -199,14 +190,18 @@ def scarica_documenti_veloce(mese_nome, anno):
             st_status.success("✅ Cartellino OK")
 
     except Exception as e:
-        # Errore gestito silenziosamente per mostrare almeno la busta
         st_status.warning(f"Cartellino non scaricato: {str(e)[:50]}")
+        # --- QUI C'È LA MAGIA: MOSTRA SCREENSHOT DELL'ERRORE ---
+        try:
+            st.error("📸 FOTO DEL PROBLEMA:")
+            st.image(page.screenshot(), caption="Cosa vedeva il bot quando è fallito", use_container_width=True)
+        except: pass
 
     return path_busta, path_cart
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="⚡", layout="wide")
-st.title("⚡ Gottardo Payroll (Hybrid)")
+st.title("⚡ Gottardo Payroll (Debug Mode)")
 
 with st.sidebar:
     st.header("Parametri")
