@@ -72,7 +72,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- BOT AUTOMAZIONE (ROBUSTO PER CLOUD) ---
+# --- BOT AUTOMAZIONE (CLOUD OPTIMIZED) ---
 def scarica_documenti_automatici(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -95,31 +95,31 @@ def scarica_documenti_automatici(mese_nome, anno):
 
     try:
         with sync_playwright() as p:
+            # BROWSER LEGGERO PER CLOUD
             browser = p.chromium.launch(
                 headless=True,
-                slow_mo=500, # Più lento per stabilità su server cheap
-                args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+                slow_mo=300, 
+                args=['--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox']
             )
             context = browser.new_context(
                 accept_downloads=True,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
             )
-            # TIMEOUT AUMENTATO A 2 MINUTI E MEZZO
-            context.set_default_timeout(150000) 
+            context.set_default_timeout(150000) # 2.5 min timeout
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
             # 1. LOGIN
             st_status.info("🔐 Login...")
             try:
-                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=90000)
-                page.wait_for_selector('input[type="text"]', state="visible")
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=60000)
+                page.wait_for_selector('input[type="text"]', state="visible", timeout=30000)
                 page.fill('input[type="text"]', ZK_USER)
                 page.fill('input[type="password"]', ZK_PASS)
                 page.press('input[type="password"]', 'Enter')
-                page.wait_for_load_state('networkidle', timeout=90000)
+                page.wait_for_load_state('networkidle', timeout=60000)
             except Exception as e:
-                st_status.error(f"Errore Login: {e}")
+                st_status.error(f"Errore Login: {str(e)[:100]}")
                 browser.close()
                 return None, None
             
@@ -130,9 +130,10 @@ def scarica_documenti_automatici(mese_nome, anno):
                 page.wait_for_selector("text=Documenti").click()
                 
                 try: 
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=10000)
-                except: 
-                    page.click("text=Cedolino")
+                    ced_lente = page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image")
+                    if ced_lente.count() > 0: ced_lente.click(timeout=8000)
+                    else: page.click("text=Cedolino")
+                except: page.click("text=Cedolino")
                 
                 time.sleep(3)
                 
@@ -144,8 +145,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                         with page.expect_download(timeout=30000) as dl_info:
                             if rows.nth(i).locator("text=Download").count():
                                 rows.nth(i).locator("text=Download").click()
-                            else: 
-                                rows.nth(i).locator(".z-image").last.click()
+                            else: rows.nth(i).locator(".z-image").last.click()
                         path_busta = f"busta_{mese_num}_{anno}.pdf"
                         dl_info.value.save_as(path_busta)
                         found = True
@@ -156,59 +156,66 @@ def scarica_documenti_automatici(mese_nome, anno):
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
 
-            # 3. CARTELLINO
+            # 3. CARTELLINO (STRATEGIA ROBUSTA)
             st_status.info("📅 Cartellino...")
             try:
                 page.evaluate("window.scrollTo(0, 0)")
-                page.click("text=Time")
-                page.wait_for_selector("text=Cartellino presenze", timeout=30000).click()
-                time.sleep(6) # Attesa lunga per Dojo su server lento
+                # Tentativi multipli per aprire il menu
+                for _ in range(3):
+                    try:
+                        page.click("text=Time", timeout=3000)
+                        if page.locator("text=Cartellino presenze").is_visible():
+                            page.click("text=Cartellino presenze")
+                            break
+                    except: time.sleep(1)
+                else:
+                    # Fallback
+                    page.click("text=Time")
+                    page.wait_for_selector("text=Cartellino presenze", timeout=10000).click()
 
-                st_status.info("✍️ Imposto date...")
-                try:
-                    inp_dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
-                    inp_al  = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
-                    
-                    def force_write(loc, val):
-                        if loc.count() > 0:
-                            loc.fill(val)
-                            loc.press("Tab")
-                    
-                    force_write(inp_dal, d_from_vis)
-                    force_write(inp_al, d_to_vis)
-                except: pass
+                time.sleep(6) # Attesa Dojo
 
-                # Iniezione JS Sicura
+                st_status.info("✍️ Ricerca...")
+                # Iniezione JS Date
                 page.evaluate(f"""
                     () => {{
                         try {{
                             var ws = dijit.registry.toArray().filter(w => w.declaredClass === "dijit.form.DateTextBox" && w.domNode.offsetParent !== null);
-                            var i1 = ws.length >= 3 ? 1 : 0;
+                            var idxDal = ws.length >= 3 ? 1 : 0;
                             if(ws.length >= 2) {{
-                                ws[i1].set('displayedValue', '{d_from_vis}');
-                                ws[i1].set('value', new Date('{d_from_srv}'));
-                                ws[i1+1].set('displayedValue', '{d_to_vis}');
-                                ws[i1+1].set('value', new Date('{d_to_srv}'));
+                                ws[idxDal].set('displayedValue', '{d_from_vis}');
+                                ws[idxDal].set('value', new Date('{d_from_srv}'));
+                                ws[idxDal+1].set('displayedValue', '{d_to_vis}');
+                                ws[idxDal+1].set('value', new Date('{d_to_srv}'));
                             }}
                         }} catch(e) {{}}
                     }}
                 """)
-                time.sleep(2)
+                time.sleep(1)
 
-                st_status.info("🔍 Ricerca...")
+                # Click Cerca
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
-                except: page.keyboard.press("Enter")
+                try: 
+                    page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True, timeout=5000)
+                except: 
+                    page.keyboard.press("Enter")
+                
                 time.sleep(5)
 
-                st_status.info("📄 Scarico PDF...")
-                with context.expect_page() as new_page_info:
+                st_status.info("📄 Download...")
+                with context.expect_page(timeout=30000) as new_page_info:
                     try:
+                        # Clicca la riga specifica
                         row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                        row.scroll_into_view_if_needed()
-                        row.locator("img[src*='search16.png']").click()
+                        if row.count() > 0:
+                            row.scroll_into_view_if_needed()
+                            row.locator("img[src*='search16.png']").click(timeout=5000)
+                        else:
+                            # Fallback: Clicca la PRIMA lente
+                            page.locator("img[src*='search16.png']").first.click(timeout=5000)
                     except:
-                        page.locator("img[src*='search16.png']").first.click()
+                        # Fallback JS estremo
+                        page.evaluate("document.querySelector(\"img[src*='search16.png']\").click()")
                 
                 np = new_page_info.value
                 np.wait_for_load_state()
@@ -226,12 +233,12 @@ def scarica_documenti_automatici(mese_nome, anno):
 
             except Exception as e:
                 print(f"Err Cart: {e}")
-                st_status.warning(f"Cartellino skip: {str(e)[:50]}")
+                st_status.warning(f"Cartellino saltato (Timeout/Errore).")
 
             browser.close()
             
     except Exception as e:
-        st_status.error(f"Errore Server: {e}")
+        st_status.error(f"Errore: {e}")
         return None, None
 
     return path_busta, path_cart
