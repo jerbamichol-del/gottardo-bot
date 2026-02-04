@@ -10,11 +10,14 @@ import json
 import time
 import calendar
 import locale
-from datetime import datetime
 
-# --- SETUP BASE ---
+# --- SETUP CLOUD ---
 os.system("playwright install chromium")
-if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# --- CONFIGURAZIONE ---
 try: locale.setlocale(locale.LC_TIME, 'it_IT.UTF-8')
 except: pass 
 
@@ -24,6 +27,7 @@ try:
     ZK_PASS = st.secrets["ZK_PASS"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
+    # Fallback per test locale
     ZK_USER = "10021450" 
     ZK_PASS = "Diocane3!"
     GOOGLE_API_KEY = "AIzaSyA1OMmdyg-mLrZKO0WFErurf_Q4mfqKKNM"
@@ -59,162 +63,216 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- CORE: DOWNLOAD ROBUSTO ---
-def scarica_documenti_veloce(mese_nome, anno):
+# --- CORE: CODICE ORIGINALE ADATTATO ---
+def scarica_documenti_automatici(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
     except: return None, None
 
+    target_busta = f"{mese_nome} {anno}" 
+    target_cart_row = f"{mese_num:02d}/{anno}" 
+    last_day = calendar.monthrange(anno, mese_num)[1]
+    
+    d_from_vis = f"01/{mese_num:02d}/{anno}"
+    d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
+    d_from_srv = f"{anno}-{mese_num:02d}-01"
+    d_to_srv = f"{anno}-{mese_num:02d}-{last_day}"
+    
     st_status = st.empty()
-    st_status.info("🚀 Avvio Protocollo Ibrido...")
+    st_status.info(f"🤖 Bot Cloud attivo: {mese_nome} {anno}")
     
     path_busta = None
     path_cart = None
-    
-    with sync_playwright() as p:
-        try:
-            # 1. Browser Super Stealth
+
+    try:
+        with sync_playwright() as p:
+            # 1. BROWSER (Unica vera differenza col PC: headless=True)
             browser = p.chromium.launch(
                 headless=True,
-                args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
+                slow_mo=500, # Un po' di calma aiuta sul cloud
+                args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
             )
-            context = browser.new_context()
+            context = browser.new_context(
+                accept_downloads=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+            )
+            # Timeout generoso per server lenti
+            context.set_default_timeout(60000) 
             page = context.new_page()
+            # Risoluzione grande per evitare layout mobile
             page.set_viewport_size({"width": 1920, "height": 1080})
-            
-            # LOGIN
+
+            # 2. LOGIN (Classico)
             st_status.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=60000)
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
             page.fill('input[type="text"]', ZK_USER)
             page.fill('input[type="password"]', ZK_PASS)
             page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('domcontentloaded') 
-            
-            # 2. BUSTA PAGA
-            st_status.info("💰 Busta...")
+            page.wait_for_load_state('networkidle')
+
+            # 3. BUSTA PAGA (Dal codice originale)
+            st_status.info("💰 Busta Paga...")
             try:
                 page.click("text=I miei dati")
-                page.click("text=Documenti") 
-                try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-                except: page.click("text=Cedolino")
+                page.wait_for_selector("text=Documenti").click()
                 
-                target_busta = f"{mese_nome} {anno}"
-                row = page.locator(f"tr:has-text('{target_busta}')").first
-                if row.count() > 0:
-                    with page.expect_download(timeout=30000) as dl:
-                        if row.locator("text=Download").count(): row.locator("text=Download").click()
-                        else: row.locator(".z-image").last.click()
-                    path_busta = f"busta_{mese_num}_{anno}.pdf"
-                    dl.value.save_as(path_busta)
-                    st_status.success("✅ Busta OK")
-                else:
-                    st_status.warning("Busta non trovata")
+                try: 
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except: 
+                    page.click("text=Cedolino")
+                
+                # Attesa che si carichi la lista
+                try:
+                    page.wait_for_selector(f"tr:has-text('{target_busta}')", timeout=10000)
+                except:
+                    time.sleep(3)
+                
+                rows = page.locator(f"tr:has-text('{target_busta}')")
+                found = False
+                for i in range(rows.count()):
+                    txt = rows.nth(i).inner_text()
+                    if "Tredicesima" not in txt and "Quattordicesima" not in txt:
+                        with page.expect_download(timeout=20000) as dl_info:
+                            if rows.nth(i).locator("text=Download").count():
+                                rows.nth(i).locator("text=Download").click()
+                            else: 
+                                rows.nth(i).locator(".z-image").last.click()
+                        path_busta = f"busta_{mese_num}_{anno}.pdf"
+                        dl_info.value.save_as(path_busta)
+                        found = True
+                        st_status.success("✅ Busta OK")
+                        break
+                if not found: st_status.warning("Busta non trovata.")
+
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
 
-            # --- PUNTO CRITICO: REFRESH SESSIONE ---
-            # Prima di andare al cartellino, torniamo alla home per essere sicuri di essere vivi
-            st_status.info("🔄 Refresh Sessione...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-            page.wait_for_load_state('domcontentloaded')
-            
-            # 3. CARTELLINO
+            # 4. CARTELLINO (Dal codice originale, con fix Agenda)
             st_status.info("📅 Cartellino...")
-            
-            # Verifica Login ancora valido
-            if page.locator('input[type="password"]').count() > 0:
-                st_status.warning("⚠️ Sessione scaduta, riloggo...")
-                page.fill('input[type="text"]', ZK_USER)
-                page.fill('input[type="password"]', ZK_PASS)
-                page.press('input[type="password"]', 'Enter')
-                page.wait_for_load_state('domcontentloaded')
-
-            # Navigazione Menu
-            menu_ok = False
             try:
-                page.locator("text=Time").click(timeout=5000)
-                time.sleep(1)
-                if page.locator("text=Cartellino presenze").is_visible():
-                    page.locator("text=Cartellino presenze").click()
-                    menu_ok = True
-            except: pass
-            
-            if not menu_ok:
-                st_status.warning("Forzo apertura menu...")
-                # Js click brutale
-                page.evaluate("""
-                    var links = document.querySelectorAll('span, a');
-                    for(var i=0; i<links.length; i++){
-                        if(links[i].innerText.includes('Cartellino presenze')) {
-                            links[i].click();
-                            break;
-                        }
-                    }
-                """)
+                page.evaluate("window.scrollTo(0, 0)")
+                
+                # Gestione Menu Time (Spesso ostico su cloud)
+                try:
+                    page.click("text=Time", timeout=5000)
+                except:
+                    # Se il click fallisce, riproviamo o usiamo JS
+                    page.evaluate("document.querySelector('span[title=\"Time\"]').click()")
+                
+                # Aspettiamo il sottomenu
+                try:
+                    page.wait_for_selector("text=Cartellino presenze", timeout=5000).click()
+                except:
+                     # Se non appare, forse è "Gestione cartoline"?
+                     if page.locator("text=Gestione cartoline").is_visible():
+                         page.locator("text=Gestione cartoline").click()
+                     else:
+                         # Riprova il click su Time
+                         page.click("text=Time")
+                         page.click("text=Cartellino presenze")
+                
+                # Attesa caricamento maschera
+                time.sleep(5)
+                
+                # FIX AGENDA: Se siamo finiti sul calendario invece che sulla lista
+                if page.locator("text=Permessi del").count() > 0 or page.locator("text=Filtri").count() > 0:
+                    st_status.info("Fix Vista Agenda...")
+                    # Cerchiamo l'icona stampa o lista per cambiare vista
+                    try:
+                        # Icona stampa generica Zucchetti
+                        page.locator(".z-icon-print").first.click()
+                    except:
+                        # O cerca "Stampa" nel testo
+                        if page.locator("text=Stampa").count() > 0:
+                            page.locator("text=Stampa").click()
+                
+                # Scrittura Date (Originale + Iniezione JS per sicurezza)
+                st_status.info("✍️ Ricerca...")
+                
+                # Tentativo scrittura mista (Robusto)
+                try:
+                    # Iniezione JS (più affidabile su headless)
+                    page.evaluate(f"""
+                        var widgets = dijit.registry.toArray().filter(w => w.declaredClass === "dijit.form.DateTextBox" && w.domNode.offsetParent !== null);
+                        if (widgets.length >= 2) {{
+                            // Spesso l'ordine è: Ricerca, Dal, Al. Quindi indice 1 e 2.
+                            var idx = widgets.length >= 3 ? 1 : 0;
+                            widgets[idx].set('displayedValue', '{d_from_vis}');
+                            widgets[idx].set('value', new Date('{d_from_srv}'));
+                            widgets[idx+1].set('displayedValue', '{d_to_vis}');
+                            widgets[idx+1].set('value', new Date('{d_to_srv}'));
+                        }}
+                    """)
+                except: pass
+                
+                time.sleep(2)
 
-            st_status.info("✍️ Ricerca...")
-            try: page.wait_for_selector(".dijitInputInner", timeout=25000)
-            except: raise Exception("Maschera non caricata (Possibile Logout)")
-            
-            # Date Injection
-            last_day = calendar.monthrange(anno, mese_num)[1]
-            d_from_iso = f"{anno}-{mese_num:02d}-01"
-            d_to_iso = f"{anno}-{mese_num:02d}-{last_day}"
-
-            page.evaluate(f"""
-                var w = dijit.registry.toArray().filter(x => x.declaredClass == "dijit.form.DateTextBox" && x.domNode.offsetParent);
-                var start = w.length >= 3 ? 1 : 0;
-                if(w.length >= 2) {{
-                    w[start].set('value', new Date('{d_from_iso}'));
-                    w[start+1].set('value', new Date('{d_to_iso}'));
-                }}
-            """)
-            
-            # Click Ricerca
-            try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
-            except: page.keyboard.press("Enter")
-            
-            st_status.info("📄 Download...")
-            time.sleep(5) 
-            
-            # Click Lente
-            with context.expect_page(timeout=60000) as new_p:
-                count_lenti = page.locator("img[src*='search16.png']").count()
-                if count_lenti > 0:
-                    page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
+                # Click Ricerca
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
+                except: page.keyboard.press("Enter")
+                
+                time.sleep(5)
+                
+                # Download con gestione Nuova Pagina (Dal codice originale modificato)
+                st_status.info("📄 Download...")
+                with context.expect_page(timeout=30000) as new_page_info:
+                    try:
+                        # Cerchiamo la riga
+                        row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                        if row.count() > 0:
+                            row.scroll_into_view_if_needed()
+                            # Cerchiamo la lente specifica
+                            if row.locator("img[src*='search16.png']").count() > 0:
+                                row.locator("img[src*='search16.png']").click()
+                            else:
+                                # Fallback generico lente
+                                row.locator(".z-image").click()
+                        else:
+                            # Se il filtro non va, clicca la PRIMA lente disponibile
+                            st_status.warning("Filtro lento, scarico l'ultimo disponibile...")
+                            page.locator("img[src*='search16.png']").first.click()
+                    except:
+                        # Fallback JS estremo
+                        page.evaluate("document.querySelector(\"img[src*='search16.png']\").click()")
+                
+                # Gestione PDF aperto in nuova scheda
+                np = new_page_info.value
+                np.wait_for_load_state()
+                time.sleep(2)
+                
+                path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                if ".pdf" in np.url.lower():
+                     import requests
+                     cs = {c['name']: c['value'] for c in context.cookies()}
+                     with open(path_cart, 'wb') as f:
+                         f.write(requests.get(np.url, cookies=cs).content)
                 else:
-                    # Se non ci sono lenti, controlliamo se siamo tornati al login per errore
-                    if page.locator('input[type="password"]').count() > 0:
-                        raise Exception("Logout improvviso durante ricerca")
-                    raise Exception("Tabella vuota")
+                    np.pdf(path=path_cart)
+                
+                np.close()
+                st_status.success("✅ Cartellino OK")
 
-            np = new_p.value
-            np.wait_for_load_state()
-            
-            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-            if ".pdf" in np.url.lower():
-                cookies = {c['name']: c['value'] for c in context.cookies()}
-                r = requests.get(np.url, cookies=cookies)
-                with open(path_cart, 'wb') as f: f.write(r.content)
-            else:
-                np.pdf(path=path_cart)
-            
-            st_status.success("✅ Cartellino OK")
+            except Exception as e:
+                print(f"Err Cart: {e}")
+                st_status.warning(f"Cartellino skip: {str(e)[:50]}")
+                # FOTO ERRORE (Se siamo ancora vivi)
+                try: 
+                    st.image(page.screenshot(), caption="Errore Cartellino", use_container_width=True)
+                except: pass
 
-        except Exception as e:
-            st_status.warning(f"Errore Cartellino: {str(e)[:100]}")
-            # FOTO DEBUG
-            try:
-                st.error("📸 FOTO ERRORE:")
-                st.image(page.screenshot(), caption="Cosa vedo ora", use_container_width=True)
-            except: pass
-    
+            browser.close()
+            
+    except Exception as e:
+        st_status.error(f"Errore: {e}")
+        return None, None
+
     return path_busta, path_cart
 
-# --- UI ---
-st.set_page_config(page_title="Gottardo Payroll", page_icon="⚡", layout="wide")
-st.title("⚡ Gottardo Payroll (Session Refresh)")
+# --- UI STREAMLIT ---
+st.set_page_config(page_title="Gottardo Payroll", page_icon="📱", layout="wide")
+st.title("📱 Gottardo Payroll Mobile")
 
 with st.sidebar:
     st.header("Parametri")
@@ -222,22 +280,22 @@ with st.sidebar:
     sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                                      "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
     
-    if st.button("🚀 AVVIA", type="primary"):
+    if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
         st.session_state.clear()
-        busta, cart = scarica_documenti_veloce(sel_mese, sel_anno)
+        busta, cart = scarica_documenti_automatici(sel_mese, sel_anno)
         st.session_state['busta'] = busta
         st.session_state['cart'] = cart
         st.session_state['done'] = False
 
 if st.session_state.get('busta') or st.session_state.get('cart'):
     if not st.session_state.get('done'):
-        with st.spinner("🧠 Analisi..."):
+        with st.spinner("🧠 Analisi AI..."):
             db = estrai_dati_busta_dettagliata(st.session_state.get('busta'))
             dc = estrai_dati_cartellino(st.session_state.get('cart'))
             st.session_state['db'] = db
             st.session_state['dc'] = dc
             st.session_state['done'] = True
-    
+
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
     
