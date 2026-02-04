@@ -11,6 +11,7 @@ import time
 import calendar
 import locale
 from pathlib import Path
+import PyPDF2  # ✅ AGGIUNGI QUESTO
 
 # --- SETUP CLOUD ---
 os.system("playwright install chromium")
@@ -89,6 +90,19 @@ if 'modelli_mostrati' not in st.session_state:
     st.sidebar.success(f"✅ {len(MODELLI_DISPONIBILI)} modelli AI pronti")
     st.session_state['modelli_mostrati'] = True
 
+# --- 🆕 ESTRATTORE TESTO PDF ---
+def estrai_testo_da_pdf(file_path):
+    """Estrae il testo raw dal PDF per debug"""
+    try:
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            testo_completo = ""
+            for page in reader.pages:
+                testo_completo += page.extract_text() + "\n"
+            return testo_completo
+    except Exception as e:
+        return f"Errore estrazione: {e}"
+
 # --- PARSING AI ---
 def clean_json_response(text):
     """Estrae JSON pulito da risposta AI"""
@@ -100,8 +114,8 @@ def clean_json_response(text):
     except: 
         return None
 
-def estrai_con_fallback(file_path, prompt, tipo="documento"):
-    """✅ Prova multipli modelli Gemini con fallback automatico"""
+def estrai_con_fallback(file_path, prompt, tipo="documento", debug=False):
+    """✅ Prova multipli modelli Gemini con fallback + debug mode"""
     if not file_path or not os.path.exists(file_path):
         return None
     
@@ -111,6 +125,22 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
     if not bytes_data[:4] == b'%PDF':
         st.error(f"❌ Il file {tipo} non è un PDF valido")
         return None
+    
+    # 🆕 DEBUG MODE: Mostra contenuto testuale
+    if debug and tipo == "cartellino":
+        with st.expander("🔍 DEBUG: Contenuto PDF Cartellino"):
+            testo_raw = estrai_testo_da_pdf(file_path)
+            st.text_area("Testo estratto dal PDF:", testo_raw, height=300)
+            
+            # Conta righe che sembrano date
+            righe = testo_raw.split('\n')
+            date_trovate = [r for r in righe if re.search(r'\d{2}/\d{2}/\d{4}', r)]
+            st.info(f"📊 Righe con date trovate: **{len(date_trovate)}**")
+            
+            if len(date_trovate) > 0:
+                st.write("**Prime 5 righe con date:**")
+                for riga in date_trovate[:5]:
+                    st.code(riga)
     
     # Progress bar
     progress_placeholder = st.empty()
@@ -127,7 +157,7 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             result = clean_json_response(response.text)
             
             if result and isinstance(result, dict):
-                progress_placeholder.success(f"✅ {tipo.capitalize()} analizzato con successo!")
+                progress_placeholder.success(f"✅ {tipo.capitalize()} analizzato!")
                 time.sleep(1)
                 progress_placeholder.empty()
                 return result
@@ -137,14 +167,11 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             
             if "429" in error_msg or "quota" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
                 continue
-            elif "404" in error_msg or "not found" in error_msg.lower():
-                continue
             else:
                 continue
     
     # Tutti falliti
     progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite)")
-    st.info("💡 Riprova tra qualche ora o abilita billing su Google AI Studio")
     return None
 
 def estrai_dati_busta_dettagliata(file_path):
@@ -227,72 +254,70 @@ def estrai_dati_busta_dettagliata(file_path):
     }
     """
     
-    return estrai_con_fallback(file_path, prompt, tipo="busta paga")
+    return estrai_con_fallback(file_path, prompt, tipo="busta paga", debug=False)
 
 def estrai_dati_cartellino(file_path):
-    """Estrae dati dal cartellino - VERSIONE AGGRESSIVA"""
+    """Estrae dati dal cartellino - CON DEBUG MODE"""
     
     prompt = """
-    Analizza questo PDF di cartellino presenze/timbrature.
+    Sei un esperto nell'analisi di cartellini presenze GOTTARDO S.p.A.
 
-    **REGOLE DI ANALISI:**
+    **IL TUO COMPITO:**
+    Analizza questo PDF e conta QUANTI GIORNI sono stati lavorati guardando le TIMBRATURE o le DATE presenti.
 
-    1. **CERCA PRIMA UNA TABELLA CON TIMBRATURE GIORNALIERE**
-       - Cerca colonne tipo: Data, Giorno, Entrata, Uscita, Ore, Timbrature
-       - Se trovi una tabella con almeno 3 righe di date → HAI TIMBRATURE DETTAGLIATE
-       
-    2. **SE HAI TIMBRATURE DETTAGLIATE:**
-       - Conta TUTTI i giorni che hanno almeno UNA timbratura (entrata O uscita)
-       - Includi ANCHE sabati/domeniche se hanno timbrature
-       - Conta come anomalie: giorni con "badge mancante", "errore", "anomalia"
-       - giorni_reali = numero totale giorni con timbrature (tipicamente 20-26 giorni/mese)
-       - giorni_senza_badge = numero giorni con anomalie
-       - note = "Rilevate [X] timbrature nel periodo"
-
-    3. **SE NON HAI TIMBRATURE (solo intestazione "Periodo: XX/XX/XXXX - YY/YY/YYYY"):**
-       - giorni_reali = 0
-       - giorni_senza_badge = 0
-       - note = "Cartellino vuoto senza timbrature dettagliate"
-
-    **ESEMPI:**
-
-    ✅ CASO 1 - CON TIMBRATURE:
-    Se vedi una tabella tipo:
-    | Data       | Entrata | Uscita  | Ore  |
-    |------------|---------|---------|------|
-    | 01/12/2025 | 08:00   | 17:00   | 8:00 |
-    | 02/12/2025 | 08:05   | 16:58   | 7:53 |
-    | 03/12/2025 | ANOMALIA| -       | 0:00 |
+    **FORMATO TIPICO GOTTARDO:**
+    
+    Il PDF può avere:
+    
+    TIPO A - TABELLA DETTAGLIATA:
+    ```
+    Data        Giorno    Entrata  Uscita   Ore    Note
+    01/12/2025  Lunedì    08:00    17:00    8:00   
+    02/12/2025  Martedì   08:05    16:58    7:53   
+    03/12/2025  Mercoledì 08:02    17:01    8:01   
     ...
-    | 30/12/2025 | 08:02   | 17:01   | 8:01 |
-
-    → giorni_reali = 26 (conta tutte le righe con data)
-    → giorni_senza_badge = 1 (il 03/12)
-    → note = "Rilevate 26 timbrature nel periodo"
-
-    ❌ CASO 2 - SENZA TIMBRATURE:
-    Se vedi solo:
-    "Periodo: 01/12/2025 - 31/12/2025"
-    "Nessun dato disponibile"
-
+    ```
+    → Se vedi questo formato, conta TUTTE le righe con una data
+    
+    TIPO B - LISTA DATE:
+    ```
+    Periodo: 01/12/2025 - 31/12/2025
+    
+    Timbrature rilevate:
+    01/12/2025 - 8h
+    02/12/2025 - 8h
+    03/12/2025 - 8h
+    ...
+    ```
+    → Conta quante date/giorni vedi elencati
+    
+    TIPO C - VUOTO:
+    ```
+    Periodo: 01/12/2025 - 31/12/2025
+    Nessun dato disponibile
+    ```
     → giorni_reali = 0
-    → giorni_senza_badge = 0
-    → note = "Cartellino vuoto senza timbrature dettagliate"
 
-    **IMPORTANTE:**
-    - Un mese lavorativo NORMALE ha 20-26 giorni
-    - Se trovi una tabella con date → DEVI contare i giorni
-    - NON mettere giorni_reali = 0 se ci sono timbrature visibili!
+    **REGOLE:**
+    1. Cerca qualsiasi pattern di date tipo DD/MM/YYYY o DD-MM-YYYY
+    2. Se trovi 20+ date → è un cartellino completo normale
+    3. Se trovi 0-5 date → probabilmente è vuoto
+    4. Conta come anomalie solo giorni con scritte tipo "badge non rilevato", "errore", "anomalia"
 
-    Restituisci SOLO questo JSON:
+    **OUTPUT RICHIESTO:**
     {
-        "giorni_reali": int,
-        "giorni_senza_badge": int,
-        "note": "string"
+        "giorni_reali": <numero di giorni lavorati rilevati>,
+        "giorni_senza_badge": <numero anomalie>,
+        "note": "<descrizione di cosa hai trovato>"
     }
+
+    **ESEMPI DI NOTE:**
+    - "Rilevate 26 timbrature complete da 01/12 a 30/12"
+    - "Trovate 22 date nel periodo, 2 con badge mancante"
+    - "PDF vuoto, nessuna timbratura presente"
     """
     
-    return estrai_con_fallback(file_path, prompt, tipo="cartellino")
+    return estrai_con_fallback(file_path, prompt, tipo="cartellino", debug=True)
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -316,7 +341,7 @@ def pulisci_file(path_busta, path_cart):
     if file_eliminati:
         st.info(f"🗑️ File eliminati: {', '.join(file_eliminati)}")
 
-# --- CORE BOT ---
+# --- CORE BOT (invariato) ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
     """✅ Bot con gestione duplicati Dicembre"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
@@ -602,9 +627,10 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.session_state['dc'] = dc
             st.session_state['done'] = True
             
-            pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
-            st.session_state.pop('busta', None)
-            st.session_state.pop('cart', None)
+            # 🆕 NON CANCELLARE subito i PDF in debug mode
+            # pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
+            # st.session_state.pop('busta', None)
+            # st.session_state.pop('cart', None)
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
