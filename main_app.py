@@ -228,66 +228,42 @@ def estrai_dati_cartellino(file_path):
     """Estrae dati dal cartellino - CON DEBUG INTEGRATO"""
     
     prompt = """
-    Sei un esperto nell'analisi di cartellini presenze GOTTARDO S.p.A.
+    Analizza questo cartellino presenze GOTTARDO S.p.A.
 
-    **IL TUO COMPITO:**
-    Analizza questo PDF e conta QUANTI GIORNI sono stati lavorati guardando le TIMBRATURE o le DATE presenti.
-
-    **FORMATO TIPICO GOTTARDO:**
+    **CERCA:**
     
-    Il PDF può avere:
+    1. **TABELLA DETTAGLIATA CON TIMBRATURE:**
+    Formato tipo:
+    ```
+    -GG.- ----------- TIMBRATURE ---------- *ORD*  *STR*  *STC*
+    L01 E13,27  U19,31                    7,00
+    M02 E 8,50  U13,02  E16,11  U20,16    7,00          1,00
+    M03 E 8,54  U15,01                    7,00
+    ```
+    → Se vedi righe con "L01", "M02", "G03" (giorni con timbrature E/U), conta TUTTI i giorni con almeno una timbratura
     
-    TIPO A - TABELLA DETTAGLIATA:
+    2. **TOTALE IN FONDO:**
     ```
-    Data        Giorno    Entrata  Uscita   Ore    Note
-    01/12/2025  Lunedì    08:00    17:00    8:00   
-    02/12/2025  Martedì   08:05    16:58    7:53   
-    03/12/2025  Mercoledì 08:02    17:01    8:01   
-    ...
+                                        160,00   7,00  13,00  15,00
     ```
-    → Se vedi questo formato, conta TUTTE le righe con una data
+    → Il primo numero è il totale ore ordinarie
+    → Dividi per 8 per avere i giorni lavorati
     
-    TIPO B - LISTA DATE:
-    ```
-    Periodo: 01/12/2025 - 31/12/2025
-    
-    Timbrature rilevate:
-    01/12/2025 - 8h
-    02/12/2025 - 8h
-    03/12/2025 - 8h
-    ...
-    ```
-    → Conta quante date/giorni vedi elencati
-    
-    TIPO C - VUOTO (SOLO INTESTAZIONE):
-    ```
-    Periodo: 01/12/2025 - 31/12/2025
-    Nessun dato disponibile
-    ```
+    3. **PDF VUOTO:**
+    Se vedi solo "Parametri di ricerca" e "Risultati della ricerca" ma NESSUNA timbratura
     → giorni_reali = 0
 
-    **REGOLE:**
-    1. Cerca qualsiasi pattern di date tipo DD/MM/YYYY o DD-MM-YYYY
-    2. Se trovi 20+ date → è un cartellino completo normale
-    3. Se trovi 0-5 date → probabilmente è vuoto
-    4. Conta come anomalie solo giorni con scritte tipo "badge non rilevato", "errore", "anomalia"
-
-    **OUTPUT RICHIESTO:**
+    **OUTPUT:**
     {
-        "giorni_reali": <numero di giorni lavorati rilevati>,
-        "giorni_senza_badge": <numero anomalie>,
-        "note": "<descrizione di cosa hai trovato>",
-        "debug_prime_righe": "<copia le prime 15 righe del PDF qui per debug>"
+        "giorni_reali": <numero giorni con timbrature>,
+        "giorni_senza_badge": <giorni con anomalie/badge mancante>,
+        "note": "<descrizione>",
+        "debug_prime_righe": "<prime 20 righe del PDF>"
     }
 
-    **ESEMPI DI NOTE:**
-    - "Rilevate 26 timbrature complete da 01/12 a 30/12"
-    - "Trovate 22 date nel periodo, 2 con badge mancante"
-    - "Il PDF mostra solo la schermata dei parametri di ricerca e un raggruppamento per il mese 12/2025. Non è presente l'elenco dettagliato delle timbrature giornaliere (Tipo C)."
-    
-    **IMPORTANTE PER DEBUG:**
-    Nel campo "debug_prime_righe" copia ESATTAMENTE le prime 10-15 righe di testo che vedi nel PDF,
-    anche se sembrano header o intestazioni. Questo ci serve per capire il formato.
+    **ESEMPI:**
+    - "Rilevate 26 timbrature da L01 a M31, totale 160 ore ordinarie"
+    - "PDF vuoto, solo schermata ricerca"
     """
     
     result = estrai_con_fallback(file_path, prompt, tipo="cartellino")
@@ -299,12 +275,13 @@ def estrai_dati_cartellino(file_path):
             
             # Conta date nel testo debug
             date_trovate = re.findall(r'\d{2}/\d{2}/\d{4}', result['debug_prime_righe'])
-            st.info(f"📊 Date trovate nel testo: **{len(date_trovate)}**")
+            timbrature = re.findall(r'[LMGVSD]\d{2}', result['debug_prime_righe'])
             
-            if len(date_trovate) > 0:
-                st.write("**Prime 5 date:**")
-                for data in date_trovate[:5]:
-                    st.code(data)
+            st.info(f"📊 Date trovate: **{len(date_trovate)}** | Timbrature: **{len(timbrature)}**")
+            
+            if len(timbrature) > 0:
+                st.success(f"✅ Cartellino CON timbrature dettagliate!")
+                st.write(f"**Prime 5 timbrature:** {', '.join(timbrature[:5])}")
     
     return result
 
@@ -332,7 +309,7 @@ def pulisci_file(path_busta, path_cart):
 
 # --- CORE BOT ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot con gestione duplicati Dicembre + fix download cartellino + screenshot debug"""
+    """✅ Bot completo con gestione popup/iframe per cartellino"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
@@ -455,7 +432,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e: 
                 st.error(f"Errore: {e}")
 
-            # CARTELLINO - ✅ FIX CON SCREENSHOT DEBUG
+            # CARTELLINO - ✅ FIX CON GESTIONE POPUP/IFRAME
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 try:
@@ -524,133 +501,135 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except: 
                         page.keyboard.press("Enter")
                     
-                    # ✅ ASPETTA PIÙ TEMPO per caricamento tabella
-                    time.sleep(8)
+                    time.sleep(10)  # Aspetta caricamento completo
                     
                     try:
                         page.wait_for_selector("text=Risultati della ricerca", timeout=15000)
-                        st.info("✅ Risultati ricerca trovati")
+                        st.info("✅ Risultati trovati")
                     except:
                         st.warning("⚠️ Timeout risultati")
                     
-                    # ✅ SCREENSHOT DEBUG
-                    screenshot_bytes = page.screenshot()
-                    with st.expander("📸 Screenshot pagina risultati (DEBUG)"):
-                        st.image(screenshot_bytes, caption="Pagina dopo 'Esegui ricerca'", use_container_width=True)
+                    # Screenshot PRIMA del click
+                    screenshot_pre = page.screenshot()
+                    with st.expander("📸 Screenshot PRIMA del click"):
+                        st.image(screenshot_pre, use_container_width=True)
                     
-                    # ✅ PROVA MULTIPLI PATTERN per trovare la riga
+                    # ✅ CERCA LA RIGA
                     pattern_da_provare = [
-                        f"{mese_num}/{str(anno)[-2:]}",      # "12/25"
-                        f"{mese_num}/{anno}",                 # "12/2025"
-                        f"{mese_num:02d}/{str(anno)[-2:]}",  # "12/25" con zero padding
-                        f"{mese_num:02d}/{anno}",            # "12/2025" con zero padding
-                        "BATTISTELLI",                        # Nome dipendente
-                        mese_nome                             # "Dicembre"
+                        f"{mese_num}/{anno}",
+                        f"{mese_num}/{str(anno)[-2:]}",
+                        f"{mese_num:02d}/{anno}",
+                        "BATTISTELLI"
                     ]
                     
                     riga_trovata = False
                     riga_target = None
-                    pattern_match = None
                     
                     for pattern in pattern_da_provare:
                         try:
-                            st.info(f"🔍 Provo pattern: '{pattern}'")
+                            st.info(f"🔍 Pattern: '{pattern}'")
                             riga_test = page.locator(f"tr:has-text('{pattern}')").first
                             
                             if riga_test.count() > 0:
-                                # Verifica che la riga contenga anche un'icona search
                                 if riga_test.locator("img[src*='search']").count() > 0:
                                     riga_target = riga_test
-                                    pattern_match = pattern
                                     riga_trovata = True
-                                    st.success(f"✅ Riga trovata con pattern: '{pattern}'")
+                                    st.success(f"✅ Riga trovata: '{pattern}'")
                                     break
                         except:
                             continue
                     
                     if not riga_trovata:
-                        st.warning("⚠️ Nessun pattern ha trovato la riga")
-                        
-                        # ✅ FALLBACK: Cerca TUTTE le icone search nella tabella
+                        st.warning("⚠️ Fallback: prima icona")
                         try:
-                            all_search_icons = page.locator("img[src*='search']")
-                            num_icons = all_search_icons.count()
-                            
-                            st.info(f"🔍 Trovate {num_icons} icone search nella pagina")
-                            
-                            if num_icons > 0:
-                                # Prendi la PRIMA icona nella sezione risultati
-                                st.warning("⚠️ Usando PRIMA icona search come fallback")
-                                riga_target = all_search_icons.first
+                            all_icons = page.locator("img[src*='search']")
+                            if all_icons.count() > 0:
+                                riga_target = all_icons.first
                                 riga_trovata = True
-                        except Exception as e:
-                            st.error(f"❌ Errore ricerca fallback: {e}")
+                        except:
+                            pass
                     
-                    # ✅ CLICCA sulla riga trovata
+                    # ✅ CLICK CON GESTIONE POPUP
                     if riga_trovata and riga_target:
                         try:
-                            st.info("📥 Click su icona dettaglio...")
-                            old_url = page.url
+                            st.info("📥 Click con attesa popup...")
                             
-                            # Se riga_target è un'icona diretta, clicca
-                            if "img" in str(riga_target):
-                                riga_target.click()
-                            else:
-                                # Altrimenti cerca l'icona dentro la riga
-                                icona_search = riga_target.locator("img[src*='search']").first
-                                icona_search.click()
-                            
-                            # Aspetta cambio pagina
-                            time.sleep(8)
-                            
-                            new_url = page.url
-                            
-                            if new_url != old_url:
-                                st.success(f"✅ Nuova pagina aperta")
-                                
-                                # Aspetta caricamento completo
-                                try:
-                                    page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
-                                except:
-                                    time.sleep(3)
-                                
-                                # ✅ SCREENSHOT della pagina dettaglio
-                                screenshot_dettaglio = page.screenshot()
-                                with st.expander("📸 Screenshot dettaglio cartellino (DEBUG)"):
-                                    st.image(screenshot_dettaglio, caption="Pagina dettaglio timbrature", use_container_width=True)
-                                
-                                # Scarica PDF
-                                try:
-                                    cs = {c['name']: c['value'] for c in context.cookies()}
-                                    response = requests.get(new_url, cookies=cs, timeout=30)
-                                    
-                                    if b'%PDF' in response.content[:10]:
-                                        with open(path_cart, 'wb') as f:
-                                            f.write(response.content)
-                                        st.success("✅ PDF via HTTP")
+                            # Metodo 1: Click e aspetta popup
+                            try:
+                                with context.expect_page(timeout=5000) as popup_info:
+                                    if "img" in str(riga_target):
+                                        riga_target.click()
                                     else:
-                                        page.pdf(path=path_cart)
-                                        st.success("✅ PDF generato da pagina")
-                                except Exception as e:
-                                    st.warning(f"⚠️ Tentativo 1 fallito: {e}")
-                                    page.pdf(path=path_cart)
-                                    st.success("✅ PDF fallback")
-                            else:
-                                st.warning("⚠️ URL non cambiato, genero PDF della pagina corrente")
+                                        icona = riga_target.locator("img[src*='search']").first
+                                        icona.click()
+                                
+                                # ✅ POPUP TROVATO!
+                                popup = popup_info.value
+                                st.success("✅ Popup aperto!")
+                                
+                                # Aspetta caricamento popup
+                                popup.wait_for_load_state("networkidle", timeout=15000)
                                 time.sleep(3)
-                                page.pdf(path=path_cart)
+                                
+                                # Screenshot popup
+                                screenshot_popup = popup.screenshot()
+                                with st.expander("📸 Screenshot POPUP"):
+                                    st.image(screenshot_popup, use_container_width=True)
+                                
+                                # Scarica PDF dal popup
+                                popup.pdf(path=path_cart)
+                                st.success("✅ PDF generato dal popup")
+                                
+                                popup.close()
+                                
+                            except Exception as e_popup:
+                                st.warning(f"⚠️ Nessun popup: {str(e_popup)[:80]}")
+                                
+                                # Metodo 2: Click normale e aspetta cambio contenuto
+                                if "img" in str(riga_target):
+                                    riga_target.click()
+                                else:
+                                    icona = riga_target.locator("img[src*='search']").first
+                                    icona.click()
+                                
+                                time.sleep(10)  # Aspetta caricamento
+                                
+                                # Screenshot DOPO click
+                                screenshot_post = page.screenshot()
+                                with st.expander("📸 Screenshot DOPO il click"):
+                                    st.image(screenshot_post, use_container_width=True)
+                                
+                                # Controlla se il contenuto è cambiato
+                                try:
+                                    # Cerca indicatori della pagina dettaglio
+                                    if page.locator("text=TIMBRATURE").count() > 0 or \
+                                       page.locator("text=PRESENZE DEL MESE").count() > 0 or \
+                                       page.locator("text=*ORD*").count() > 0:
+                                        st.success("✅ Pagina dettaglio caricata!")
+                                        page.pdf(path=path_cart)
+                                    else:
+                                        st.warning("⚠️ Contenuto non cambiato, riprovo con doppio click...")
+                                        
+                                        # Metodo 3: Doppio click
+                                        if "img" in str(riga_target):
+                                            riga_target.dblclick()
+                                        else:
+                                            icona = riga_target.locator("img[src*='search']").first
+                                            icona.dblclick()
+                                        
+                                        time.sleep(10)
+                                        page.pdf(path=path_cart)
+                                        
+                                except:
+                                    page.pdf(path=path_cart)
+                            
                         except Exception as e:
                             st.error(f"❌ Errore click: {e}")
                             import traceback
                             st.code(traceback.format_exc())
                     else:
-                        st.error("❌ Impossibile trovare la riga con il cartellino")
-                        # Ultimo tentativo: PDF della pagina corrente
-                        try:
-                            page.pdf(path=path_cart)
-                            st.info("📄 Generato PDF della pagina corrente come ultima risorsa")
-                        except:
-                            pass
+                        st.error("❌ Riga non trovata")
+                        page.pdf(path=path_cart)
                     
                     # Verifica file
                     if os.path.exists(path_cart):
@@ -662,10 +641,10 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         else:
                             st.warning(f"⚠️ PDF piccolo ({size} bytes)")
                     else:
-                        st.error("❌ File cartellino non trovato")
+                        st.error("❌ File non trovato")
 
                 except Exception as e:
-                    st.error(f"❌ Errore cartellino: {e}")
+                    st.error(f"❌ Errore: {e}")
                     import traceback
                     st.code(traceback.format_exc())
 
