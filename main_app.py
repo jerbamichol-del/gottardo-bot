@@ -4,7 +4,7 @@ import re
 import requests
 import os
 import streamlit as st
-import google.generativeai as genai  # ✅ CORRETTO
+import google.generativeai as genai
 from playwright.sync_api import sync_playwright
 import json
 import time
@@ -76,7 +76,7 @@ def scarica_documenti_automatici(mese_nome, anno):
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
     st_status = st.empty()
-    st_status.info(f"🤖 Bot Cloud: {mese_nome} {anno} → {d_from_vis} / {d_to_vis}")
+    st_status.info(f"🤖 Bot: {mese_nome} {anno}")
     
     path_busta = None
     path_cart = None
@@ -107,7 +107,7 @@ def scarica_documenti_automatici(mese_nome, anno):
             st_status.info("✅ Login OK")
 
             # BUSTA PAGA
-            st_status.info("💰 Busta Paga...")
+            st_status.info("💰 Busta...")
             try:
                 page.click("text=I miei dati")
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
@@ -160,17 +160,14 @@ def scarica_documenti_automatici(mese_nome, anno):
                     page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                     time.sleep(3)
                 
-                # MENU TIME
+                # TIME
                 st_status.info("📂 Time...")
                 time_clicked = False
                 try:
                     result = page.evaluate("""
                         () => {
                             const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
-                            if (time_elem) {
-                                time_elem.click();
-                                return 'OK';
-                            }
+                            if (time_elem) { time_elem.click(); return 'OK'; }
                             return 'NOT_FOUND';
                         }
                     """)
@@ -194,7 +191,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 time.sleep(3)
                 
-                # CARTELLINO PRESENZE
+                # CARTELLINO
                 st_status.info("📋 Cartellino...")
                 cart_opened = False
                 
@@ -203,10 +200,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                     result = page.evaluate("""
                         () => {
                             const elem = document.getElementById('lnktab_5_label');
-                            if (elem) {
-                                elem.click();
-                                return 'OK';
-                            }
+                            if (elem) { elem.click(); return 'OK'; }
                             return 'NOT_FOUND';
                         }
                     """)
@@ -241,8 +235,6 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 time.sleep(5)
                 
-                st.image(page.screenshot(), caption="Pagina Cartellini (pre-date)", use_container_width=True)
-                
                 # Fix Agenda
                 if page.locator("text=Permessi del").count() > 0:
                     st_status.info("🔄 Fix Agenda...")
@@ -251,12 +243,11 @@ def scarica_documenti_automatici(mese_nome, anno):
                         time.sleep(3)
                     except: pass
                 
-                # DATE - ROBUSTE CON VERIFICA
-                st_status.info(f"✍️ DATE: {d_from_vis} → {d_to_vis}")
+                # DATE
+                st_status.info(f"✍️ Date: {d_from_vis} → {d_to_vis}")
                 
                 date_ok = False
                 
-                # TENTATIVO 1: Input diretti
                 try:
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
@@ -267,65 +258,46 @@ def scarica_documenti_automatici(mese_nome, anno):
                         dal.fill("")
                         time.sleep(0.3)
                         dal.type(d_from_vis, delay=100)
-                        time.sleep(0.5)
                         dal.press("Tab")
                         time.sleep(1)
-                        
-                        val_dal = dal.input_value()
-                        st_status.info(f"DAL: '{val_dal}' (atteso: '{d_from_vis}')")
                         
                         al.click(force=True)
                         page.keyboard.press("Control+A")
                         al.fill("")
                         time.sleep(0.3)
                         al.type(d_to_vis, delay=100)
-                        time.sleep(0.5)
                         al.press("Tab")
                         time.sleep(1)
                         
+                        val_dal = dal.input_value()
                         val_al = al.input_value()
-                        st_status.info(f"AL: '{val_al}' (atteso: '{d_to_vis}')")
                         
                         if val_dal == d_from_vis and val_al == d_to_vis:
                             date_ok = True
-                            st_status.success("✅ Date OK (input)")
-                except Exception as e:
-                    st_status.warning(f"Input date fallito: {str(e)[:50]}")
+                            st_status.success("✅ Date OK")
+                except: pass
                 
-                # TENTATIVO 2: JS Dojo
                 if not date_ok:
-                    st_status.info("🔧 Dojo JS...")
                     try:
                         result = page.evaluate(f"""
                             () => {{
-                                try {{
-                                    var ws = dijit.registry.toArray().filter(w => 
-                                        w.declaredClass === "dijit.form.DateTextBox" && 
-                                        w.domNode.offsetParent !== null
-                                    );
-                                    if (ws.length >= 2) {{
-                                        var i1 = ws.length >= 3 ? 1 : 0;
-                                        ws[i1].set('displayedValue', '{d_from_vis}');
-                                        ws[i1+1].set('displayedValue', '{d_to_vis}');
-                                        return 'OK: ' + ws[i1].get('displayedValue') + ' / ' + ws[i1+1].get('displayedValue');
-                                    }}
-                                    return 'NO_WIDGETS';
-                                }} catch(e) {{
-                                    return 'ERROR: ' + e.message;
+                                var ws = dijit.registry.toArray().filter(w => 
+                                    w.declaredClass === "dijit.form.DateTextBox" && 
+                                    w.domNode.offsetParent !== null
+                                );
+                                if (ws.length >= 2) {{
+                                    var i1 = ws.length >= 3 ? 1 : 0;
+                                    ws[i1].set('displayedValue', '{d_from_vis}');
+                                    ws[i1+1].set('displayedValue', '{d_to_vis}');
+                                    return 'OK';
                                 }}
+                                return 'NO_WIDGETS';
                             }}
                         """)
-                        st_status.info(f"JS result: {result}")
-                        if "OK" in str(result):
+                        if "OK" in str(result): 
                             date_ok = True
-                            st_status.success("✅ Date OK (JS)")
-                    except Exception as e:
-                        st_status.warning(f"JS fallito: {str(e)[:50]}")
-                
-                st.image(page.screenshot(), caption=f"Dopo date", use_container_width=True)
-                
-                if not date_ok:
-                    st_status.error(f"❌ DATE NON IMPOSTATE!")
+                            st_status.success("✅ Date JS")
+                    except: pass
                 
                 # Ricerca
                 st_status.info("🔍 Ricerca...")
@@ -343,79 +315,81 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 st.image(page.screenshot(), caption=f"Risultati", use_container_width=True)
                 
-                # Download - 3 metodi
+                # ✅ DOWNLOAD - Same tab con URL change
                 st_status.info(f"📄 Download {target_cart_row}...")
                 
                 pdf_downloaded = False
                 
-                # Metodo 1: Nuova pagina
+                # Salva URL corrente
+                old_url = page.url
+                st_status.info(f"URL pre-click: {old_url}")
+                
+                # Click sulla lente
                 try:
-                    with context.expect_page(timeout=10000) as new_page_info:
-                        try:
-                            row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                            row.scroll_into_view_if_needed()
-                            row.locator("img[src*='search16.png']").click()
-                        except:
-                            page.locator("img[src*='search16.png']").first.click()
+                    row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                    row.scroll_into_view_if_needed()
+                    row.locator("img[src*='search16.png']").click()
+                except:
+                    page.locator("img[src*='search16.png']").first.click()
+                
+                st_status.info("⏳ Attendo caricamento PDF...")
+                
+                # Aspetta cambio URL (max 15s)
+                try:
+                    page.wait_for_function(
+                        f"() => window.location.href !== '{old_url}'",
+                        timeout=15000
+                    )
+                    new_url = page.url
+                    st_status.info(f"✅ URL cambiato: {new_url}")
                     
-                    np = new_page_info.value
-                    np.wait_for_load_state("domcontentloaded")
-                    time.sleep(2)
+                    # Aspetta caricamento completo
+                    time.sleep(5)
                     
+                    # Salva PDF
                     path_cart = f"cartellino_{mese_num}_{anno}.pdf"
                     
-                    if ".pdf" in np.url.lower():
+                    # Se URL contiene "DOPDF=y", è un PDF embedded
+                    if "DOPDF=y" in new_url or "SERVIZIO=JPSC" in new_url:
+                        # Download PDF via requests con cookies
                         cs = {c['name']: c['value'] for c in context.cookies()}
+                        response = requests.get(new_url, cookies=cs)
                         with open(path_cart, 'wb') as f:
-                            f.write(requests.get(np.url, cookies=cs).content)
-                    else:
-                        np.pdf(path=path_cart)
-                    
-                    np.close()
-                    pdf_downloaded = True
-                    st_status.success("✅ Cartellino OK")
-                except Exception as e:
-                    st_status.warning(f"Nuova pagina fallita: {str(e)[:50]}")
-                
-                # Metodo 2: Download diretto
-                if not pdf_downloaded:
-                    try:
-                        with page.expect_download(timeout=10000) as download_info:
-                            try:
-                                row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                                row.locator("img[src*='search16.png']").click()
-                            except:
-                                page.locator("img[src*='search16.png']").first.click()
-                        
-                        path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                        download_info.value.save_as(path_cart)
+                            f.write(response.content)
                         pdf_downloaded = True
-                        st_status.success("✅ Cartellino OK (download)")
-                    except Exception as e:
-                        st_status.warning(f"Download fallito: {str(e)[:50]}")
-                
-                # Metodo 3: Same tab
-                if not pdf_downloaded:
-                    try:
-                        old_url = page.url
-                        try:
-                            row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                            row.locator("img[src*='search16.png']").click()
-                        except:
-                            page.locator("img[src*='search16.png']").first.click()
-                        
-                        page.wait_for_url(lambda url: url != old_url, timeout=10000)
-                        time.sleep(3)
-                        
-                        path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                        st_status.success("✅ Cartellino OK (URL)")
+                    else:
+                        # Fallback: print to PDF
                         page.pdf(path=path_cart)
                         pdf_downloaded = True
-                        st_status.success("✅ Cartellino OK (same tab)")
+                        st_status.success("✅ Cartellino OK (PDF)")
+                        
+                except Exception as e:
+                    st_status.warning(f"URL change fallito: {str(e)[:50]}")
+                
+                # Fallback: aspetta popup/dialog
+                if not pdf_downloaded:
+                    st_status.info("🔧 Tentativo popup...")
+                    try:
+                        # Aspetta che sparisca il popup di caricamento
+                        page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
+                        time.sleep(3)
+                        
+                        new_url = page.url
+                        if new_url != old_url:
+                            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                            cs = {c['name']: c['value'] for c in context.cookies()}
+                            response = requests.get(new_url, cookies=cs)
+                            with open(path_cart, 'wb') as f:
+                                f.write(response.content)
+                            pdf_downloaded = True
+                            st_status.success("✅ Cartellino OK (popup)")
                     except Exception as e:
-                        st_status.warning(f"Same tab fallito: {str(e)[:50]}")
+                        st_status.warning(f"Popup fallito: {str(e)[:50]}")
                 
                 if not pdf_downloaded:
                     st_status.error("❌ Cartellino NON scaricato!")
+                    st.image(page.screenshot(), caption="Errore download", use_container_width=True)
 
             except Exception as e:
                 st_status.warning(f"Err Cart: {e}")
