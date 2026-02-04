@@ -11,7 +11,6 @@ import time
 import calendar
 import locale
 from pathlib import Path
-import PyPDF2  # ✅ AGGIUNGI QUESTO
 
 # --- SETUP CLOUD ---
 os.system("playwright install chromium")
@@ -90,19 +89,6 @@ if 'modelli_mostrati' not in st.session_state:
     st.sidebar.success(f"✅ {len(MODELLI_DISPONIBILI)} modelli AI pronti")
     st.session_state['modelli_mostrati'] = True
 
-# --- 🆕 ESTRATTORE TESTO PDF ---
-def estrai_testo_da_pdf(file_path):
-    """Estrae il testo raw dal PDF per debug"""
-    try:
-        with open(file_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            testo_completo = ""
-            for page in reader.pages:
-                testo_completo += page.extract_text() + "\n"
-            return testo_completo
-    except Exception as e:
-        return f"Errore estrazione: {e}"
-
 # --- PARSING AI ---
 def clean_json_response(text):
     """Estrae JSON pulito da risposta AI"""
@@ -114,8 +100,8 @@ def clean_json_response(text):
     except: 
         return None
 
-def estrai_con_fallback(file_path, prompt, tipo="documento", debug=False):
-    """✅ Prova multipli modelli Gemini con fallback + debug mode"""
+def estrai_con_fallback(file_path, prompt, tipo="documento"):
+    """✅ Prova multipli modelli Gemini con fallback automatico"""
     if not file_path or not os.path.exists(file_path):
         return None
     
@@ -126,23 +112,6 @@ def estrai_con_fallback(file_path, prompt, tipo="documento", debug=False):
         st.error(f"❌ Il file {tipo} non è un PDF valido")
         return None
     
-    # 🆕 DEBUG MODE: Mostra contenuto testuale
-    if debug and tipo == "cartellino":
-        with st.expander("🔍 DEBUG: Contenuto PDF Cartellino"):
-            testo_raw = estrai_testo_da_pdf(file_path)
-            st.text_area("Testo estratto dal PDF:", testo_raw, height=300)
-            
-            # Conta righe che sembrano date
-            righe = testo_raw.split('\n')
-            date_trovate = [r for r in righe if re.search(r'\d{2}/\d{2}/\d{4}', r)]
-            st.info(f"📊 Righe con date trovate: **{len(date_trovate)}**")
-            
-            if len(date_trovate) > 0:
-                st.write("**Prime 5 righe con date:**")
-                for riga in date_trovate[:5]:
-                    st.code(riga)
-    
-    # Progress bar
     progress_placeholder = st.empty()
     
     for idx, (nome_modello, modello) in enumerate(MODELLI_DISPONIBILI, 1):
@@ -170,7 +139,6 @@ def estrai_con_fallback(file_path, prompt, tipo="documento", debug=False):
             else:
                 continue
     
-    # Tutti falliti
     progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite)")
     return None
 
@@ -254,10 +222,10 @@ def estrai_dati_busta_dettagliata(file_path):
     }
     """
     
-    return estrai_con_fallback(file_path, prompt, tipo="busta paga", debug=False)
+    return estrai_con_fallback(file_path, prompt, tipo="busta paga")
 
 def estrai_dati_cartellino(file_path):
-    """Estrae dati dal cartellino - CON DEBUG MODE"""
+    """Estrae dati dal cartellino - CON DEBUG INTEGRATO"""
     
     prompt = """
     Sei un esperto nell'analisi di cartellini presenze GOTTARDO S.p.A.
@@ -291,7 +259,7 @@ def estrai_dati_cartellino(file_path):
     ```
     → Conta quante date/giorni vedi elencati
     
-    TIPO C - VUOTO:
+    TIPO C - VUOTO (SOLO INTESTAZIONE):
     ```
     Periodo: 01/12/2025 - 31/12/2025
     Nessun dato disponibile
@@ -308,16 +276,37 @@ def estrai_dati_cartellino(file_path):
     {
         "giorni_reali": <numero di giorni lavorati rilevati>,
         "giorni_senza_badge": <numero anomalie>,
-        "note": "<descrizione di cosa hai trovato>"
+        "note": "<descrizione di cosa hai trovato>",
+        "debug_prime_righe": "<copia le prime 15 righe del PDF qui per debug>"
     }
 
     **ESEMPI DI NOTE:**
     - "Rilevate 26 timbrature complete da 01/12 a 30/12"
     - "Trovate 22 date nel periodo, 2 con badge mancante"
-    - "PDF vuoto, nessuna timbratura presente"
+    - "Il PDF mostra solo la schermata dei parametri di ricerca e un raggruppamento per il mese 12/2025. Non è presente l'elenco dettagliato delle timbrature giornaliere (Tipo C)."
+    
+    **IMPORTANTE PER DEBUG:**
+    Nel campo "debug_prime_righe" copia ESATTAMENTE le prime 10-15 righe di testo che vedi nel PDF,
+    anche se sembrano header o intestazioni. Questo ci serve per capire il formato.
     """
     
-    return estrai_con_fallback(file_path, prompt, tipo="cartellino", debug=True)
+    result = estrai_con_fallback(file_path, prompt, tipo="cartellino")
+    
+    # Mostra debug se disponibile
+    if result and 'debug_prime_righe' in result:
+        with st.expander("🔍 DEBUG: Prime righe estratte dall'AI"):
+            st.text(result['debug_prime_righe'])
+            
+            # Conta date nel testo debug
+            date_trovate = re.findall(r'\d{2}/\d{2}/\d{4}', result['debug_prime_righe'])
+            st.info(f"📊 Date trovate nel testo: **{len(date_trovate)}**")
+            
+            if len(date_trovate) > 0:
+                st.write("**Prime 5 date:**")
+                for data in date_trovate[:5]:
+                    st.code(data)
+    
+    return result
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -341,9 +330,9 @@ def pulisci_file(path_busta, path_cart):
     if file_eliminati:
         st.info(f"🗑️ File eliminati: {', '.join(file_eliminati)}")
 
-# --- CORE BOT (invariato) ---
+# --- CORE BOT ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot con gestione duplicati Dicembre"""
+    """✅ Bot con gestione duplicati Dicembre + fix download cartellino"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
@@ -466,77 +455,166 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e: 
                 st.error(f"Errore: {e}")
 
-            # CARTELLINO
+            # CARTELLINO - ✅ FIX COMPLETO
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 try:
-                    page.evaluate("window.scrollTo(0, 0)"); time.sleep(2)
-                    try: page.keyboard.press("Escape"); time.sleep(1)
-                    except: pass
+                    page.evaluate("window.scrollTo(0, 0)")
+                    time.sleep(2)
+                    try: 
+                        page.keyboard.press("Escape")
+                        time.sleep(1)
+                    except: 
+                        pass
                     
+                    # Torna alla home
                     try:
                         logo = page.locator("img[src*='logo'], .logo").first
-                        if logo.is_visible(timeout=2000): logo.click(); time.sleep(2)
+                        if logo.is_visible(timeout=2000): 
+                            logo.click()
+                            time.sleep(2)
                     except:
                         page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                         time.sleep(3)
                     
+                    # Vai su Time
                     page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     time.sleep(3)
+                    
+                    # Vai su Cartellino presenze
                     page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
                     
+                    # Chiudi eventuali popup
                     if page.locator("text=Permessi del").count() > 0:
-                        try: page.locator(".z-icon-print").first.click(); time.sleep(3)
-                        except: pass
+                        try: 
+                            page.locator(".z-icon-print").first.click()
+                            time.sleep(3)
+                        except: 
+                            pass
                     
+                    # Imposta date
                     try:
                         dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                         al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                         
                         if dal.count() > 0 and al.count() > 0:
-                            dal.click(force=True); page.keyboard.press("Control+A"); dal.fill("")
-                            dal.type(d_from_vis, delay=100); dal.press("Tab"); time.sleep(1)
-                            al.click(force=True); page.keyboard.press("Control+A"); al.fill("")
-                            al.type(d_to_vis, delay=100); al.press("Tab"); time.sleep(1)
-                    except: pass
+                            dal.click(force=True)
+                            page.keyboard.press("Control+A")
+                            dal.fill("")
+                            dal.type(d_from_vis, delay=100)
+                            dal.press("Tab")
+                            time.sleep(1)
+                            
+                            al.click(force=True)
+                            page.keyboard.press("Control+A")
+                            al.fill("")
+                            al.type(d_to_vis, delay=100)
+                            al.press("Tab")
+                            time.sleep(1)
+                    except Exception as e:
+                        st.warning(f"⚠️ Errore date: {e}")
                     
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); time.sleep(1)
+                    # Esegui ricerca
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(1)
+                    
                     try: 
                         page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
-                    except: page.keyboard.press("Enter")
+                    except: 
+                        page.keyboard.press("Enter")
+                    
+                    # Aspetta risultati
                     time.sleep(5)
                     
-                    old_url = page.url
                     try:
-                        page.locator(f"tr:has-text('{target_cart_row}')").first.locator("img[src*='search16.png']").click()
+                        page.wait_for_selector("text=Risultati della ricerca", timeout=10000)
+                        st.info("✅ Risultati ricerca trovati")
                     except:
-                        page.locator("img[src*='search16.png']").first.click()
+                        st.warning("⚠️ Timeout risultati")
+                    
+                    # ✅ CERCA LA RIGA CON IL MESE CORRETTO
+                    target_cart_text = f"{mese_num}/{str(anno)[-2:]}"  # Es: "12/25"
+                    st.info(f"🔍 Ricerca riga: {target_cart_text}")
                     
                     try:
-                        page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=30000)
-                    except: time.sleep(3)
+                        riga_target = page.locator(f"tr:has-text('{target_cart_text}')").first
+                        
+                        if riga_target.count() > 0:
+                            st.success(f"✅ Riga trovata")
+                            
+                            # Clicca sull'icona search nella riga
+                            try:
+                                icona_search = riga_target.locator("img[src*='search']").first
+                                
+                                if icona_search.count() > 0:
+                                    st.info("📥 Click su dettaglio...")
+                                    old_url = page.url
+                                    
+                                    icona_search.click()
+                                    time.sleep(5)
+                                    
+                                    new_url = page.url
+                                    
+                                    if new_url != old_url:
+                                        st.success(f"✅ Nuova pagina aperta")
+                                        
+                                        # Aspetta caricamento
+                                        try:
+                                            page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
+                                        except:
+                                            time.sleep(3)
+                                        
+                                        # Scarica PDF
+                                        try:
+                                            cs = {c['name']: c['value'] for c in context.cookies()}
+                                            response = requests.get(new_url, cookies=cs, timeout=30)
+                                            
+                                            if b'%PDF' in response.content[:10]:
+                                                with open(path_cart, 'wb') as f:
+                                                    f.write(response.content)
+                                                st.success("✅ PDF via HTTP")
+                                            else:
+                                                page.pdf(path=path_cart)
+                                                st.success("✅ PDF generato")
+                                        except Exception as e:
+                                            st.warning(f"⚠️ Tentativo 1 fallito: {e}")
+                                            page.pdf(path=path_cart)
+                                            st.success("✅ PDF fallback")
+                                    else:
+                                        st.warning("⚠️ URL non cambiato")
+                                        time.sleep(3)
+                                        page.pdf(path=path_cart)
+                                else:
+                                    st.error("❌ Icona search non trovata")
+                            except Exception as e:
+                                st.error(f"❌ Errore click: {e}")
+                        else:
+                            st.warning(f"⚠️ Riga '{target_cart_text}' non trovata")
+                            # Fallback: prima icona
+                            try:
+                                page.locator("img[src*='search16.png']").first.click()
+                                time.sleep(5)
+                                page.pdf(path=path_cart)
+                            except:
+                                pass
+                    except Exception as e:
+                        st.error(f"❌ Errore ricerca riga: {e}")
                     
-                    time.sleep(2)
-                    new_url = page.url
-                    
-                    if new_url != old_url:
-                        try:
-                            cs = {c['name']: c['value'] for c in context.cookies()}
-                            response = requests.get(new_url, cookies=cs, timeout=30)
-                            with open(path_cart, 'wb') as f: 
-                                f.write(response.content if b'%PDF' in response.content[:10] else page.pdf())
-                        except: 
-                            page.pdf(path=path_cart)
-                    else:
-                        page.pdf(path=path_cart)
-                    
+                    # Verifica file
                     if os.path.exists(path_cart):
-                        cart_ok = True
-                        st_status.success(f"✅ Cartellino scaricato")
+                        size = os.path.getsize(path_cart)
+                        
+                        if size > 5000:  # Almeno 5KB
+                            cart_ok = True
+                            st_status.success(f"✅ Cartellino OK ({size} bytes)")
+                        else:
+                            st.warning(f"⚠️ PDF piccolo ({size} bytes)")
+                    else:
+                        st.error("❌ File non trovato")
 
                 except Exception as e:
-                    st.error(f"Errore cartellino: {e}")
+                    st.error(f"❌ Errore cartellino: {e}")
 
             browser.close()
             
@@ -627,10 +705,9 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.session_state['dc'] = dc
             st.session_state['done'] = True
             
-            # 🆕 NON CANCELLARE subito i PDF in debug mode
-            # pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
-            # st.session_state.pop('busta', None)
-            # st.session_state.pop('cart', None)
+            pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
+            st.session_state.pop('busta', None)
+            st.session_state.pop('cart', None)
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
