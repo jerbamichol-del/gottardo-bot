@@ -11,7 +11,6 @@ import time
 import calendar
 import locale
 from pathlib import Path
-import base64
 
 # --- SETUP CLOUD ---
 os.system("playwright install chromium")
@@ -37,41 +36,24 @@ except Exception as e:
     st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
-# Groq API Key (fallback)
-try:
-    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", None)
-except:
-    GROQ_API_KEY = None
-
+# ✅ CONFIGURA MULTIPLI MODELLI GEMINI (quote separate)
 genai.configure(api_key=GOOGLE_API_KEY)
-try: 
-    model = genai.GenerativeModel('gemini-flash-latest')
-except: 
-    model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- CONVERSIONE PDF -> IMMAGINI PER GROQ ---
-def pdf_to_images(pdf_path):
-    """Converte PDF in immagini per Groq"""
-    try:
-        import fitz  # PyMuPDF
-        doc = fitz.open(pdf_path)
-        images = []
-        
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom per qualità
-            img_bytes = pix.tobytes("png")
-            img_base64 = base64.b64encode(img_bytes).decode()
-            images.append(img_base64)
-        
-        doc.close()
-        return images
-    except ImportError:
-        st.error("❌ PyMuPDF non installato. Aggiungi 'pymupdf' a requirements.txt")
-        return None
-    except Exception as e:
-        st.error(f"❌ Errore conversione PDF: {e}")
-        return None
+try:
+    model_flash = genai.GenerativeModel('gemini-1.5-flash')
+    model_pro = genai.GenerativeModel('gemini-1.5-pro')
+    model_flash_exp = genai.GenerativeModel('gemini-2.0-flash-exp')
+except Exception as e:
+    st.error(f"⚠️ Errore inizializzazione modelli: {e}")
+    model_flash = genai.GenerativeModel('gemini-flash-latest')
+    model_pro = None
+    model_flash_exp = None
+
+MODELLI_DISPONIBILI = [
+    ("Gemini 1.5 Flash", model_flash),
+    ("Gemini 1.5 Pro", model_pro),
+    ("Gemini 2.0 Flash Exp", model_flash_exp)
+]
 
 # --- PARSING AI ---
 def clean_json_response(text):
@@ -83,9 +65,50 @@ def clean_json_response(text):
     except: 
         return None
 
-def estrai_dati_busta_dettagliata(file_path):
+def estrai_con_fallback(file_path, prompt, tipo="documento"):
+    """✅ Prova multipli modelli Gemini con fallback automatico"""
     if not file_path or not os.path.exists(file_path):
         return None
+    
+    with open(file_path, "rb") as f: 
+        bytes_data = f.read()
+    
+    # Prova ogni modello in sequenza
+    for nome_modello, modello in MODELLI_DISPONIBILI:
+        if modello is None:
+            continue
+            
+        try:
+            st.info(f"🔄 Analisi {tipo} con {nome_modello}...")
+            response = modello.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
+            result = clean_json_response(response.text)
+            
+            if result:
+                st.success(f"✅ {tipo.capitalize()} analizzato con {nome_modello}")
+                return result
+            else:
+                st.warning(f"⚠️ {nome_modello}: risposta non valida, provo il prossimo...")
+                
+        except Exception as e:
+            error_msg = str(e)
+            
+            if "429" in error_msg or "quota" in error_msg.lower():
+                st.warning(f"⚠️ {nome_modello}: quota esaurita, provo il prossimo...")
+            else:
+                st.warning(f"⚠️ {nome_modello}: errore ({error_msg[:100]}), provo il prossimo...")
+            
+            continue
+    
+    # ❌ Tutti i modelli falliti
+    st.error(f"❌ **Tutti i modelli Gemini hanno fallito per {tipo}**")
+    st.info("💡 **Possibili soluzioni:**\n"
+            "- Aspetta fino a mezzanotte UTC (01:00 CET) per il reset delle quote\n"
+            "- Il documento è stato scaricato, riprova l'analisi domani\n"
+            "- Controlla manualmente il PDF scaricato")
+    return None
+
+def estrai_dati_busta_dettagliata(file_path):
+    """Estrae dati dalla busta paga con fallback multi-modello"""
     
     prompt = """
     Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Segui ESATTAMENTE queste istruzioni:
@@ -164,106 +187,10 @@ def estrai_dati_busta_dettagliata(file_path):
     }
     """
     
-    # ✅ TENTATIVO 1: GEMINI
-    try:
-        with open(file_path, "rb") as f: 
-            bytes_data = f.read()
-        
-        response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
-        return clean_json_response(response.text)
-        
-    except Exception as e:
-        error_msg = str(e)
-        
-        # ✅ TENTATIVO 2: GROQ FALLBACK
-        if ("429" in error_msg or "quota" in error_msg.lower()) and GROQ_API_KEY:
-            st.warning("⚠️ Quota Gemini esaurita per busta paga, uso Groq...")
-            return estrai_dati_busta_groq(file_path, prompt)
-        else:
-            st.error(f"❌ Err busta AI: {e}")
-            return None
-
-def estrai_dati_busta_groq(file_path, prompt):
-    """Fallback Groq per busta paga"""
-    try:
-        from groq import Groq
-        
-        images = pdf_to_images(file_path)
-        if not images:
-            return None
-        
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        content = [
-            {"type": "text", "text": prompt},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{images[0]}"
-                }
-            }
-        ]
-        
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",  # ✅ CAMBIATO QUI
-            messages=[{"role": "user", "content": content}],
-            temperature=0.1,
-            max_tokens=2048
-        )
-        
-        result = clean_json_response(response.choices[0].message.content)
-        if result:
-            st.success("✅ Analisi busta completata con Groq (Llama 3.2 11B)")
-        return result
-        
-    except ImportError:
-        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
-        return None
-    except Exception as e:
-        st.error(f"❌ Errore Groq busta: {e}")
-        return None
-
-def estrai_dati_cartellino_groq(file_path, prompt):
-    """Fallback Groq per cartellino"""
-    try:
-        from groq import Groq
-        
-        images = pdf_to_images(file_path)
-        if not images:
-            return None
-        
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        content = [{"type": "text", "text": prompt}]
-        
-        for img_base64 in images[:3]:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
-            })
-        
-        response = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",  # ✅ CAMBIATO QUI
-            messages=[{"role": "user", "content": content}],
-            temperature=0.1,
-            max_tokens=1024
-        )
-        
-        result = clean_json_response(response.choices[0].message.content)
-        if result:
-            st.success("✅ Analisi cartellino completata con Groq (Llama 3.2 11B)")
-        return result
-        
-    except ImportError:
-        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
-        return None
-    except Exception as e:
-        st.error(f"❌ Errore Groq cartellino: {e}")
-        return None
+    return estrai_con_fallback(file_path, prompt, tipo="busta paga")
 
 def estrai_dati_cartellino(file_path):
-    if not file_path or not os.path.exists(file_path):
-        return None
+    """Estrae dati dal cartellino con fallback multi-modello"""
     
     prompt = """
     Questo PDF è un cartellino presenze o una ricerca.
@@ -296,64 +223,7 @@ def estrai_dati_cartellino(file_path):
     }
     """
     
-    # ✅ TENTATIVO 1: GEMINI
-    try:
-        with open(file_path, "rb") as f: 
-            bytes_data = f.read()
-        
-        response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
-        return clean_json_response(response.text)
-        
-    except Exception as e:
-        error_msg = str(e)
-        
-        # ✅ TENTATIVO 2: GROQ FALLBACK
-        if ("429" in error_msg or "quota" in error_msg.lower()) and GROQ_API_KEY:
-            st.warning("⚠️ Quota Gemini esaurita per cartellino, uso Groq...")
-            return estrai_dati_cartellino_groq(file_path, prompt)
-        else:
-            st.error(f"❌ Err cart AI: {e}")
-            return None
-
-def estrai_dati_cartellino_groq(file_path, prompt):
-    """Fallback Groq per cartellino"""
-    try:
-        from groq import Groq
-        
-        # Converti PDF in immagini
-        images = pdf_to_images(file_path)
-        if not images:
-            return None
-        
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        # Cartellino può avere più pagine, uso tutte le immagini
-        content = [{"type": "text", "text": prompt}]
-        
-        for img_base64 in images[:3]:  # Max 3 pagine per non superare token limit
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
-            })
-        
-        response = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
-            messages=[{"role": "user", "content": content}],
-            temperature=0.1,
-            max_tokens=1024
-        )
-        
-        result = clean_json_response(response.choices[0].message.content)
-        if result:
-            st.success("✅ Analisi cartellino completata con Groq")
-        return result
-        
-    except ImportError:
-        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
-        return None
-    except Exception as e:
-        st.error(f"❌ Errore Groq cartellino: {e}")
-        return None
+    return estrai_con_fallback(file_path, prompt, tipo="cartellino")
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -840,4 +710,3 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.info("ℹ️ Analisi comparativa non disponibile per Tredicesima.")
         else:
             st.warning("⚠️ Servono entrambi i documenti per l'analisi.")
-
