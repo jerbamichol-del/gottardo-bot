@@ -38,7 +38,7 @@ def clean_json_response(text):
         start = text.find('{')
         end = text.rfind('}') + 1
         return json.loads(text[start:end]) if start != -1 else json.loads(text)
-    except: return None
+except: return None
 
 def estrai_dati_busta_dettagliata(file_path):
     if not file_path: return None
@@ -89,7 +89,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 accept_downloads=True, 
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
             )
-            context.set_default_timeout(45000)
+            context.set_default_timeout(30000)
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
@@ -139,102 +139,125 @@ def scarica_documenti_automatici(mese_nome, anno):
             # CARTELLINO
             st_status.info("📅 Cartellino...")
             try:
+                # Reset navigazione
+                st_status.info("🏠 Reset...")
                 page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(1)
+                time.sleep(2)
                 
-                st.image(page.screenshot(), caption="Pre Menu Time", use_container_width=True)
-                
-                # MENU TIME - Con hover
-                st_status.info("📂 Apro Time...")
-                menu_opened = False
-                
-                # Tentativo con hover + click
+                # Chiudi dialog
                 try:
-                    time_menu = page.locator("text=Time").first
-                    time_menu.hover()  # ✅ HOVER prima di cliccare
-                    time.sleep(1)  # Aspetta espansione menu
-                    time_menu.click()
-                    menu_opened = True
-                    st_status.info("✅ Time aperto")
-                except Exception as e:
-                    st_status.warning(f"Time fallito: {str(e)[:50]}")
+                    page.keyboard.press("Escape")
+                    time.sleep(1)
+                except: pass
                 
-                if not menu_opened:
-                    try:
-                        time_span = page.locator('span[title="Time"]').first
-                        time_span.hover()
-                        time.sleep(1)
-                        time_span.click()
-                        menu_opened = True
-                        st_status.info("✅ Time aperto (span)")
-                    except: pass
+                # Torna alla home
+                try:
+                    logo = page.locator("img[src*='logo'], .logo").first
+                    if logo.is_visible(timeout=2000):
+                        logo.click()
+                        time.sleep(2)
+                except:
+                    page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+                    time.sleep(3)
                 
-                if not menu_opened:
-                    st_status.error("❌ Menu Time non trovato!")
-                    st.image(page.screenshot(), caption="Menu Time non trovato", use_container_width=True)
-                    raise Exception("Menu Time non accessibile")
+                st.image(page.screenshot(), caption="Dopo reset", use_container_width=True)
                 
-                # ✅ ATTESA ESPLICITA per sottomenu
-                time.sleep(3)
+                # MENU TIME
+                st_status.info("📂 Apro Time...")
                 
-                st.image(page.screenshot(), caption="Post Menu Time (sottomenu aperto?)", use_container_width=True)
+                # Cerca tutti gli elementi "Time" e clicca il primo visibile
+                time_clicked = False
+                try:
+                    time_elements = page.locator("*:has-text('Time')").all()
+                    for elem in time_elements:
+                        try:
+                            if elem.is_visible(timeout=500):
+                                text = elem.inner_text()
+                                if len(text) < 20:  # Evita elementi con troppo testo
+                                    elem.click(timeout=3000)
+                                    time_clicked = True
+                                    st_status.info(f"✅ Time: '{text}'")
+                                    break
+                        except:
+                            continue
+                except: pass
                 
-                # CARTELLINO PRESENZE - Tentativi multipli
-                st_status.info("📋 Cerco Cartellino presenze...")
+                if not time_clicked:
+                    st_status.error("❌ Time non trovato!")
+                    st.image(page.screenshot(), caption="Time non trovato", use_container_width=True)
+                    raise Exception("Menu Time non trovato")
+                
+                time.sleep(3)  # Aspetta espansione menu
+                
+                st.image(page.screenshot(), caption="Dopo Time", use_container_width=True)
+                
+                # ✅ CARTELLINO PRESENZE - CLICK JS CON ID ESATTO
+                st_status.info("📋 Cartellino presenze (JS)...")
                 cart_opened = False
                 
-                # Tentativo 1: Link diretto con wait
+                # Metodo 1: ID esatto (da inspector)
                 try:
-                    cart_link = page.wait_for_selector("text=Cartellino presenze", timeout=5000)
-                    cart_link.click()
-                    cart_opened = True
-                    st_status.info("✅ Cartellino aperto (text)")
+                    result = page.evaluate("""
+                        () => {
+                            const elem = document.getElementById('lnktab_5_label');
+                            if (elem) {
+                                elem.click();
+                                return 'OK';
+                            }
+                            return 'NOT_FOUND';
+                        }
+                    """)
+                    if result == 'OK':
+                        cart_opened = True
+                        st_status.info("✅ Cartellino (ID)")
                 except Exception as e:
-                    st_status.warning(f"Text Cartellino fallito: {str(e)[:50]}")
+                    st_status.warning(f"ID click fallito: {str(e)[:50]}")
                 
-                # Tentativo 2: Span/a con testo
+                # Metodo 2: Locator ID + click Playwright
                 if not cart_opened:
                     try:
-                        cart_locators = page.locator("*:has-text('Cartellino presenze')").all()
-                        for loc in cart_locators:
-                            if loc.is_visible():
-                                loc.click()
-                                cart_opened = True
-                                st_status.info("✅ Cartellino aperto (generic)")
-                                break
-                    except Exception as e:
-                        st_status.warning(f"Generic Cartellino fallito: {str(e)[:50]}")
-                
-                # Tentativo 3: Gestione cartoline (alternativa)
-                if not cart_opened:
-                    try:
-                        alt = page.locator("text=Gestione cartoline").first
-                        if alt.is_visible(timeout=2000):
-                            alt.click()
+                        cart_elem = page.locator("#lnktab_5_label")
+                        if cart_elem.is_visible(timeout=3000):
+                            cart_elem.click(force=True)
                             cart_opened = True
-                            st_status.info("✅ Gestione cartoline aperta")
+                            st_status.info("✅ Cartellino (locator)")
+                    except Exception as e:
+                        st_status.warning(f"Locator fallito: {str(e)[:50]}")
+                
+                # Metodo 3: Testo generico
+                if not cart_opened:
+                    try:
+                        cart = page.locator("text=Cartellino presenze").first
+                        if cart.is_visible(timeout=3000):
+                            cart.click()
+                            cart_opened = True
+                            st_status.info("✅ Cartellino (text)")
                     except: pass
                 
-                # Tentativo 4: Click su qualsiasi voce visibile del menu Time
+                # Metodo 4: Span Dojo con classe
                 if not cart_opened:
-                    st_status.warning("🔧 Tentativo click generico su menu...")
                     try:
-                        # Cerca tutti i link/span visibili dopo aver aperto Time
-                        menu_items = page.locator("span.z-menu-item-text, a:visible").all()
-                        for item in menu_items:
-                            text = item.inner_text().lower()
-                            if "cartellino" in text or "presenze" in text:
-                                item.click()
-                                cart_opened = True
-                                st_status.info(f"✅ Cliccato: {text}")
-                                break
-                    except Exception as e:
-                        st_status.warning(f"Menu items fallito: {str(e)[:50]}")
+                        result = page.evaluate("""
+                            () => {
+                                const spans = document.querySelectorAll('span.dijitButtonText');
+                                for (let span of spans) {
+                                    if (span.textContent.includes('Cartellino presenze')) {
+                                        span.click();
+                                        return 'OK';
+                                    }
+                                }
+                                return 'NOT_FOUND';
+                            }
+                        """)
+                        if result == 'OK':
+                            cart_opened = True
+                            st_status.info("✅ Cartellino (dijit)")
+                    except: pass
                 
                 if not cart_opened:
-                    st_status.error("❌ Cartellino presenze NON trovato!")
-                    st.image(page.screenshot(), caption="Cartellino non trovato - Menu completo", use_container_width=True)
-                    raise Exception("Voce Cartellino non accessibile")
+                    st_status.error("❌ Cartellino NON trovato!")
+                    st.image(page.screenshot(), caption="Cartellino non trovato", use_container_width=True)
+                    raise Exception("Cartellino non accessibile")
                 
                 time.sleep(5)
                 
@@ -267,7 +290,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                         al.type(d_to_vis, delay=80)
                         al.press("Tab")
                         time.sleep(0.5)
-                        st_status.info("✅ Date impostate")
+                        st_status.info("✅ Date OK")
                 except Exception as e:
                     st_status.warning(f"Date fallite: {str(e)[:50]}")
                     try:
@@ -284,10 +307,10 @@ def scarica_documenti_automatici(mese_nome, anno):
                                 }}
                             }}
                         """)
-                        st_status.info("✅ Date JS OK")
+                        st_status.info("✅ Date JS")
                     except: pass
                 
-                st.image(page.screenshot(), caption=f"Pre-ricerca {d_from_vis}→{d_to_vis}", use_container_width=True)
+                st.image(page.screenshot(), caption=f"Pre-ricerca", use_container_width=True)
                 
                 # Ricerca
                 st_status.info("🔍 Ricerca...")
@@ -303,7 +326,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 time.sleep(5)
                 
-                st.image(page.screenshot(), caption=f"Risultati {mese_nome}", use_container_width=True)
+                st.image(page.screenshot(), caption=f"Risultati", use_container_width=True)
                 
                 # Download
                 st_status.info(f"📄 Download {target_cart_row}...")
@@ -334,7 +357,7 @@ def scarica_documenti_automatici(mese_nome, anno):
 
             except Exception as e:
                 st_status.warning(f"Err Cart: {e}")
-                try: st.image(page.screenshot(), caption="Errore Cart Finale", use_container_width=True)
+                try: st.image(page.screenshot(), caption="Errore", use_container_width=True)
                 except: pass
 
             browser.close()
