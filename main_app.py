@@ -301,44 +301,64 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         else:
                             st.warning(f"⚠️ Tredicesima {anno} non trovata")
                     else:
-                        # ✅ NUOVA LOGICA: Trova TUTTI i link nella tabella documenti
-                        all_links = page.locator("a.z-label, a[href*='download']")
+                        # ✅ NUOVA STRATEGIA: Trova TUTTI i link <a> sulla pagina
+                        st.info("🔍 Ricerca cedolini disponibili...")
                         
-                        st.info(f"🔍 Analisi di {all_links.count()} link nella sezione cedolini...")
+                        # Aspetta che la lista sia caricata
+                        time.sleep(2)
+                        
+                        # Trova TUTTI i link (senza filtri)
+                        all_links = page.locator("a")
+                        total_links = all_links.count()
+                        
+                        st.info(f"📋 Trovati {total_links} link totali sulla pagina. Analisi in corso...")
                         
                         trovato = False
-                        for i in range(all_links.count()):
+                        links_con_mese = []
+                        
+                        for i in range(total_links):
                             try:
                                 txt = all_links.nth(i).inner_text().strip()
                                 
-                                # ✅ CONDIZIONI PRECISE:
-                                # 1. Deve contenere esattamente il target (es. "Dicembre 2025")
-                                # 2. NON deve contenere "Tredicesima", "13", "XIII"
+                                # Salta link vuoti
+                                if not txt or len(txt) < 3:
+                                    continue
                                 
-                                ha_target = target_busta.lower() in txt.lower()
-                                e_tredicesima = any(keyword in txt for keyword in ["Tredicesima", "13", "XIII", "13ma", "13MA"])
-                                
-                                if ha_target and not e_tredicesima:
-                                    st.success(f"✅ TROVATO CEDOLINO CORRETTO: '{txt}'")
+                                # Cerca link che contengono un mese e un anno (probabili cedolini)
+                                if any(mese in txt for mese in nomi_mesi_it) and str(anno) in txt:
+                                    links_con_mese.append((i, txt))
+                                    st.info(f"📄 Link {i}: '{txt}'")
                                     
-                                    with page.expect_download(timeout=20000) as dl:
-                                        all_links.nth(i).click()
+                                    # ✅ CONDIZIONE PRECISA
+                                    ha_target = target_busta.lower() in txt.lower()
+                                    e_tredicesima = any(kw in txt for kw in ["Tredicesima", "13", "XIII", "13ma", "13MA"])
                                     
-                                    dl.value.save_as(path_busta)
-                                    
-                                    if os.path.exists(path_busta):
-                                        busta_ok = True
-                                        st_status.success(f"✅ Cedolino scaricato: {os.path.getsize(path_busta)} bytes")
-                                        trovato = True
-                                    break
-                                elif e_tredicesima and target_busta.split()[0] in txt:
-                                    # È una tredicesima per lo stesso mese - skippa
-                                    st.info(f"⏭️ Skip (Tredicesima): '{txt}'")
+                                    if ha_target and not e_tredicesima:
+                                        st.success(f"✅ CEDOLINO CORRETTO: '{txt}'")
+                                        
+                                        with page.expect_download(timeout=20000) as dl:
+                                            all_links.nth(i).click()
+                                        
+                                        dl.value.save_as(path_busta)
+                                        
+                                        if os.path.exists(path_busta):
+                                            busta_ok = True
+                                            st_status.success(f"✅ Cedolino scaricato: {os.path.getsize(path_busta)} bytes")
+                                            trovato = True
+                                        break
                             except:
                                 continue
                         
                         if not trovato:
-                            st.warning(f"⚠️ Cedolino '{target_busta}' non trovato tra i {all_links.count()} documenti disponibili")
+                            st.warning(f"⚠️ Cedolino '{target_busta}' non trovato")
+                            if links_con_mese:
+                                st.info(f"📋 Cedolini disponibili trovati: {len(links_con_mese)}")
+                                for idx, nome in links_con_mese[:10]:  # Mostra max 10
+                                    st.write(f"  - {nome}")
+                            else:
+                                st.error("❌ Nessun cedolino trovato. Screenshot della pagina:")
+                                screenshot = page.screenshot()
+                                st.image(screenshot, caption="Pagina documenti", use_container_width=True)
                             
                 except Exception as e:
                     st.error(f"❌ Errore download: {e}")
