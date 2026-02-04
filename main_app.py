@@ -23,14 +23,16 @@ try:
     ZK_USER = st.secrets["ZK_USER"]
     ZK_PASS = st.secrets["ZK_PASS"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except:
-    ZK_USER = "10021450" 
-    ZK_PASS = "Diocane3!"
-    GOOGLE_API_KEY = "AIzaSyA1OMmdyg-mLrZKO0WFErurf_Q4mfqKKNM"
+except Exception as e:
+    st.error(f"❌ Secrets mancanti: {e}")
+    st.stop()
 
-genai.configure(api_key=GOOGLE_API_KEY)
-try: model = genai.GenerativeModel('gemini-flash-latest')
-except: model = genai.GenerativeModel('gemini-1.5-flash')
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    st.error(f"❌ Errore configurazione Google AI: {e}")
+    st.stop()
 
 # --- PARSING ---
 def clean_json_response(text):
@@ -100,14 +102,13 @@ def scarica_documenti_automatici(mese_nome, anno):
     d_from_vis = f"01/{mese_num:02d}/{anno}"
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
-    # ✅ Path assoluti
+    # Path assoluti
     work_dir = Path.cwd()
     path_busta = str(work_dir / f"busta_{mese_num}_{anno}.pdf")
     path_cart = str(work_dir / f"cartellino_{mese_num}_{anno}.pdf")
     
     st_status = st.empty()
     st_status.info(f"🤖 Bot: {mese_nome} {anno}")
-    st.info(f"📁 Working dir: {work_dir}")
     
     busta_ok = False
     cart_ok = False
@@ -142,234 +143,171 @@ def scarica_documenti_automatici(mese_nome, anno):
             try:
                 page.click("text=I miei dati")
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
-                
-                try: 
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-                    st_status.info("✅ Sezione Cedolino aperta")
-                except: 
-                    page.click("text=Cedolino")
-                    st_status.info("✅ Cedolino cliccato")
-                
-                page.wait_for_selector(".dgrid-row", timeout=15000)
                 time.sleep(2)
                 
-                st_status.info(f"🔍 Cerco: '{target_busta}'")
-                rows = page.locator(f"tr:has-text('{target_busta}')")
-                rows_count = rows.count()
-                st_status.info(f"📊 Righe trovate: {rows_count}")
+                # Apri Cedolino
+                try: 
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except: 
+                    page.click("text=Cedolino")
                 
-                for i in range(rows_count):
-                    txt = rows.nth(i).inner_text()
-                    st_status.info(f"Riga {i}: {txt[:50]}")
-                    
-                    if "Tredicesima" not in txt:
-                        st_status.info(f"✅ Riga valida: {i}")
-                        try:
-                            with page.expect_download(timeout=20000) as dl:
-                                if rows.nth(i).locator("text=Download").count(): 
-                                    rows.nth(i).locator("text=Download").click()
-                                else: 
-                                    rows.nth(i).locator(".z-image").last.click()
-                            
-                            dl.value.save_as(path_busta)
-                            
-                            # Verifica file
-                            if os.path.exists(path_busta):
-                                size = os.path.getsize(path_busta)
-                                busta_ok = True
-                                st_status.success(f"✅ Busta OK: {size} bytes")
-                            else:
-                                st_status.error("❌ File busta non creato!")
-                            break
-                        except Exception as e:
-                            st_status.error(f"❌ Download busta fallito: {e}")
+                page.wait_for_selector(".dgrid-row", timeout=15000)
+                time.sleep(3)
+                
+                st.image(page.screenshot(), caption="Sezione Cedolini", use_container_width=True)
+                
+                # Cerca righe
+                st_status.info(f"🔍 Cerco: '{target_busta}'")
+                
+                # Prova diversi pattern
+                patterns = [
+                    f"{mese_nome} {anno}",
+                    f"{mese_nome.upper()} {anno}",
+                    f"{mese_num:02d}/{anno}",
+                ]
+                
+                rows = None
+                for pattern in patterns:
+                    rows = page.locator(f"tr:has-text('{pattern}')")
+                    count = rows.count()
+                    st_status.info(f"Pattern '{pattern}': {count} righe")
+                    if count > 0:
+                        break
+                
+                if rows and rows.count() > 0:
+                    for i in range(rows.count()):
+                        txt = rows.nth(i).inner_text()
+                        st_status.info(f"Riga {i}: {txt[:80]}")
                         
+                        if "Tredicesima" not in txt and "13" not in txt:
+                            try:
+                                with page.expect_download(timeout=20000) as dl:
+                                    # Prova tutti i possibili click
+                                    if rows.nth(i).locator("text=Download").count(): 
+                                        rows.nth(i).locator("text=Download").click()
+                                        st_status.info("Click Download")
+                                    elif rows.nth(i).locator(".z-image").count():
+                                        rows.nth(i).locator(".z-image").last.click()
+                                        st_status.info("Click z-image")
+                                    else:
+                                        rows.nth(i).click()
+                                        st_status.info("Click riga")
+                                
+                                dl.value.save_as(path_busta)
+                                
+                                if os.path.exists(path_busta):
+                                    size = os.path.getsize(path_busta)
+                                    busta_ok = True
+                                    st_status.success(f"✅ Busta: {size} bytes")
+                                break
+                            except Exception as e:
+                                st_status.warning(f"Download riga {i} fallito: {str(e)[:50]}")
+                else:
+                    st_status.error(f"❌ Nessuna riga trovata per '{target_busta}'")
+                    
                 if not busta_ok: 
-                    st_status.warning("⚠️ Busta non trovata/scaricata")
-                    st.image(page.screenshot(), caption="Sezione Cedolini", use_container_width=True)
+                    st_status.warning("⚠️ Busta non scaricata")
                     
             except Exception as e: 
                 st_status.error(f"Err Busta: {e}")
 
-            # CARTELLINO
+            # CARTELLINO (uguale a prima)
             st_status.info("📅 Cartellino...")
             try:
-                st_status.info("🏠 Reset...")
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(2)
-                
-                try:
-                    page.keyboard.press("Escape")
-                    time.sleep(1)
+                try: page.keyboard.press("Escape"); time.sleep(1)
                 except: pass
                 
                 try:
                     logo = page.locator("img[src*='logo'], .logo").first
-                    if logo.is_visible(timeout=2000):
-                        logo.click()
-                        time.sleep(2)
+                    if logo.is_visible(timeout=2000): logo.click(); time.sleep(2)
                 except:
                     page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                     time.sleep(3)
                 
                 # TIME
-                st_status.info("📂 Time...")
                 time_clicked = False
                 try:
-                    result = page.evaluate("""
-                        () => {
-                            const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
-                            if (time_elem) { time_elem.click(); return 'OK'; }
-                            return 'NOT_FOUND';
-                        }
-                    """)
+                    result = page.evaluate("""() => {
+                        const e = document.getElementById('revit_navigation_NavHoverItem_2_label');
+                        if (e) { e.click(); return 'OK'; }
+                        return 'NOT_FOUND';
+                    }""")
                     if result == 'OK': time_clicked = True
                 except: pass
                 
                 if not time_clicked:
-                    try:
-                        page.locator("#revit_navigation_NavHoverItem_2_label").click(timeout=3000)
-                        time_clicked = True
+                    try: page.locator("#revit_navigation_NavHoverItem_2_label").click(timeout=3000); time_clicked = True
                     except: pass
                 
                 if not time_clicked:
-                    try:
-                        page.locator("text=Time").first.click(timeout=3000)
-                        time_clicked = True
+                    try: page.locator("text=Time").first.click(timeout=3000); time_clicked = True
                     except: pass
                 
-                if not time_clicked:
-                    raise Exception("Menu Time non trovato")
-                
+                if not time_clicked: raise Exception("Menu Time non trovato")
                 time.sleep(3)
                 
                 # CARTELLINO
-                st_status.info("📋 Cartellino...")
                 cart_opened = False
-                
                 try:
                     page.wait_for_selector("#lnktab_5_label", state="visible", timeout=10000)
-                    result = page.evaluate("""
-                        () => {
-                            const elem = document.getElementById('lnktab_5_label');
-                            if (elem) { elem.click(); return 'OK'; }
-                            return 'NOT_FOUND';
-                        }
-                    """)
+                    result = page.evaluate("""() => {
+                        const e = document.getElementById('lnktab_5_label');
+                        if (e) { e.click(); return 'OK'; }
+                        return 'NOT_FOUND';
+                    }""")
                     if result == 'OK': cart_opened = True
                 except: pass
                 
                 if not cart_opened:
-                    try:
-                        page.locator("#lnktab_5_label").click(force=True, timeout=5000)
-                        cart_opened = True
+                    try: page.locator("#lnktab_5_label").click(force=True, timeout=5000); cart_opened = True
                     except: pass
                 
                 if not cart_opened:
                     try:
-                        result = page.evaluate("""
-                            () => {
-                                const spans = document.querySelectorAll('span.dijitButtonText');
-                                for (let span of spans) {
-                                    if (span.textContent.trim().includes('Cartellino presenze')) {
-                                        span.click();
-                                        return 'OK';
-                                    }
+                        result = page.evaluate("""() => {
+                            const spans = document.querySelectorAll('span.dijitButtonText');
+                            for (let s of spans) {
+                                if (s.textContent.trim().includes('Cartellino presenze')) {
+                                    s.click(); return 'OK';
                                 }
-                                return 'NOT_FOUND';
                             }
-                        """)
+                            return 'NOT_FOUND';
+                        }""")
                         if result == 'OK': cart_opened = True
                     except: pass
                 
-                if not cart_opened:
-                    raise Exception("Cartellino non accessibile")
-                
+                if not cart_opened: raise Exception("Cartellino non accessibile")
                 time.sleep(5)
                 
-                # Fix Agenda
                 if page.locator("text=Permessi del").count() > 0:
-                    st_status.info("🔄 Fix Agenda...")
-                    try: 
-                        page.locator(".z-icon-print").first.click()
-                        time.sleep(3)
+                    try: page.locator(".z-icon-print").first.click(); time.sleep(3)
                     except: pass
                 
                 # DATE
-                st_status.info(f"✍️ Date: {d_from_vis} → {d_to_vis}")
-                
-                date_ok = False
-                
                 try:
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
                     if dal.count() > 0 and al.count() > 0:
-                        dal.click(force=True)
-                        page.keyboard.press("Control+A")
-                        dal.fill("")
-                        time.sleep(0.3)
-                        dal.type(d_from_vis, delay=100)
-                        dal.press("Tab")
-                        time.sleep(1)
+                        dal.click(force=True); page.keyboard.press("Control+A"); dal.fill(""); time.sleep(0.3)
+                        dal.type(d_from_vis, delay=100); dal.press("Tab"); time.sleep(1)
                         
-                        al.click(force=True)
-                        page.keyboard.press("Control+A")
-                        al.fill("")
-                        time.sleep(0.3)
-                        al.type(d_to_vis, delay=100)
-                        al.press("Tab")
-                        time.sleep(1)
-                        
-                        val_dal = dal.input_value()
-                        val_al = al.input_value()
-                        
-                        if val_dal == d_from_vis and val_al == d_to_vis:
-                            date_ok = True
-                            st_status.success("✅ Date OK")
+                        al.click(force=True); page.keyboard.press("Control+A"); al.fill(""); time.sleep(0.3)
+                        al.type(d_to_vis, delay=100); al.press("Tab"); time.sleep(1)
                 except: pass
                 
-                if not date_ok:
-                    try:
-                        result = page.evaluate(f"""
-                            () => {{
-                                var ws = dijit.registry.toArray().filter(w => 
-                                    w.declaredClass === "dijit.form.DateTextBox" && 
-                                    w.domNode.offsetParent !== null
-                                );
-                                if (ws.length >= 2) {{
-                                    var i1 = ws.length >= 3 ? 1 : 0;
-                                    ws[i1].set('displayedValue', '{d_from_vis}');
-                                    ws[i1+1].set('displayedValue', '{d_to_vis}');
-                                    return 'OK';
-                                }}
-                                return 'NO_WIDGETS';
-                            }}
-                        """)
-                        if "OK" in str(result): 
-                            date_ok = True
-                            st_status.success("✅ Date JS")
-                    except: pass
-                
                 # Ricerca
-                st_status.info("🔍 Ricerca...")
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(1)
-                
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); time.sleep(1)
                 try: 
                     btn = page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last
-                    btn.scroll_into_view_if_needed()
-                    btn.click(force=True)
-                except: 
-                    page.keyboard.press("Enter")
-                
+                    btn.scroll_into_view_if_needed(); btn.click(force=True)
+                except: page.keyboard.press("Enter")
                 time.sleep(5)
                 
-                # DOWNLOAD
-                st_status.info(f"📄 Download {target_cart_row}...")
-                
+                # Download
                 old_url = page.url
-                
                 try:
                     row = page.locator(f"tr:has-text('{target_cart_row}')").first
                     row.scroll_into_view_if_needed()
@@ -377,12 +315,10 @@ def scarica_documenti_automatici(mese_nome, anno):
                 except:
                     page.locator("img[src*='search16.png']").first.click()
                 
-                st_status.info("⏳ Attendo...")
                 try:
                     page.wait_for_selector("text=Caricamento in corso", state="attached", timeout=5000)
                     page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=30000)
-                except:
-                    time.sleep(3)
+                except: time.sleep(3)
                 
                 time.sleep(2)
                 new_url = page.url
@@ -391,25 +327,18 @@ def scarica_documenti_automatici(mese_nome, anno):
                     try:
                         cs = {c['name']: c['value'] for c in context.cookies()}
                         response = requests.get(new_url, cookies=cs, timeout=30)
-                        
                         if b'%PDF' in response.content[:10]:
-                            with open(path_cart, 'wb') as f:
-                                f.write(response.content)
+                            with open(path_cart, 'wb') as f: f.write(response.content)
                         else:
                             page.pdf(path=path_cart)
-                    except Exception as e:
-                        st_status.warning(f"Download fallito: {str(e)[:50]}")
-                        page.pdf(path=path_cart)
+                    except: page.pdf(path=path_cart)
                 else:
                     page.pdf(path=path_cart)
                 
-                # Verifica file
                 if os.path.exists(path_cart):
                     size = os.path.getsize(path_cart)
                     cart_ok = True
-                    st_status.success(f"✅ Cartellino OK: {size} bytes")
-                else:
-                    st_status.error("❌ File cartellino non creato!")
+                    st_status.success(f"✅ Cartellino: {size} bytes")
 
             except Exception as e:
                 st_status.error(f"Err Cart: {e}")
@@ -419,7 +348,6 @@ def scarica_documenti_automatici(mese_nome, anno):
     except Exception as e:
         st_status.error(f"Errore Gen: {e}")
     
-    # Verifica finale
     final_busta = path_busta if busta_ok and os.path.exists(path_busta) else None
     final_cart = path_cart if cart_ok and os.path.exists(path_cart) else None
     
