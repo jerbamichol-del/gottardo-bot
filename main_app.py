@@ -86,7 +86,7 @@ def estrai_dati_busta_dettagliata(file_path):
         - **Saldo:** Riga "SALDO" colonna P.A.R. (es. -4,03)
 
         **5. TREDICESIMA:**
-        - Se nel titolo o voci c'è "TREDICESIMA" o "13MA" → è_tredicesima = true
+        - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → è_tredicesima = true
         - Altrimenti → è_tredicesima = false
 
         **IMPORTANTE:**
@@ -174,16 +174,18 @@ def estrai_dati_cartellino(file_path):
         st.error(f"❌ Err cart AI: {e}")
         return None
 
-# --- CORE BOT (INVARIATO) ---
-def scarica_documenti_automatici(mese_nome, anno, scarica_tredicesima=False):
-    """✅ Aggiunto flag per tredicesima"""
+# --- CORE BOT ---
+def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
+    """
+    ✅ tipo_documento: "cedolino" o "tredicesima"
+    """
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
     except: return None, None
 
-    # ✅ Target diverso se tredicesima
-    if scarica_tredicesima:
+    # ✅ Target diverso a seconda del tipo
+    if tipo_documento == "tredicesima":
         target_busta = f"Tredicesima {anno}"
     else:
         target_busta = f"{mese_nome} {anno}"
@@ -195,13 +197,13 @@ def scarica_documenti_automatici(mese_nome, anno, scarica_tredicesima=False):
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
     work_dir = Path.cwd()
-    suffix = "_13" if scarica_tredicesima else ""
+    suffix = "_13" if tipo_documento == "tredicesima" else ""
     path_busta = str(work_dir / f"busta_{mese_num}_{anno}{suffix}.pdf")
     path_cart = str(work_dir / f"cartellino_{mese_num}_{anno}.pdf")
     
     st_status = st.empty()
-    tipo = "Tredicesima" if scarica_tredicesima else "Cedolino"
-    st_status.info(f"🤖 Bot: {tipo} {mese_nome} {anno}")
+    nome_tipo = "Tredicesima" if tipo_documento == "tredicesima" else "Cedolino"
+    st_status.info(f"🤖 Bot: {nome_tipo} {mese_nome} {anno}")
     
     busta_ok = False
     cart_ok = False
@@ -231,8 +233,8 @@ def scarica_documenti_automatici(mese_nome, anno, scarica_tredicesima=False):
             page.wait_for_selector("text=I miei dati", timeout=15000)
             st_status.info("✅ Login OK")
 
-            # BUSTA PAGA
-            st_status.info(f"💰 {tipo}...")
+            # BUSTA PAGA / TREDICESIMA
+            st_status.info(f"💰 {nome_tipo}...")
             try:
                 page.click("text=I miei dati")
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
@@ -246,28 +248,57 @@ def scarica_documenti_automatici(mese_nome, anno, scarica_tredicesima=False):
                 time.sleep(5)
                 
                 try:
-                    links = page.locator(f"a:has-text('{target_busta}')")
-                    
-                    if links.count() > 0:
-                        st.info(f"✅ Trovato: {target_busta}")
-                        with page.expect_download(timeout=20000) as dl:
-                            links.first.click()
-                        
-                        dl.value.save_as(path_busta)
-                        
-                        if os.path.exists(path_busta):
-                            busta_ok = True
-                            st_status.success(f"✅ {tipo}: {os.path.getsize(path_busta)} bytes")
+                    # ✅ LOGICA CORRETTA PER EVITARE TREDICESIMA
+                    if tipo_documento == "tredicesima":
+                        # Cerca esplicitamente "Tredicesima ANNO"
+                        links = page.locator(f"a:has-text('Tredicesima {anno}')")
+                        if links.count() > 0:
+                            st.info(f"✅ Trovata: Tredicesima {anno}")
+                            with page.expect_download(timeout=20000) as dl:
+                                links.first.click()
+                            
+                            dl.value.save_as(path_busta)
+                            
+                            if os.path.exists(path_busta):
+                                busta_ok = True
+                                st_status.success(f"✅ Tredicesima: {os.path.getsize(path_busta)} bytes")
+                        else:
+                            st.warning(f"⚠️ Tredicesima {anno} non trovata")
                     else:
-                        st.warning(f"⚠️ {target_busta} non trovato")
+                        # ✅ CERCA "Dicembre 2025" MA SKIPPA "Tredicesima"
+                        links = page.locator(f"a:has-text('{target_busta}')")
+                        
+                        if links.count() > 0:
+                            for i in range(links.count()):
+                                txt = links.nth(i).inner_text()
+                                st.info(f"Link {i}: {txt}")
+                                
+                                # ✅ SKIPPA ESPLICITAMENTE TREDICESIMA
+                                if "Tredicesima" in txt or "13ma" in txt or "13MA" in txt:
+                                    st.info(f"⏭️ Skip Tredicesima (riga {i})")
+                                    continue
+                                
+                                # ✅ Questo è il cedolino mensile!
+                                st.info(f"✅ Trovato cedolino: {txt}")
+                                with page.expect_download(timeout=20000) as dl:
+                                    links.nth(i).click()
+                                
+                                dl.value.save_as(path_busta)
+                                
+                                if os.path.exists(path_busta):
+                                    busta_ok = True
+                                    st_status.success(f"✅ Cedolino: {os.path.getsize(path_busta)} bytes")
+                                break
+                        else:
+                            st.warning(f"⚠️ {target_busta} non trovato")
                 except Exception as e:
-                    st.error(f"❌ Errore {tipo}: {e}")
+                    st.error(f"❌ Errore: {e}")
                     
             except Exception as e: 
-                st.error(f"Err {tipo}: {e}")
+                st.error(f"Err: {e}")
 
             # CARTELLINO (solo se NON è tredicesima)
-            if not scarica_tredicesima:
+            if tipo_documento != "tredicesima":
                 st_status.info("📅 Cartellino...")
                 try:
                     page.evaluate("window.scrollTo(0, 0)"); time.sleep(2)
@@ -344,13 +375,13 @@ def scarica_documenti_automatici(mese_nome, anno, scarica_tredicesima=False):
         st.error(f"Errore Gen: {e}")
     
     final_busta = path_busta if busta_ok else None
-    final_cart = path_cart if cart_ok and not scarica_tredicesima else None
+    final_cart = path_cart if cart_ok else None
     
-    st.success(f"📦 {tipo}: {final_busta}, Cart: {final_cart}")
+    st.success(f"📦 Busta: {final_busta}, Cart: {final_cart}")
     
     return final_busta, final_cart
 
-# --- UI AVANZATA ---
+# --- UI ---
 st.set_page_config(page_title="Gottardo Payroll Mobile", page_icon="💶", layout="wide")
 st.title("💶 Analisi Stipendio & Presenze")
 
@@ -360,16 +391,21 @@ with st.sidebar:
     sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                                      "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
     
-    # ✅ CHECKBOX TREDICESIMA
-    scarica_13 = st.checkbox("📦 Scarica Tredicesima (se disponibile)", value=False)
+    # ✅ RADIO BUTTON PER TIPO DOCUMENTO
+    tipo_doc = st.radio(
+        "Tipo documento",
+        ["📄 Cedolino Mensile", "🎄 Tredicesima"],
+        index=0
+    )
     
     if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
         st.session_state.clear()
-        busta, cart = scarica_documenti_automatici(sel_mese, sel_anno, scarica_tredicesima=scarica_13)
+        tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
+        busta, cart = scarica_documenti_automatici(sel_mese, sel_anno, tipo_documento=tipo)
         st.session_state['busta'] = busta
         st.session_state['cart'] = cart
+        st.session_state['tipo'] = tipo
         st.session_state['done'] = False
-        st.session_state['is_13'] = scarica_13
 
 if st.session_state.get('busta') or st.session_state.get('cart'):
     
@@ -383,7 +419,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
-    is_13 = st.session_state.get('is_13', False)
+    tipo = st.session_state.get('tipo', 'cedolino')
     
     # ✅ ALERT SE TREDICESIMA
     if db and db.get('e_tredicesima'):
@@ -479,7 +515,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             
             st.markdown("---")
             
-            if abs(diff) < 0.5:  # Tolleranza per arrotondamenti
+            if abs(diff) < 0.5:
                 st.success("✅ **Tutto perfetto!** I giorni lavorati corrispondono a quelli pagati.")
             elif diff > 0:
                 st.info(f"ℹ️ Hai lavorato **{diff:.1f} giorni in più** rispetto a quelli pagati.\n\n"
@@ -491,7 +527,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                           f"- **Ferie godute:** {db.get('ferie', {}).get('godute', 0):.2f} giorni\n"
                           f"- **Permessi:** {db.get('par', {}).get('fruite', 0):.2f} ore\n"
                           f"- Controlla nella tab 'Dettaglio Stipendio' → Ferie/Permessi")
-        elif is_13:
-            st.info("ℹ️ Analisi comparativa non disponibile per cedolino Tredicesima.")
+        elif tipo == "tredicesima":
+            st.info("ℹ️ Analisi comparativa non disponibile per Tredicesima.")
         else:
             st.warning("⚠️ Servono entrambi i documenti per l'analisi.")
