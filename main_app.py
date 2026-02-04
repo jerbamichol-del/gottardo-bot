@@ -36,76 +36,57 @@ except Exception as e:
     st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
-# ✅ AUTO-DISCOVERY MODELLI GEMINI (OBBLIGATORIO)
+# ✅ AUTO-DISCOVERY MODELLI GEMINI
 genai.configure(api_key=GOOGLE_API_KEY)
 
 @st.cache_resource
 def inizializza_modelli_gemini():
-    """
-    Auto-discovery: Scopre automaticamente tutti i modelli Gemini disponibili
-    che supportano generateContent con input multimodali (PDF)
-    """
+    """Auto-discovery: Scopre automaticamente tutti i modelli Gemini disponibili"""
     try:
         tutti_modelli = genai.list_models()
         
-        # Filtra modelli che supportano generateContent
         modelli_validi = [
             m for m in tutti_modelli 
             if 'generateContent' in m.supported_generation_methods
         ]
         
-        # Stampa DEBUG (importante!)
-        st.sidebar.info(f"🔍 Trovati {len(modelli_validi)} modelli totali")
-        
-        # Filtra solo Gemini
         modelli_gemini = []
         for m in modelli_validi:
             nome_pulito = m.name.replace('models/', '')
             
-            # Prendi solo modelli Gemini (esclude embedding, ecc.)
             if 'gemini' in nome_pulito.lower() and 'embedding' not in nome_pulito.lower():
                 try:
                     modello = genai.GenerativeModel(nome_pulito)
                     modelli_gemini.append((nome_pulito, modello))
-                except Exception as e:
-                    st.sidebar.warning(f"⚠️ {nome_pulito}: {str(e)[:50]}")
+                except:
                     continue
         
         if len(modelli_gemini) == 0:
-            st.error("❌ **NESSUN MODELLO GEMINI DISPONIBILE**")
-            st.info("📋 **Modelli trovati (potrebbero non supportare PDF):**")
-            for m in modelli_validi[:10]:
-                st.code(m.name)
+            st.error("❌ Nessun modello Gemini disponibile")
             st.stop()
         
-        # Ordina per preferenza (flash > pro > exp)
+        # Ordina per preferenza
         def priorita(nome):
-            if 'flash' in nome.lower() and 'exp' not in nome.lower():
+            if 'flash' in nome.lower() and 'lite' not in nome.lower():
                 return 0
-            elif 'pro' in nome.lower():
+            elif 'lite' in nome.lower():
                 return 1
-            elif 'exp' in nome.lower():
+            elif 'pro' in nome.lower():
                 return 2
             else:
                 return 3
         
         modelli_gemini.sort(key=lambda x: priorita(x[0]))
-        
         return modelli_gemini
         
     except Exception as e:
-        st.error(f"❌ Errore auto-discovery: {e}")
-        st.info("💡 Verifica che la Google API Key sia valida e abbia accesso a Gemini")
+        st.error(f"❌ Errore caricamento modelli: {e}")
         st.stop()
 
 MODELLI_DISPONIBILI = inizializza_modelli_gemini()
 
-# Mostra modelli caricati
 if 'modelli_mostrati' not in st.session_state:
-    st.sidebar.success(f"✅ **{len(MODELLI_DISPONIBILI)} modelli Gemini attivi**")
-    with st.sidebar.expander("🤖 Lista completa"):
-        for i, (nome, _) in enumerate(MODELLI_DISPONIBILI, 1):
-            st.text(f"{i}. {nome}")
+    st.sidebar.success(f"✅ {len(MODELLI_DISPONIBILI)} modelli AI pronti")
     st.session_state['modelli_mostrati'] = True
 
 # --- PARSING AI ---
@@ -122,21 +103,21 @@ def clean_json_response(text):
 def estrai_con_fallback(file_path, prompt, tipo="documento"):
     """✅ Prova multipli modelli Gemini con fallback automatico"""
     if not file_path or not os.path.exists(file_path):
-        st.error(f"❌ File {tipo} non trovato: {file_path}")
         return None
     
     with open(file_path, "rb") as f: 
         bytes_data = f.read()
     
-    # Verifica che sia un PDF valido
     if not bytes_data[:4] == b'%PDF':
         st.error(f"❌ Il file {tipo} non è un PDF valido")
         return None
     
-    # Prova ogni modello in sequenza
+    # Progress bar
+    progress_placeholder = st.empty()
+    
     for idx, (nome_modello, modello) in enumerate(MODELLI_DISPONIBILI, 1):
         try:
-            st.info(f"🔄 [{idx}/{len(MODELLI_DISPONIBILI)}] Analisi {tipo} con **{nome_modello}**...")
+            progress_placeholder.info(f"🔄 Analisi {tipo}: modello {idx}/{len(MODELLI_DISPONIBILI)}...")
             
             response = modello.generate_content([
                 prompt,
@@ -146,39 +127,28 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             result = clean_json_response(response.text)
             
             if result and isinstance(result, dict):
-                st.success(f"✅ {tipo.capitalize()} analizzato con **{nome_modello}**")
+                progress_placeholder.success(f"✅ {tipo.capitalize()} analizzato con successo!")
+                time.sleep(1)
+                progress_placeholder.empty()
                 return result
-            else:
-                st.warning(f"⚠️ {nome_modello}: risposta non valida JSON")
                 
         except Exception as e:
             error_msg = str(e)
             
-            # Stampa errore completo per debug
-            with st.expander(f"🐛 Debug errore {nome_modello}"):
-                st.code(error_msg)
-            
-            # Categorizza errori
             if "429" in error_msg or "quota" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
-                st.warning(f"⚠️ {nome_modello}: **quota esaurita**, provo il prossimo...")
+                continue
             elif "404" in error_msg or "not found" in error_msg.lower():
-                st.warning(f"⚠️ {nome_modello}: **non disponibile**, provo il prossimo...")
+                continue
             else:
-                st.warning(f"⚠️ {nome_modello}: errore generico")
-            
-            continue
+                continue
     
-    # ❌ Tutti i modelli falliti
-    st.error(f"❌ **Tutti i {len(MODELLI_DISPONIBILI)} modelli Gemini hanno fallito per {tipo}**")
-    st.info("💡 **Possibili soluzioni:**\n"
-            "- ⏰ Aspetta qualche minuto (limite rate RPM)\n"
-            "- 🔑 Verifica che la Google API Key sia valida: https://aistudio.google.com/apikey\n"
-            "- 📥 Scarica i PDF manualmente e caricali qui sotto per analisi manuale\n"
-            "- 💳 Considera di abilitare billing su Google Cloud (aumenta le quote)")
+    # Tutti falliti
+    progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite)")
+    st.info("💡 Riprova tra qualche ora o abilita billing su Google AI Studio")
     return None
 
 def estrai_dati_busta_dettagliata(file_path):
-    """Estrae dati dalla busta paga con fallback multi-modello"""
+    """Estrae dati dalla busta paga"""
     
     prompt = """
     Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Segui ESATTAMENTE queste istruzioni:
@@ -260,32 +230,61 @@ def estrai_dati_busta_dettagliata(file_path):
     return estrai_con_fallback(file_path, prompt, tipo="busta paga")
 
 def estrai_dati_cartellino(file_path):
-    """Estrae dati dal cartellino con fallback multi-modello"""
+    """Estrae dati dal cartellino - VERSIONE AGGRESSIVA"""
     
     prompt = """
-    Questo PDF è un cartellino presenze o una ricerca.
-    
-    **ANALISI RICHIESTA:**
-    
-    1. **SE vedi una TABELLA DETTAGLIATA con timbrature giornaliere:**
-       - Conta SOLO i giorni che hanno almeno UNA timbratura valida (entrata/uscita)
-       - NON contare sabati/domeniche/festività se non hanno timbrature
-       - giorni_reali = numero di giorni con timbrature
-       - giorni_senza_badge = giorni con anomalie (badge mancante, errori)
-       - note = "Analisi da timbrature dettagliate"
-    
-    2. **SE vedi SOLO "Periodo: XX/XX/XXXX - YY/YY/YYYY" SENZA tabella timbrature:**
-       - NON contare tutti i giorni del calendario
+    Analizza questo PDF di cartellino presenze/timbrature.
+
+    **REGOLE DI ANALISI:**
+
+    1. **CERCA PRIMA UNA TABELLA CON TIMBRATURE GIORNALIERE**
+       - Cerca colonne tipo: Data, Giorno, Entrata, Uscita, Ore, Timbrature
+       - Se trovi una tabella con almeno 3 righe di date → HAI TIMBRATURE DETTAGLIATE
+       
+    2. **SE HAI TIMBRATURE DETTAGLIATE:**
+       - Conta TUTTI i giorni che hanno almeno UNA timbratura (entrata O uscita)
+       - Includi ANCHE sabati/domeniche se hanno timbrature
+       - Conta come anomalie: giorni con "badge mancante", "errore", "anomalia"
+       - giorni_reali = numero totale giorni con timbrature (tipicamente 20-26 giorni/mese)
+       - giorni_senza_badge = numero giorni con anomalie
+       - note = "Rilevate [X] timbrature nel periodo"
+
+    3. **SE NON HAI TIMBRATURE (solo intestazione "Periodo: XX/XX/XXXX - YY/YY/YYYY"):**
        - giorni_reali = 0
        - giorni_senza_badge = 0
-       - note = "Cartellino senza timbrature dettagliate. Impossibile determinare i giorni lavorati effettivi. Usa i giorni pagati dalla busta paga come riferimento."
-    
+       - note = "Cartellino vuoto senza timbrature dettagliate"
+
+    **ESEMPI:**
+
+    ✅ CASO 1 - CON TIMBRATURE:
+    Se vedi una tabella tipo:
+    | Data       | Entrata | Uscita  | Ore  |
+    |------------|---------|---------|------|
+    | 01/12/2025 | 08:00   | 17:00   | 8:00 |
+    | 02/12/2025 | 08:05   | 16:58   | 7:53 |
+    | 03/12/2025 | ANOMALIA| -       | 0:00 |
+    ...
+    | 30/12/2025 | 08:02   | 17:01   | 8:01 |
+
+    → giorni_reali = 26 (conta tutte le righe con data)
+    → giorni_senza_badge = 1 (il 03/12)
+    → note = "Rilevate 26 timbrature nel periodo"
+
+    ❌ CASO 2 - SENZA TIMBRATURE:
+    Se vedi solo:
+    "Periodo: 01/12/2025 - 31/12/2025"
+    "Nessun dato disponibile"
+
+    → giorni_reali = 0
+    → giorni_senza_badge = 0
+    → note = "Cartellino vuoto senza timbrature dettagliate"
+
     **IMPORTANTE:**
-    - Non inventare dati se non ci sono timbrature
-    - Considera che un mese lavorativo tipico ha circa 20-23 giorni (esclusi weekend/festività)
-    - Se il documento è vuoto o non contiene dati utili, metti giorni_reali = 0
-    
-    Restituisci SOLO questo JSON (niente testo aggiuntivo):
+    - Un mese lavorativo NORMALE ha 20-26 giorni
+    - Se trovi una tabella con date → DEVI contare i giorni
+    - NON mettere giorni_reali = 0 se ci sono timbrature visibili!
+
+    Restituisci SOLO questo JSON:
     {
         "giorni_reali": int,
         "giorni_senza_badge": int,
@@ -294,55 +293,6 @@ def estrai_dati_cartellino(file_path):
     """
     
     return estrai_con_fallback(file_path, prompt, tipo="cartellino")
-
-# --- ANALISI MANUALE PDF ---
-def analisi_manuale_pdf():
-    """✅ Fallback: Carica PDF manualmente per analisi"""
-    st.warning("⚠️ **Modalità Analisi Manuale PDF**")
-    st.info("Carica i PDF scaricati manualmente per l'analisi")
-    
-    col_b, col_c = st.columns(2)
-    
-    with col_b:
-        uploaded_busta = st.file_uploader("📄 Busta Paga (PDF)", type=['pdf'], key="manual_busta")
-        
-    with col_c:
-        uploaded_cart = st.file_uploader("📅 Cartellino (PDF)", type=['pdf'], key="manual_cart")
-    
-    if st.button("🔍 Analizza PDF Caricati", type="primary"):
-        if not uploaded_busta:
-            st.error("❌ Carica almeno la busta paga")
-            return
-        
-        # Salva temporaneamente
-        path_busta = None
-        path_cart = None
-        
-        if uploaded_busta:
-            path_busta = f"temp_busta_{int(time.time())}.pdf"
-            with open(path_busta, "wb") as f:
-                f.write(uploaded_busta.read())
-        
-        if uploaded_cart:
-            path_cart = f"temp_cart_{int(time.time())}.pdf"
-            with open(path_cart, "wb") as f:
-                f.write(uploaded_cart.read())
-        
-        # Analizza
-        with st.spinner("🧠 Analisi in corso..."):
-            db = estrai_dati_busta_dettagliata(path_busta) if path_busta else None
-            dc = estrai_dati_cartellino(path_cart) if path_cart else None
-            
-            st.session_state['db'] = db
-            st.session_state['dc'] = dc
-            st.session_state['done'] = True
-            st.session_state['tipo'] = 'cedolino'
-            
-            # Pulisci temp
-            if path_busta: os.remove(path_busta)
-            if path_cart: os.remove(path_cart)
-        
-        st.rerun()
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -353,15 +303,15 @@ def pulisci_file(path_busta, path_cart):
         try:
             os.remove(path_busta)
             file_eliminati.append(os.path.basename(path_busta))
-        except Exception as e:
-            st.warning(f"⚠️ Non riesco a eliminare {path_busta}: {e}")
+        except:
+            pass
     
     if path_cart and os.path.exists(path_cart):
         try:
             os.remove(path_cart)
             file_eliminati.append(os.path.basename(path_cart))
-        except Exception as e:
-            st.warning(f"⚠️ Non riesco a eliminare {path_cart}: {e}")
+        except:
+            pass
     
     if file_eliminati:
         st.info(f"🗑️ File eliminati: {', '.join(file_eliminati)}")
@@ -422,19 +372,16 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             
             time.sleep(3)
             
-            # Verifica login riuscito
             try:
                 page.wait_for_selector("text=I miei dati", timeout=15000)
                 st_status.info("✅ Login OK")
             except:
-                st_status.error("❌ Login fallito - Verifica credenziali o stato del sito")
-                screenshot = page.screenshot()
-                st.image(screenshot, caption="Errore login", use_container_width=True)
+                st_status.error("❌ Login fallito")
                 browser.close()
                 return None, None, "LOGIN_FALLITO"
 
-            # BUSTA PAGA / TREDICESIMA
-            st_status.info(f"💰 {nome_tipo}...")
+            # BUSTA PAGA
+            st_status.info(f"💰 Download {nome_tipo}...")
             try:
                 page.click("text=I miei dati")
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
@@ -447,92 +394,56 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 
                 time.sleep(5)
                 
-                # ✅ DOWNLOAD CON GESTIONE DUPLICATI
                 try:
                     if tipo_documento == "tredicesima":
                         links = page.locator(f"a:has-text('Tredicesima {anno}')")
                         if links.count() > 0:
-                            st.info(f"✅ Trovata: Tredicesima {anno}")
                             with page.expect_download(timeout=20000) as dl:
                                 links.first.click()
-                            
                             dl.value.save_as(path_busta)
-                            
                             if os.path.exists(path_busta):
                                 busta_ok = True
-                                st_status.success(f"✅ Tredicesima: {os.path.getsize(path_busta)} bytes")
-                        else:
-                            st.warning(f"⚠️ Tredicesima {anno} non trovata")
+                                st_status.success(f"✅ Tredicesima scaricata")
                     else:
-                        st.info("🔍 Ricerca cedolino...")
-                        time.sleep(2)
-                        
                         all_links = page.locator("a")
                         total_links = all_links.count()
-                        
-                        # ✅ RACCOGLI TUTTI I MATCH
                         link_matches = []
                         
                         for i in range(total_links):
                             try:
                                 txt = all_links.nth(i).inner_text().strip()
-                                
                                 if not txt or len(txt) < 3:
                                     continue
-                                
                                 if any(mese in txt for mese in nomi_mesi_it) and str(anno) in txt:
                                     ha_target = target_busta.lower() in txt.lower()
-                                    e_tredicesima = any(kw in txt for kw in ["Tredicesima", "13", "XIII", "13ma", "13MA"])
-                                    
+                                    e_tredicesima = any(kw in txt for kw in ["Tredicesima", "13", "XIII"])
                                     if ha_target and not e_tredicesima:
                                         link_matches.append((i, txt))
                             except:
                                 continue
                         
-                        # ✅ SE CI SONO DUPLICATI, PRENDI L'ULTIMO
                         if len(link_matches) > 0:
-                            if len(link_matches) > 1:
-                                st.warning(f"⚠️ Trovati {len(link_matches)} match per '{target_busta}'")
-                                st.info(f"📌 Seleziono l'ULTIMO (probabilmente il cedolino, non la tredicesima)")
-                            
-                            link_index, link_txt = link_matches[-1]  # ULTIMO
-                            st.success(f"✅ Selezionato: '{link_txt}'")
-                            
-                            st.info(f"📥 Download in corso...")
+                            link_index, link_txt = link_matches[-1]
                             
                             try:
                                 with page.expect_download(timeout=20000) as download_info:
                                     all_links.nth(link_index).click()
-                                
                                 download = download_info.value
                                 download.save_as(path_busta)
-                                
                                 if os.path.exists(path_busta):
                                     busta_ok = True
-                                    st_status.success(f"✅ Cedolino: {os.path.getsize(path_busta)} bytes")
-                                else:
-                                    st.error(f"❌ File non salvato")
-                                    
+                                    st_status.success(f"✅ Cedolino scaricato")
                             except Exception as dl_err:
                                 st.error(f"❌ Errore download: {dl_err}")
-                                screenshot = page.screenshot()
-                                st.image(screenshot, caption="Errore download", use_container_width=True)
-                        else:
-                            st.warning(f"⚠️ '{target_busta}' non trovato")
-                            screenshot = page.screenshot()
-                            st.image(screenshot, caption="Lista documenti", use_container_width=True)
-                            
                 except Exception as e:
                     st.error(f"❌ Errore: {e}")
-                    import traceback
-                    st.code(traceback.format_exc())
                     
             except Exception as e: 
-                st.error(f"Err: {e}")
+                st.error(f"Errore: {e}")
 
-            # CARTELLINO (solo se NON è tredicesima)
+            # CARTELLINO
             if tipo_documento != "tredicesima":
-                st_status.info("📅 Cartellino...")
+                st_status.info("📅 Download cartellino...")
                 try:
                     page.evaluate("window.scrollTo(0, 0)"); time.sleep(2)
                     try: page.keyboard.press("Escape"); time.sleep(1)
@@ -597,28 +508,26 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     
                     if os.path.exists(path_cart):
                         cart_ok = True
-                        st_status.success(f"✅ Cartellino: {os.path.getsize(path_cart)} bytes")
+                        st_status.success(f"✅ Cartellino scaricato")
 
                 except Exception as e:
-                    st.error(f"Err Cart: {e}")
+                    st.error(f"Errore cartellino: {e}")
 
             browser.close()
             
     except Exception as e:
-        st.error(f"Errore Gen: {e}")
+        st.error(f"Errore generale: {e}")
     
     final_busta = path_busta if busta_ok else None
     final_cart = path_cart if cart_ok else None
     
-    st.success(f"📦 Busta: {final_busta}, Cart: {final_cart}")
-    
     return final_busta, final_cart, None
 
 # --- UI ---
-st.set_page_config(page_title="Gottardo Payroll Mobile", page_icon="💶", layout="wide")
+st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 st.title("💶 Analisi Stipendio & Presenze")
 
-# SIDEBAR CON LOGIN
+# SIDEBAR
 with st.sidebar:
     st.header("🔐 Credenziali")
     
@@ -640,7 +549,7 @@ with st.sidebar:
             else:
                 st.error("⚠️ Inserisci username e password")
     else:
-        st.success(f"✅ Loggato come: **{st.session_state['username']}**")
+        st.success(f"✅ Loggato: **{st.session_state['username']}**")
         if st.button("🔄 Cambia Credenziali"):
             st.session_state['credentials_set'] = False
             st.session_state.pop('username', None)
@@ -649,7 +558,6 @@ with st.sidebar:
     
     st.divider()
     
-    # PARAMETRI ANALISI
     if st.session_state.get('credentials_set'):
         st.header("Parametri")
         sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
@@ -667,15 +575,13 @@ with st.sidebar:
                 st.session_state.pop(key, None)
             
             tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
-            
             username = st.session_state.get('username')
             password = st.session_state.get('password')
             
             busta, cart, errore = scarica_documenti_automatici(sel_mese, sel_anno, username, password, tipo_documento=tipo)
             
             if errore == "LOGIN_FALLITO":
-                st.error("❌ **LOGIN FALLITO**")
-                st.warning("Verifica username e password oppure controlla lo stato del sito.")
+                st.error("❌ LOGIN FALLITO")
                 st.stop()
             
             st.session_state['busta'] = busta
@@ -683,29 +589,20 @@ with st.sidebar:
             st.session_state['tipo'] = tipo
             st.session_state['done'] = False
     else:
-        st.warning("⚠️ Inserisci le credenziali per continuare")
+        st.warning("⚠️ Inserisci le credenziali")
 
-# ✅ FALLBACK: ANALISI MANUALE PDF
-if not st.session_state.get('done') and not st.session_state.get('busta'):
-    st.divider()
-    with st.expander("📤 **ALTERNATIVA: Carica PDF manualmente**", expanded=False):
-        analisi_manuale_pdf()
-
-# ANALISI CON PULIZIA AUTOMATICA
+# ANALISI
 if st.session_state.get('busta') or st.session_state.get('cart'):
     
     if not st.session_state.get('done'):
-        with st.spinner("🧠 Analisi dettagliata AI in corso..."):
+        with st.spinner("🧠 Analisi AI in corso..."):
             db = estrai_dati_busta_dettagliata(st.session_state.get('busta'))
             dc = estrai_dati_cartellino(st.session_state.get('cart')) if st.session_state.get('cart') else None
             st.session_state['db'] = db
             st.session_state['dc'] = dc
             st.session_state['done'] = True
             
-            # PULIZIA AUTOMATICA FILE
-            with st.spinner("🗑️ Pulizia file temporanei..."):
-                pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
-            
+            pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
             st.session_state.pop('busta', None)
             st.session_state.pop('cart', None)
 
@@ -714,11 +611,10 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
     tipo = st.session_state.get('tipo', 'cedolino')
     
     if db and db.get('e_tredicesima'):
-        st.success("🎄 **Questo è un cedolino TREDICESIMA**")
+        st.success("🎄 **Cedolino TREDICESIMA**")
     
     st.divider()
     
-    # 3 TAB
     tab1, tab2, tab3 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto"])
     
     with tab1:
@@ -738,7 +634,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             
             c_entr, c_usc = st.columns(2)
             with c_entr:
-                st.subheader("➕ Competenze (Entrate)")
+                st.subheader("➕ Competenze")
                 st.write(f"**Paga Base:** € {comp.get('base', 0):.2f}")
                 if comp.get('anzianita', 0) > 0:
                     st.write(f"**Anzianità:** € {comp.get('anzianita', 0):.2f}")
@@ -748,11 +644,11 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                     st.write(f"**Festività/Maggiorazioni:** € {comp.get('festivita', 0):.2f}")
 
             with c_usc:
-                st.subheader("➖ Trattenute (Uscite)")
+                st.subheader("➖ Trattenute")
                 st.write(f"**Contributi INPS:** € {tratt.get('inps', 0):.2f}")
                 st.write(f"**IRPEF Netta:** € {tratt.get('irpef_netta', 0):.2f}")
                 if tratt.get('addizionali_totali', 0) > 0:
-                    st.write(f"**Addizionali (da rateizzare):** € {tratt.get('addizionali_totali', 0):.2f}")
+                    st.write(f"**Addizionali:** € {tratt.get('addizionali_totali', 0):.2f}")
 
             with st.expander("🏖️ Situazione Ferie"):
                 f1, f2, f3, f4 = st.columns(4)
@@ -762,7 +658,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 saldo_f = ferie.get('saldo', 0)
                 f4.metric("✅ SALDO", f"{saldo_f:.2f}", delta="OK" if saldo_f >= 0 else "Negativo")
             
-            with st.expander("⏱️ Situazione Permessi (P.A.R.)"):
+            with st.expander("⏱️ Situazione Permessi"):
                 p1, p2, p3, p4 = st.columns(4)
                 p1.metric("Residue AP", f"{par.get('residue_ap', 0):.2f}")
                 p2.metric("Spettanti", f"{par.get('spettanti', 0):.2f}")
@@ -770,7 +666,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 saldo_p = par.get('saldo', 0)
                 p4.metric("✅ SALDO", f"{saldo_p:.2f}", delta="OK" if saldo_p >= 0 else "Negativo")
         else:
-            st.warning("⚠️ Dati busta non disponibili.")
+            st.warning("⚠️ Dati busta non disponibili")
 
     with tab2:
         if dc:
@@ -780,22 +676,22 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 if giorni_reali > 0:
                     st.metric("📅 Giorni Lavorati", giorni_reali)
                 else:
-                    st.metric("📅 Giorni Lavorati", "N/D", help="Timbrature dettagliate non disponibili")
+                    st.metric("📅 Giorni Lavorati", "N/D", help="Timbrature non disponibili")
                 
                 anomalie = dc.get('giorni_senza_badge', 0)
                 if anomalie > 0:
                     st.metric("⚠️ Anomalie Badge", anomalie, delta="Controlla")
                 else:
-                    st.metric("✅ Anomalie Badge", 0, delta="Perfetto")
+                    st.metric("✅ Anomalie Badge", 0, delta="OK")
             
             with c2:
-                note = dc.get('note', 'Nessuna nota rilevante.')
-                st.info(f"**📝 Note AI:** {note}")
+                note = dc.get('note', '')
+                st.info(f"**📝 Note:** {note}")
         else:
             if tipo == "tredicesima":
-                st.warning("⚠️ Dati cartellino non disponibili (normale per Tredicesima).")
+                st.warning("⚠️ Cartellino non disponibile (Tredicesima)")
             else:
-                st.error("❌ Errore nel download o analisi del cartellino.")
+                st.error("❌ Errore cartellino")
 
     with tab3:
         if db and dc:
@@ -804,12 +700,10 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             
             st.subheader("🔍 Analisi Discrepanze")
             
-            # ✅ GESTIONE CARTELLINO SENZA TIMBRATURE
             if reali == 0:
                 st.info("ℹ️ **Cartellino senza timbrature dettagliate**")
                 st.write(f"📋 Giorni pagati in busta: **{int(pagati)}**")
-                st.write(f"📝 {dc.get('note', '')}")
-                st.success("✅ Usa i **giorni pagati dalla busta** come riferimento per il mese.")
+                st.success("✅ Usa i giorni pagati dalla busta come riferimento")
             else:
                 diff = reali - pagati
                 
@@ -820,18 +714,16 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 st.markdown("---")
                 
                 if abs(diff) < 0.5:
-                    st.success("✅ **Tutto perfetto!** I giorni lavorati corrispondono a quelli pagati.")
+                    st.success("✅ **Perfetto!** Giorni lavorati = giorni pagati")
                 elif diff > 0:
-                    st.info(f"ℹ️ Hai lavorato **{diff:.1f} giorni in più** rispetto a quelli pagati.\n\n"
-                           f"Controlla che siano compensati come **Straordinari** (€ {db.get('competenze', {}).get('straordinari', 0):.2f}) "
-                           f"o come **Festività** nella tab 'Dettaglio Stipendio'.")
+                    st.info(f"ℹ️ Hai lavorato **{diff:.1f} giorni in più**\n\n"
+                           f"Controlla Straordinari: € {db.get('competenze', {}).get('straordinari', 0):.2f}")
                 else:
-                    st.warning(f"⚠️ Risultano **{abs(diff):.1f} giorni pagati in più** rispetto alle timbrature.\n\n"
+                    st.warning(f"⚠️ **{abs(diff):.1f} giorni pagati in più**\n\n"
                               f"Possibili cause:\n"
-                              f"- **Ferie godute:** {db.get('ferie', {}).get('godute', 0):.2f} giorni\n"
-                              f"- **Permessi:** {db.get('par', {}).get('fruite', 0):.2f} ore\n"
-                              f"- Controlla nella tab 'Dettaglio Stipendio' → Ferie/Permessi")
+                              f"- Ferie godute: {db.get('ferie', {}).get('godute', 0):.2f} giorni\n"
+                              f"- Permessi: {db.get('par', {}).get('fruite', 0):.2f} ore")
         elif tipo == "tredicesima":
-            st.info("ℹ️ Analisi comparativa non disponibile per Tredicesima.")
+            st.info("ℹ️ Analisi non disponibile per Tredicesima")
         else:
-            st.warning("⚠️ Servono entrambi i documenti per l'analisi.")
+            st.warning("⚠️ Servono entrambi i documenti")
