@@ -36,66 +36,75 @@ except Exception as e:
     st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
-# ✅ INIZIALIZZAZIONE MODELLI GEMINI CON FALLBACK INTELLIGENTE
+# ✅ AUTO-DISCOVERY MODELLI GEMINI (OBBLIGATORIO)
 genai.configure(api_key=GOOGLE_API_KEY)
 
+@st.cache_resource
 def inizializza_modelli_gemini():
     """
-    Strategia ibrida: 
-    1. Tenta nomi standard `-latest` (veloce)
-    2. Se fallisce, usa list_models() per auto-discovery (resiliente)
+    Auto-discovery: Scopre automaticamente tutti i modelli Gemini disponibili
+    che supportano generateContent con input multimodali (PDF)
     """
-    modelli = []
-    
-    # Fase 1: Tenta modelli standard
-    nomi_standard = [
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro-latest', 
-        'gemini-2.0-flash-exp'
-    ]
-    
-    for nome in nomi_standard:
-        try:
-            modello = genai.GenerativeModel(nome)
-            modelli.append((nome, modello))
-        except Exception as e:
-            continue
-    
-    # Fase 2: Se non ne abbiamo abbastanza, usa auto-discovery
-    if len(modelli) < 2:
-        try:
-            tutti = genai.list_models()
-            validi = [
-                m for m in tutti 
-                if 'generateContent' in m.supported_generation_methods 
-                and 'gemini' in m.name.lower()
-            ]
+    try:
+        tutti_modelli = genai.list_models()
+        
+        # Filtra modelli che supportano generateContent
+        modelli_validi = [
+            m for m in tutti_modelli 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        # Stampa DEBUG (importante!)
+        st.sidebar.info(f"🔍 Trovati {len(modelli_validi)} modelli totali")
+        
+        # Filtra solo Gemini
+        modelli_gemini = []
+        for m in modelli_validi:
+            nome_pulito = m.name.replace('models/', '')
             
-            for m in validi[:3]:
-                nome = m.name.replace('models/', '')
-                if not any(nome == existing[0] for existing in modelli):
-                    try:
-                        modello = genai.GenerativeModel(nome)
-                        modelli.append((nome, modello))
-                    except:
-                        continue
-        except Exception as e:
-            st.warning(f"⚠️ Auto-discovery fallito: {e}")
-    
-    if len(modelli) == 0:
-        st.error("❌ Nessun modello Gemini disponibile")
+            # Prendi solo modelli Gemini (esclude embedding, ecc.)
+            if 'gemini' in nome_pulito.lower() and 'embedding' not in nome_pulito.lower():
+                try:
+                    modello = genai.GenerativeModel(nome_pulito)
+                    modelli_gemini.append((nome_pulito, modello))
+                except Exception as e:
+                    st.sidebar.warning(f"⚠️ {nome_pulito}: {str(e)[:50]}")
+                    continue
+        
+        if len(modelli_gemini) == 0:
+            st.error("❌ **NESSUN MODELLO GEMINI DISPONIBILE**")
+            st.info("📋 **Modelli trovati (potrebbero non supportare PDF):**")
+            for m in modelli_validi[:10]:
+                st.code(m.name)
+            st.stop()
+        
+        # Ordina per preferenza (flash > pro > exp)
+        def priorita(nome):
+            if 'flash' in nome.lower() and 'exp' not in nome.lower():
+                return 0
+            elif 'pro' in nome.lower():
+                return 1
+            elif 'exp' in nome.lower():
+                return 2
+            else:
+                return 3
+        
+        modelli_gemini.sort(key=lambda x: priorita(x[0]))
+        
+        return modelli_gemini
+        
+    except Exception as e:
+        st.error(f"❌ Errore auto-discovery: {e}")
+        st.info("💡 Verifica che la Google API Key sia valida e abbia accesso a Gemini")
         st.stop()
-    
-    return modelli
 
 MODELLI_DISPONIBILI = inizializza_modelli_gemini()
 
-# Mostra modelli caricati (debug)
+# Mostra modelli caricati
 if 'modelli_mostrati' not in st.session_state:
-    nomi = [m[0] for m in MODELLI_DISPONIBILI]
-    st.sidebar.success(f"✅ {len(nomi)} modelli caricati")
-    with st.sidebar.expander("🤖 Modelli attivi"):
-        for i, nome in enumerate(nomi, 1):
+    st.sidebar.success(f"✅ **{len(MODELLI_DISPONIBILI)} modelli Gemini attivi**")
+    with st.sidebar.expander("🤖 Lista completa"):
+        for i, (nome, _) in enumerate(MODELLI_DISPONIBILI, 1):
             st.text(f"{i}. {nome}")
     st.session_state['modelli_mostrati'] = True
 
@@ -145,23 +154,27 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
         except Exception as e:
             error_msg = str(e)
             
+            # Stampa errore completo per debug
+            with st.expander(f"🐛 Debug errore {nome_modello}"):
+                st.code(error_msg)
+            
             # Categorizza errori
-            if "429" in error_msg or "quota" in error_msg.lower():
+            if "429" in error_msg or "quota" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
                 st.warning(f"⚠️ {nome_modello}: **quota esaurita**, provo il prossimo...")
-            elif "404" in error_msg:
-                st.warning(f"⚠️ {nome_modello}: **modello non trovato**, provo il prossimo...")
+            elif "404" in error_msg or "not found" in error_msg.lower():
+                st.warning(f"⚠️ {nome_modello}: **non disponibile**, provo il prossimo...")
             else:
-                st.warning(f"⚠️ {nome_modello}: errore ({error_msg[:80]}...)")
+                st.warning(f"⚠️ {nome_modello}: errore generico")
             
             continue
     
     # ❌ Tutti i modelli falliti
     st.error(f"❌ **Tutti i {len(MODELLI_DISPONIBILI)} modelli Gemini hanno fallito per {tipo}**")
     st.info("💡 **Possibili soluzioni:**\n"
-            "- ⏰ Aspetta fino a mezzanotte UTC (01:00 CET) per il reset delle quote\n"
-            "- 📥 Il documento è stato scaricato, riprova l'analisi domani\n"
-            "- 📄 Controlla manualmente il PDF scaricato\n"
-            "- 🔑 Verifica che la Google API Key abbia accesso ai modelli Gemini 1.5")
+            "- ⏰ Aspetta qualche minuto (limite rate RPM)\n"
+            "- 🔑 Verifica che la Google API Key sia valida: https://aistudio.google.com/apikey\n"
+            "- 📥 Scarica i PDF manualmente e caricali qui sotto per analisi manuale\n"
+            "- 💳 Considera di abilitare billing su Google Cloud (aumenta le quote)")
     return None
 
 def estrai_dati_busta_dettagliata(file_path):
@@ -281,6 +294,55 @@ def estrai_dati_cartellino(file_path):
     """
     
     return estrai_con_fallback(file_path, prompt, tipo="cartellino")
+
+# --- ANALISI MANUALE PDF ---
+def analisi_manuale_pdf():
+    """✅ Fallback: Carica PDF manualmente per analisi"""
+    st.warning("⚠️ **Modalità Analisi Manuale PDF**")
+    st.info("Carica i PDF scaricati manualmente per l'analisi")
+    
+    col_b, col_c = st.columns(2)
+    
+    with col_b:
+        uploaded_busta = st.file_uploader("📄 Busta Paga (PDF)", type=['pdf'], key="manual_busta")
+        
+    with col_c:
+        uploaded_cart = st.file_uploader("📅 Cartellino (PDF)", type=['pdf'], key="manual_cart")
+    
+    if st.button("🔍 Analizza PDF Caricati", type="primary"):
+        if not uploaded_busta:
+            st.error("❌ Carica almeno la busta paga")
+            return
+        
+        # Salva temporaneamente
+        path_busta = None
+        path_cart = None
+        
+        if uploaded_busta:
+            path_busta = f"temp_busta_{int(time.time())}.pdf"
+            with open(path_busta, "wb") as f:
+                f.write(uploaded_busta.read())
+        
+        if uploaded_cart:
+            path_cart = f"temp_cart_{int(time.time())}.pdf"
+            with open(path_cart, "wb") as f:
+                f.write(uploaded_cart.read())
+        
+        # Analizza
+        with st.spinner("🧠 Analisi in corso..."):
+            db = estrai_dati_busta_dettagliata(path_busta) if path_busta else None
+            dc = estrai_dati_cartellino(path_cart) if path_cart else None
+            
+            st.session_state['db'] = db
+            st.session_state['dc'] = dc
+            st.session_state['done'] = True
+            st.session_state['tipo'] = 'cedolino'
+            
+            # Pulisci temp
+            if path_busta: os.remove(path_busta)
+            if path_cart: os.remove(path_cart)
+        
+        st.rerun()
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -622,6 +684,12 @@ with st.sidebar:
             st.session_state['done'] = False
     else:
         st.warning("⚠️ Inserisci le credenziali per continuare")
+
+# ✅ FALLBACK: ANALISI MANUALE PDF
+if not st.session_state.get('done') and not st.session_state.get('busta'):
+    st.divider()
+    with st.expander("📤 **ALTERNATIVA: Carica PDF manualmente**", expanded=False):
+        analisi_manuale_pdf()
 
 # ANALISI CON PULIZIA AUTOMATICA
 if st.session_state.get('busta') or st.session_state.get('cart'):
