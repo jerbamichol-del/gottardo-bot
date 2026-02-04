@@ -147,13 +147,11 @@ def scarica_documenti_automatici(mese_nome, anno):
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(2)
                 
-                # Chiudi dialog
                 try:
                     page.keyboard.press("Escape")
                     time.sleep(1)
                 except: pass
                 
-                # Torna alla home
                 try:
                     logo = page.locator("img[src*='logo'], .logo").first
                     if logo.is_visible(timeout=2000):
@@ -165,41 +163,85 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 st.image(page.screenshot(), caption="Dopo reset", use_container_width=True)
                 
-                # MENU TIME
+                # ✅ MENU TIME - Con ID esatto e attesa popup
                 st_status.info("📂 Apro Time...")
                 
-                # Cerca tutti gli elementi "Time" e clicca il primo visibile
+                # Clicca Time con ID esatto
                 time_clicked = False
                 try:
-                    time_elements = page.locator("*:has-text('Time')").all()
-                    for elem in time_elements:
-                        try:
-                            if elem.is_visible(timeout=500):
-                                text = elem.inner_text()
-                                if len(text) < 20:
-                                    elem.click(timeout=3000)
-                                    time_clicked = True
-                                    st_status.info(f"✅ Time: '{text}'")
-                                    break
-                        except:
-                            continue
-                except: pass
+                    # JS click con ID
+                    result = page.evaluate("""
+                        () => {
+                            const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
+                            if (time_elem) {
+                                time_elem.click();
+                                return 'OK';
+                            }
+                            return 'NOT_FOUND';
+                        }
+                    """)
+                    if result == 'OK':
+                        time_clicked = True
+                        st_status.info("✅ Time cliccato (ID)")
+                except Exception as e:
+                    st_status.warning(f"Time ID fallito: {str(e)[:50]}")
+                
+                # Fallback: Locator
+                if not time_clicked:
+                    try:
+                        time_elem = page.locator("#revit_navigation_NavHoverItem_2_label")
+                        if time_elem.is_visible(timeout=3000):
+                            time_elem.click()
+                            time_clicked = True
+                            st_status.info("✅ Time cliccato (locator)")
+                    except: pass
+                
+                # Fallback: Testo
+                if not time_clicked:
+                    try:
+                        time_text = page.locator("text=Time").first
+                        if time_text.is_visible(timeout=3000):
+                            time_text.click()
+                            time_clicked = True
+                            st_status.info("✅ Time cliccato (text)")
+                    except: pass
                 
                 if not time_clicked:
                     st_status.error("❌ Time non trovato!")
                     st.image(page.screenshot(), caption="Time non trovato", use_container_width=True)
                     raise Exception("Menu Time non trovato")
                 
-                time.sleep(3)
+                # ✅ ATTESA ESPLICITA: Aspetta che il sottomenu sia pronto
+                st_status.info("⏳ Attendo sottomenu...")
                 
-                st.image(page.screenshot(), caption="Dopo Time", use_container_width=True)
+                # Aspetta che popupactive="true" sia settato
+                try:
+                    page.wait_for_function("""
+                        () => {
+                            const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
+                            return time_elem && time_elem.getAttribute('popupactive') === 'true';
+                        }
+                    """, timeout=5000)
+                    st_status.info("✅ Popup attivo")
+                except:
+                    st_status.warning("Popup non verificato, continuo...")
                 
-                # CARTELLINO PRESENZE - CLICK JS CON ID
-                st_status.info("📋 Cartellino presenze...")
+                time.sleep(2)  # Attesa aggiuntiva per animazioni
+                
+                st.image(page.screenshot(), caption="Menu Time aperto", use_container_width=True)
+                
+                # ✅ CARTELLINO PRESENZE - Aspetta elemento visibile
+                st_status.info("📋 Cerco Cartellino presenze...")
+                
+                # Aspetta che lnktab_5_label diventi visibile
                 cart_opened = False
                 
-                # Metodo 1: ID esatto
                 try:
+                    # Wait for selector con timeout lungo
+                    page.wait_for_selector("#lnktab_5_label", state="visible", timeout=10000)
+                    st_status.info("✅ Elemento Cartellino visibile")
+                    
+                    # Click JS con ID
                     result = page.evaluate("""
                         () => {
                             const elem = document.getElementById('lnktab_5_label');
@@ -212,22 +254,21 @@ def scarica_documenti_automatici(mese_nome, anno):
                     """)
                     if result == 'OK':
                         cart_opened = True
-                        st_status.info("✅ Cartellino (ID)")
+                        st_status.info("✅ Cartellino cliccato (JS)")
                 except Exception as e:
-                    st_status.warning(f"ID fallito: {str(e)[:50]}")
+                    st_status.warning(f"Wait/Click ID fallito: {str(e)[:50]}")
                 
-                # Metodo 2: Locator ID
+                # Fallback: Locator con force
                 if not cart_opened:
                     try:
                         cart_elem = page.locator("#lnktab_5_label")
-                        if cart_elem.is_visible(timeout=3000):
-                            cart_elem.click(force=True)
-                            cart_opened = True
-                            st_status.info("✅ Cartellino (locator)")
+                        cart_elem.click(force=True, timeout=5000)
+                        cart_opened = True
+                        st_status.info("✅ Cartellino (locator force)")
                     except Exception as e:
                         st_status.warning(f"Locator fallito: {str(e)[:50]}")
                 
-                # Metodo 3: Testo
+                # Fallback: Text selector
                 if not cart_opened:
                     try:
                         cart = page.locator("text=Cartellino presenze").first
@@ -237,14 +278,14 @@ def scarica_documenti_automatici(mese_nome, anno):
                             st_status.info("✅ Cartellino (text)")
                     except: pass
                 
-                # Metodo 4: Dijit class
+                # Fallback: Dijit class
                 if not cart_opened:
                     try:
                         result = page.evaluate("""
                             () => {
                                 const spans = document.querySelectorAll('span.dijitButtonText');
                                 for (let span of spans) {
-                                    if (span.textContent.includes('Cartellino presenze')) {
+                                    if (span.textContent.trim().includes('Cartellino presenze')) {
                                         span.click();
                                         return 'OK';
                                     }
@@ -258,8 +299,8 @@ def scarica_documenti_automatici(mese_nome, anno):
                     except: pass
                 
                 if not cart_opened:
-                    st_status.error("❌ Cartellino NON trovato!")
-                    st.image(page.screenshot(), caption="Cartellino non trovato", use_container_width=True)
+                    st_status.error("❌ Cartellino NON cliccato!")
+                    st.image(page.screenshot(), caption="Cartellino non cliccato", use_container_width=True)
                     raise Exception("Cartellino non accessibile")
                 
                 time.sleep(5)
