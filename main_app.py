@@ -108,7 +108,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 accept_downloads=True, 
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
             )
-            context.set_default_timeout(45000)  # ✅ 45s invece di 30s
+            context.set_default_timeout(45000)
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
@@ -129,130 +129,73 @@ def scarica_documenti_automatici(mese_nome, anno):
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
                 time.sleep(3)
                 
-                st.image(page.screenshot(), caption="Dopo click Documenti", use_container_width=True)
-                
                 # Apri Cedolino
                 st_status.info("📂 Apro Cedolino...")
                 try: 
                     page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-                    st_status.info("✅ Click z-image")
                 except: 
                     page.click("text=Cedolino")
-                    st_status.info("✅ Click text")
                 
-                time.sleep(5)  # ✅ Attesa più lunga
+                time.sleep(5)
                 
-                st.image(page.screenshot(), caption="Dopo apertura Cedolino", use_container_width=True)
+                # ✅ CERCA E CLICCA DIRETTAMENTE IL LINK
+                st_status.info(f"🔍 Cerco link: '{target_busta}'")
                 
-                # ✅ Prova selettori alternativi
-                st_status.info("⏳ Attendo griglia...")
-                grid_ready = False
-                
-                selectors = [
-                    ".dgrid-row",
-                    "tr.dgrid-row",
-                    ".dgrid-content tr",
-                    "table tr",
-                    "[role='row']"
-                ]
-                
-                for selector in selectors:
-                    try:
-                        page.wait_for_selector(selector, timeout=10000)
-                        st_status.info(f"✅ Griglia trovata: {selector}")
-                        grid_ready = True
-                        break
-                    except:
-                        st.warning(f"⏭️ {selector} non trovato")
-                
-                if not grid_ready:
-                    st.error("❌ Nessuna griglia trovata!")
-                    st.image(page.screenshot(), caption="Griglia non trovata", use_container_width=True)
-                    raise Exception("Griglia cedolini non caricata")
-                
-                time.sleep(2)
-                
-                # Cerca righe
-                st_status.info(f"🔍 Cerco: '{target_busta}'")
-                
-                patterns = [
-                    target_busta,
-                    target_busta.upper(),
-                    f"{mese_num:02d}/{anno}",
-                    str(anno),
-                ]
-                
-                found_rows = None
-                found_pattern = None
-                
-                for pattern in patterns:
-                    # ✅ Prova diversi selettori di riga
-                    for row_selector in ["tr.dgrid-row", "tr", "[role='row']"]:
-                        rows = page.locator(f"{row_selector}:has-text('{pattern}')")
-                        count = rows.count()
-                        if count > 0:
-                            st.info(f"✅ '{pattern}' → {count} righe ({row_selector})")
-                            found_rows = rows
-                            found_pattern = pattern
-                            break
-                    if found_rows:
-                        break
-                
-                if found_rows and found_rows.count() > 0:
-                    st.success(f"✅ {found_rows.count()} righe con '{found_pattern}'")
+                # Prova a cliccare direttamente il link con il testo del mese
+                try:
+                    # Cerca il link che contiene esattamente "Dicembre 2025" (non Tredicesima)
+                    links = page.locator(f"a:has-text('{target_busta}')")
+                    count = links.count()
+                    st.info(f"📝 Trovati {count} link con '{target_busta}'")
                     
-                    for i in range(found_rows.count()):
-                        txt = found_rows.nth(i).inner_text()
-                        st.info(f"📝 Riga {i}: {txt[:100]}")
-                        
-                        if any(x in txt.lower() for x in ["tredicesima", "13", "quattordicesima", "14"]):
-                            st.warning(f"⏭️ Skip riga {i}")
-                            continue
-                        
-                        st.info(f"✅ Tento download riga {i}...")
-                        try:
-                            with page.expect_download(timeout=20000) as dl:
-                                if found_rows.nth(i).locator("text=Download").count(): 
-                                    found_rows.nth(i).locator("text=Download").click()
-                                elif found_rows.nth(i).locator(".z-image").count():
-                                    found_rows.nth(i).locator(".z-image").last.click()
-                                elif found_rows.nth(i).locator("img").count():
-                                    found_rows.nth(i).locator("img").last.click()
-                                else:
-                                    found_rows.nth(i).click()
+                    if count > 0:
+                        # Skippa "Tredicesima"
+                        for i in range(count):
+                            txt = links.nth(i).inner_text()
+                            st.info(f"Link {i}: {txt}")
                             
-                            dl.value.save_as(path_busta)
-                            
-                            if os.path.exists(path_busta):
-                                size = os.path.getsize(path_busta)
-                                busta_ok = True
-                                st_status.success(f"✅ Busta: {size} bytes")
-                            break
-                        except Exception as e:
-                            st.warning(f"⚠️ Riga {i} fallita: {str(e)[:80]}")
-                else:
-                    st.error(f"❌ NESSUNA riga trovata!")
-                    
-                    # Mostra tutto
-                    for row_selector in ["tr.dgrid-row", "tr", "[role='row']"]:
-                        all_rows = page.locator(row_selector)
-                        count = all_rows.count()
-                        if count > 0:
-                            st.warning(f"📊 {count} righe totali ({row_selector})")
-                            for i in range(min(count, 3)):
-                                st.info(f"{i}: {all_rows.nth(i).inner_text()[:100]}")
-                            break
+                            if "Tredicesima" not in txt and "13" not in txt:
+                                st.info(f"✅ Link {i} valido!")
+                                
+                                with page.expect_download(timeout=20000) as dl:
+                                    links.nth(i).click()
+                                
+                                dl.value.save_as(path_busta)
+                                
+                                if os.path.exists(path_busta):
+                                    size = os.path.getsize(path_busta)
+                                    busta_ok = True
+                                    st_status.success(f"✅ Busta: {size} bytes")
+                                break
+                    else:
+                        st.warning(f"❌ Nessun link '{target_busta}' trovato")
+                        
+                        # Fallback: cerca solo il mese senza anno
+                        st.info(f"🔧 Fallback: cerco '{mese_nome}'...")
+                        links_mese = page.locator(f"a:has-text('{mese_nome}'):has-text('{anno}')")
+                        if links_mese.count() > 0:
+                            for i in range(links_mese.count()):
+                                txt = links_mese.nth(i).inner_text()
+                                if "Tredicesima" not in txt:
+                                    with page.expect_download(timeout=20000) as dl:
+                                        links_mese.nth(i).click()
+                                    dl.value.save_as(path_busta)
+                                    if os.path.exists(path_busta):
+                                        busta_ok = True
+                                        st_status.success(f"✅ Busta: {os.path.getsize(path_busta)} bytes")
+                                    break
+                                    
+                except Exception as e:
+                    st.error(f"❌ Errore click link: {e}")
                     
                 if not busta_ok: 
                     st.warning("⚠️ Busta non scaricata")
+                    st.image(page.screenshot(), caption="Sezione Cedolino", use_container_width=True)
                     
             except Exception as e: 
                 st.error(f"Err Busta: {e}")
-                try:
-                    st.image(page.screenshot(), caption="Errore Busta", use_container_width=True)
-                except: pass
 
-            # CARTELLINO (invariato)
+            # CARTELLINO
             st_status.info("📅 Cartellino...")
             try:
                 page.evaluate("window.scrollTo(0, 0)"); time.sleep(2)
