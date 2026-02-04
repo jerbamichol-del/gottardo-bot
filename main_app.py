@@ -36,27 +36,72 @@ except Exception as e:
     st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
-# ✅ CONFIGURA MULTIPLI MODELLI GEMINI (quote separate)
+# ✅ INIZIALIZZAZIONE MODELLI GEMINI CON FALLBACK INTELLIGENTE
 genai.configure(api_key=GOOGLE_API_KEY)
 
-try:
-    model_flash = genai.GenerativeModel('gemini-1.5-flash')
-    model_pro = genai.GenerativeModel('gemini-1.5-pro')
-    model_flash_exp = genai.GenerativeModel('gemini-2.0-flash-exp')
-except Exception as e:
-    st.error(f"⚠️ Errore inizializzazione modelli: {e}")
-    model_flash = genai.GenerativeModel('gemini-flash-latest')
-    model_pro = None
-    model_flash_exp = None
+def inizializza_modelli_gemini():
+    """
+    Strategia ibrida: 
+    1. Tenta nomi standard `-latest` (veloce)
+    2. Se fallisce, usa list_models() per auto-discovery (resiliente)
+    """
+    modelli = []
+    
+    # Fase 1: Tenta modelli standard
+    nomi_standard = [
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-pro-latest', 
+        'gemini-2.0-flash-exp'
+    ]
+    
+    for nome in nomi_standard:
+        try:
+            modello = genai.GenerativeModel(nome)
+            modelli.append((nome, modello))
+        except Exception as e:
+            continue
+    
+    # Fase 2: Se non ne abbiamo abbastanza, usa auto-discovery
+    if len(modelli) < 2:
+        try:
+            tutti = genai.list_models()
+            validi = [
+                m for m in tutti 
+                if 'generateContent' in m.supported_generation_methods 
+                and 'gemini' in m.name.lower()
+            ]
+            
+            for m in validi[:3]:
+                nome = m.name.replace('models/', '')
+                if not any(nome == existing[0] for existing in modelli):
+                    try:
+                        modello = genai.GenerativeModel(nome)
+                        modelli.append((nome, modello))
+                    except:
+                        continue
+        except Exception as e:
+            st.warning(f"⚠️ Auto-discovery fallito: {e}")
+    
+    if len(modelli) == 0:
+        st.error("❌ Nessun modello Gemini disponibile")
+        st.stop()
+    
+    return modelli
 
-MODELLI_DISPONIBILI = [
-    ("Gemini 1.5 Flash", model_flash),
-    ("Gemini 1.5 Pro", model_pro),
-    ("Gemini 2.0 Flash Exp", model_flash_exp)
-]
+MODELLI_DISPONIBILI = inizializza_modelli_gemini()
+
+# Mostra modelli caricati (debug)
+if 'modelli_mostrati' not in st.session_state:
+    nomi = [m[0] for m in MODELLI_DISPONIBILI]
+    st.sidebar.success(f"✅ {len(nomi)} modelli caricati")
+    with st.sidebar.expander("🤖 Modelli attivi"):
+        for i, nome in enumerate(nomi, 1):
+            st.text(f"{i}. {nome}")
+    st.session_state['modelli_mostrati'] = True
 
 # --- PARSING AI ---
 def clean_json_response(text):
+    """Estrae JSON pulito da risposta AI"""
     try:
         text = re.sub(r"```json|```", "", text).strip()
         start = text.find('{')
@@ -68,43 +113,55 @@ def clean_json_response(text):
 def estrai_con_fallback(file_path, prompt, tipo="documento"):
     """✅ Prova multipli modelli Gemini con fallback automatico"""
     if not file_path or not os.path.exists(file_path):
+        st.error(f"❌ File {tipo} non trovato: {file_path}")
         return None
     
     with open(file_path, "rb") as f: 
         bytes_data = f.read()
     
+    # Verifica che sia un PDF valido
+    if not bytes_data[:4] == b'%PDF':
+        st.error(f"❌ Il file {tipo} non è un PDF valido")
+        return None
+    
     # Prova ogni modello in sequenza
-    for nome_modello, modello in MODELLI_DISPONIBILI:
-        if modello is None:
-            continue
-            
+    for idx, (nome_modello, modello) in enumerate(MODELLI_DISPONIBILI, 1):
         try:
-            st.info(f"🔄 Analisi {tipo} con {nome_modello}...")
-            response = modello.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
+            st.info(f"🔄 [{idx}/{len(MODELLI_DISPONIBILI)}] Analisi {tipo} con **{nome_modello}**...")
+            
+            response = modello.generate_content([
+                prompt,
+                {"mime_type": "application/pdf", "data": bytes_data}
+            ])
+            
             result = clean_json_response(response.text)
             
-            if result:
-                st.success(f"✅ {tipo.capitalize()} analizzato con {nome_modello}")
+            if result and isinstance(result, dict):
+                st.success(f"✅ {tipo.capitalize()} analizzato con **{nome_modello}**")
                 return result
             else:
-                st.warning(f"⚠️ {nome_modello}: risposta non valida, provo il prossimo...")
+                st.warning(f"⚠️ {nome_modello}: risposta non valida JSON")
                 
         except Exception as e:
             error_msg = str(e)
             
+            # Categorizza errori
             if "429" in error_msg or "quota" in error_msg.lower():
-                st.warning(f"⚠️ {nome_modello}: quota esaurita, provo il prossimo...")
+                st.warning(f"⚠️ {nome_modello}: **quota esaurita**, provo il prossimo...")
+            elif "404" in error_msg:
+                st.warning(f"⚠️ {nome_modello}: **modello non trovato**, provo il prossimo...")
             else:
-                st.warning(f"⚠️ {nome_modello}: errore ({error_msg[:100]}), provo il prossimo...")
+                st.warning(f"⚠️ {nome_modello}: errore ({error_msg[:80]}...)")
             
             continue
     
     # ❌ Tutti i modelli falliti
-    st.error(f"❌ **Tutti i modelli Gemini hanno fallito per {tipo}**")
+    st.error(f"❌ **Tutti i {len(MODELLI_DISPONIBILI)} modelli Gemini hanno fallito per {tipo}**")
     st.info("💡 **Possibili soluzioni:**\n"
-            "- Aspetta fino a mezzanotte UTC (01:00 CET) per il reset delle quote\n"
-            "- Il documento è stato scaricato, riprova l'analisi domani\n"
-            "- Controlla manualmente il PDF scaricato")
+            "- ⏰ Aspetta fino a mezzanotte UTC (01:00 CET) per il reset delle quote\n"
+            "- 📥 Il documento è stato scaricato, riprova l'analisi domani\n"
+            "- 📄 Controlla manualmente il PDF scaricato\n"
+            "- 🔑 Verifica che la Google API Key abbia accesso ai modelli Gemini 1.5")
     return None
 
 def estrai_dati_busta_dettagliata(file_path):
@@ -152,7 +209,7 @@ def estrai_dati_busta_dettagliata(file_path):
     - Se un valore non esiste scrivi 0
     - Usa il punto come separatore decimale
     
-    Restituisci SOLO questo JSON:
+    Restituisci SOLO questo JSON (niente testo aggiuntivo):
     {
         "e_tredicesima": boolean,
         "dati_generali": {
@@ -215,7 +272,7 @@ def estrai_dati_cartellino(file_path):
     - Considera che un mese lavorativo tipico ha circa 20-23 giorni (esclusi weekend/festività)
     - Se il documento è vuoto o non contiene dati utili, metti giorni_reali = 0
     
-    Restituisci SOLO questo JSON:
+    Restituisci SOLO questo JSON (niente testo aggiuntivo):
     {
         "giorni_reali": int,
         "giorni_senza_badge": int,
