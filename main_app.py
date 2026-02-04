@@ -42,7 +42,7 @@ def clean_json_response(text):
         return None
 
 def estrai_dati_busta_dettagliata(file_path):
-    if not file_path: return None
+    if not file_path or not os.path.exists(file_path): return None
     try:
         with open(file_path, "rb") as f: bytes_data = f.read()
         prompt = """Analizza cedolino. JSON: {"dati_generali": {"netto": float, "giorni_pagati": float}, "competenze": {"base": float, "straordinari": float}, "trattenute": {"inps": float, "irpef_netta": float}, "ferie_tfr": {"saldo": float}}"""
@@ -52,7 +52,7 @@ def estrai_dati_busta_dettagliata(file_path):
         return None
 
 def estrai_dati_cartellino(file_path):
-    if not file_path: return None
+    if not file_path or not os.path.exists(file_path): return None
     try:
         with open(file_path, "rb") as f: bytes_data = f.read()
         prompt = """Analizza cartellino. JSON: { "giorni_reali": int, "note": "string" }"""
@@ -75,11 +75,15 @@ def scarica_documenti_automatici(mese_nome, anno):
     d_from_vis = f"01/{mese_num:02d}/{anno}"
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
+    # ✅ Path definitivi
+    path_busta = f"busta_{mese_num}_{anno}.pdf"
+    path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+    
     st_status = st.empty()
     st_status.info(f"🤖 Bot: {mese_nome} {anno}")
     
-    path_busta = None
-    path_cart = None
+    busta_ok = False
+    cart_ok = False
 
     try:
         with sync_playwright() as p:
@@ -121,7 +125,6 @@ def scarica_documenti_automatici(mese_nome, anno):
                 time.sleep(2)
                 
                 rows = page.locator(f"tr:has-text('{target_busta}')")
-                found = False
                 for i in range(rows.count()):
                     txt = rows.nth(i).inner_text()
                     if "Tredicesima" not in txt:
@@ -130,12 +133,14 @@ def scarica_documenti_automatici(mese_nome, anno):
                                 rows.nth(i).locator("text=Download").click()
                             else: 
                                 rows.nth(i).locator(".z-image").last.click()
-                        path_busta = f"busta_{mese_num}_{anno}.pdf"
+                        
                         dl.value.save_as(path_busta)
-                        found = True
-                        st_status.success("✅ Busta OK")
+                        busta_ok = True
+                        st_status.success(f"✅ Busta → {path_busta}")
                         break
-                if not found: st_status.warning("Busta non trovata")
+                        
+                if not busta_ok: 
+                    st_status.warning("Busta non trovata")
             except Exception as e: 
                 st_status.error(f"Err Busta: {e}")
 
@@ -313,94 +318,75 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 time.sleep(5)
                 
-                # DOWNLOAD - Strategia robusta
+                # DOWNLOAD
                 st_status.info(f"📄 Download {target_cart_row}...")
-                
-                pdf_downloaded = False
                 
                 # Salva URL corrente
                 old_url = page.url
                 
-                # Click sulla lente
+                # Click lente
                 try:
                     row = page.locator(f"tr:has-text('{target_cart_row}')").first
                     row.scroll_into_view_if_needed()
                     row.locator("img[src*='search16.png']").click()
-                    st_status.info("✅ Click lente OK")
                 except:
                     page.locator("img[src*='search16.png']").first.click()
-                    st_status.info("✅ Click lente fallback")
                 
-                # ✅ STEP 1: Aspetta che sparisca popup "Caricamento"
-                st_status.info("⏳ Attendo caricamento...")
+                # Aspetta popup caricamento
+                st_status.info("⏳ Attendo...")
                 try:
                     page.wait_for_selector("text=Caricamento in corso", state="attached", timeout=5000)
-                    st_status.info("📦 Popup caricamento apparso")
                     page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=30000)
-                    st_status.info("✅ Popup sparito")
                 except:
-                    st_status.info("ℹ️ Popup non rilevato")
                     time.sleep(3)
                 
-                # ✅ STEP 2: Verifica cambio URL
                 time.sleep(2)
                 new_url = page.url
-                st_status.info(f"URL: {new_url[:80]}...")
                 
                 if new_url != old_url:
-                    # URL cambiato!
-                    path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                    
-                    # Download via requests
+                    # URL cambiato
                     try:
                         cs = {c['name']: c['value'] for c in context.cookies()}
                         response = requests.get(new_url, cookies=cs, timeout=30)
                         
-                        # Verifica che sia un PDF
                         if b'%PDF' in response.content[:10]:
                             with open(path_cart, 'wb') as f:
                                 f.write(response.content)
-                            pdf_downloaded = True
-                            st_status.success("✅ Cartellino OK")
+                            cart_ok = True
+                            st_status.success(f"✅ Cartellino → {path_cart}")
                         else:
-                            # Non è PDF, prova page.pdf()
                             page.pdf(path=path_cart)
-                            pdf_downloaded = True
-                            st_status.success("✅ Cartellino OK (print)")
+                            cart_ok = True
+                            st_status.success(f"✅ Cartellino → {path_cart} (print)")
                     except Exception as e:
                         st_status.warning(f"Download fallito: {str(e)[:50]}")
                 else:
-                    st_status.warning("URL non cambiato")
-                
-                # Fallback: Aspetta iframe/embed
-                if not pdf_downloaded:
-                    st_status.info("🔧 Cerco iframe...")
+                    # Fallback iframe
                     try:
-                        iframe = page.frame_locator("iframe").first
-                        if iframe:
-                            time.sleep(3)
-                            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                            page.pdf(path=path_cart)
-                            pdf_downloaded = True
-                            st_status.success("✅ Cartellino OK (iframe)")
-                    except: pass
+                        page.pdf(path=path_cart)
+                        cart_ok = True
+                        st_status.success(f"✅ Cartellino → {path_cart} (iframe)")
+                    except Exception as e:
+                        st_status.error(f"PDF fallito: {str(e)[:50]}")
                 
-                if not pdf_downloaded:
+                if not cart_ok:
                     st_status.error("❌ Cartellino NON scaricato!")
-                    st.image(page.screenshot(), caption="Errore", use_container_width=True)
 
             except Exception as e:
-                st_status.warning(f"Err Cart: {e}")
-                try: st.image(page.screenshot(), caption="Errore", use_container_width=True)
-                except: pass
+                st_status.error(f"Err Cart: {e}")
 
             browser.close()
             
     except Exception as e:
         st_status.error(f"Errore Gen: {e}")
-        return None, None
-
-    return path_busta, path_cart
+    
+    # ✅ Verifica file esistono
+    final_busta = path_busta if busta_ok and os.path.exists(path_busta) else None
+    final_cart = path_cart if cart_ok and os.path.exists(path_cart) else None
+    
+    st_status.info(f"📦 Busta: {final_busta}, Cart: {final_cart}")
+    
+    return final_busta, final_cart
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="📱", layout="wide")
