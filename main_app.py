@@ -27,12 +27,12 @@ except Exception as e:
     st.error(f"❌ Secrets mancanti: {e}")
     st.stop()
 
-try:
-    genai.configure(api_key=GOOGLE_API_KEY)
+# ✅ MODELLO COME CODICE FUNZIONANTE
+genai.configure(api_key=GOOGLE_API_KEY)
+try: 
+    model = genai.GenerativeModel('gemini-flash-latest')
+except: 
     model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    st.error(f"❌ Errore configurazione Google AI: {e}")
-    st.stop()
 
 # --- PARSING ---
 def clean_json_response(text):
@@ -154,68 +154,80 @@ def scarica_documenti_automatici(mese_nome, anno):
                 page.wait_for_selector(".dgrid-row", timeout=15000)
                 time.sleep(3)
                 
-                st.image(page.screenshot(), caption="Sezione Cedolini", use_container_width=True)
+                # Screenshot
+                screenshot_bytes = page.screenshot()
+                st.image(screenshot_bytes, caption="Sezione Cedolini", use_container_width=True)
                 
                 # Cerca righe
                 st_status.info(f"🔍 Cerco: '{target_busta}'")
                 
-                # Prova diversi pattern
                 patterns = [
-                    f"{mese_nome} {anno}",
-                    f"{mese_nome.upper()} {anno}",
-                    f"{mese_num:02d}/{anno}",
+                    target_busta,  # "Dicembre 2025"
+                    target_busta.upper(),  # "DICEMBRE 2025"
+                    f"{mese_num:02d}/{anno}",  # "12/2025"
+                    str(anno),  # "2025"
                 ]
                 
-                rows = None
+                found_rows = None
+                found_pattern = None
+                
                 for pattern in patterns:
-                    rows = page.locator(f"tr:has-text('{pattern}')")
+                    rows = page.locator(f"tr.dgrid-row:has-text('{pattern}')")
                     count = rows.count()
-                    st_status.info(f"Pattern '{pattern}': {count} righe")
+                    st.info(f"🔎 Pattern '{pattern}': {count} righe")
                     if count > 0:
+                        found_rows = rows
+                        found_pattern = pattern
                         break
                 
-                if rows and rows.count() > 0:
-                    for i in range(rows.count()):
-                        txt = rows.nth(i).inner_text()
-                        st_status.info(f"Riga {i}: {txt[:80]}")
+                if found_rows and found_rows.count() > 0:
+                    st.success(f"✅ Trovate {found_rows.count()} righe con '{found_pattern}'")
+                    
+                    for i in range(found_rows.count()):
+                        txt = found_rows.nth(i).inner_text()
+                        st.info(f"📝 Riga {i}: {txt[:100]}")
                         
-                        if "Tredicesima" not in txt and "13" not in txt:
-                            try:
-                                with page.expect_download(timeout=20000) as dl:
-                                    # Prova tutti i possibili click
-                                    if rows.nth(i).locator("text=Download").count(): 
-                                        rows.nth(i).locator("text=Download").click()
-                                        st_status.info("Click Download")
-                                    elif rows.nth(i).locator(".z-image").count():
-                                        rows.nth(i).locator(".z-image").last.click()
-                                        st_status.info("Click z-image")
-                                    else:
-                                        rows.nth(i).click()
-                                        st_status.info("Click riga")
-                                
-                                dl.value.save_as(path_busta)
-                                
-                                if os.path.exists(path_busta):
-                                    size = os.path.getsize(path_busta)
-                                    busta_ok = True
-                                    st_status.success(f"✅ Busta: {size} bytes")
-                                break
-                            except Exception as e:
-                                st_status.warning(f"Download riga {i} fallito: {str(e)[:50]}")
+                        # Skip tredicesima/quattordicesima
+                        if any(x in txt.lower() for x in ["tredicesima", "13", "quattordicesima", "14"]):
+                            st.warning(f"⏭️ Skip riga {i} (bonus)")
+                            continue
+                        
+                        st.info(f"✅ Riga {i} valida, tento download...")
+                        try:
+                            with page.expect_download(timeout=20000) as dl:
+                                if found_rows.nth(i).locator("text=Download").count(): 
+                                    found_rows.nth(i).locator("text=Download").click()
+                                elif found_rows.nth(i).locator(".z-image").count():
+                                    found_rows.nth(i).locator(".z-image").last.click()
+                                else:
+                                    found_rows.nth(i).click()
+                            
+                            dl.value.save_as(path_busta)
+                            
+                            if os.path.exists(path_busta):
+                                size = os.path.getsize(path_busta)
+                                busta_ok = True
+                                st_status.success(f"✅ Busta: {size} bytes")
+                            break
+                        except Exception as e:
+                            st.warning(f"⚠️ Download riga {i} fallito: {str(e)[:80]}")
                 else:
-                    st_status.error(f"❌ Nessuna riga trovata per '{target_busta}'")
+                    st.error(f"❌ NESSUNA riga trovata!")
+                    all_rows = page.locator("tr.dgrid-row")
+                    st.warning(f"📊 Totale righe: {all_rows.count()}")
+                    for i in range(min(all_rows.count(), 5)):
+                        st.info(f"Riga {i}: {all_rows.nth(i).inner_text()[:100]}")
                     
                 if not busta_ok: 
-                    st_status.warning("⚠️ Busta non scaricata")
+                    st.warning("⚠️ Busta non scaricata")
                     
             except Exception as e: 
-                st_status.error(f"Err Busta: {e}")
+                st.error(f"Err Busta: {e}")
 
-            # CARTELLINO (uguale a prima)
+            # CARTELLINO
             st_status.info("📅 Cartellino...")
             try:
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(2)
+                page.evaluate("window.scrollTo(0, 0)"); time.sleep(2)
                 try: page.keyboard.press("Escape"); time.sleep(1)
                 except: pass
                 
@@ -227,58 +239,11 @@ def scarica_documenti_automatici(mese_nome, anno):
                     time.sleep(3)
                 
                 # TIME
-                time_clicked = False
-                try:
-                    result = page.evaluate("""() => {
-                        const e = document.getElementById('revit_navigation_NavHoverItem_2_label');
-                        if (e) { e.click(); return 'OK'; }
-                        return 'NOT_FOUND';
-                    }""")
-                    if result == 'OK': time_clicked = True
-                except: pass
-                
-                if not time_clicked:
-                    try: page.locator("#revit_navigation_NavHoverItem_2_label").click(timeout=3000); time_clicked = True
-                    except: pass
-                
-                if not time_clicked:
-                    try: page.locator("text=Time").first.click(timeout=3000); time_clicked = True
-                    except: pass
-                
-                if not time_clicked: raise Exception("Menu Time non trovato")
+                page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                 time.sleep(3)
                 
                 # CARTELLINO
-                cart_opened = False
-                try:
-                    page.wait_for_selector("#lnktab_5_label", state="visible", timeout=10000)
-                    result = page.evaluate("""() => {
-                        const e = document.getElementById('lnktab_5_label');
-                        if (e) { e.click(); return 'OK'; }
-                        return 'NOT_FOUND';
-                    }""")
-                    if result == 'OK': cart_opened = True
-                except: pass
-                
-                if not cart_opened:
-                    try: page.locator("#lnktab_5_label").click(force=True, timeout=5000); cart_opened = True
-                    except: pass
-                
-                if not cart_opened:
-                    try:
-                        result = page.evaluate("""() => {
-                            const spans = document.querySelectorAll('span.dijitButtonText');
-                            for (let s of spans) {
-                                if (s.textContent.trim().includes('Cartellino presenze')) {
-                                    s.click(); return 'OK';
-                                }
-                            }
-                            return 'NOT_FOUND';
-                        }""")
-                        if result == 'OK': cart_opened = True
-                    except: pass
-                
-                if not cart_opened: raise Exception("Cartellino non accessibile")
+                page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                 time.sleep(5)
                 
                 if page.locator("text=Permessi del").count() > 0:
@@ -291,32 +256,27 @@ def scarica_documenti_automatici(mese_nome, anno):
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
                     if dal.count() > 0 and al.count() > 0:
-                        dal.click(force=True); page.keyboard.press("Control+A"); dal.fill(""); time.sleep(0.3)
+                        dal.click(force=True); page.keyboard.press("Control+A"); dal.fill("")
                         dal.type(d_from_vis, delay=100); dal.press("Tab"); time.sleep(1)
-                        
-                        al.click(force=True); page.keyboard.press("Control+A"); al.fill(""); time.sleep(0.3)
+                        al.click(force=True); page.keyboard.press("Control+A"); al.fill("")
                         al.type(d_to_vis, delay=100); al.press("Tab"); time.sleep(1)
                 except: pass
                 
                 # Ricerca
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); time.sleep(1)
                 try: 
-                    btn = page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last
-                    btn.scroll_into_view_if_needed(); btn.click(force=True)
+                    page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
                 except: page.keyboard.press("Enter")
                 time.sleep(5)
                 
                 # Download
                 old_url = page.url
                 try:
-                    row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                    row.scroll_into_view_if_needed()
-                    row.locator("img[src*='search16.png']").click()
+                    page.locator(f"tr:has-text('{target_cart_row}')").first.locator("img[src*='search16.png']").click()
                 except:
                     page.locator("img[src*='search16.png']").first.click()
                 
                 try:
-                    page.wait_for_selector("text=Caricamento in corso", state="attached", timeout=5000)
                     page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=30000)
                 except: time.sleep(3)
                 
@@ -327,31 +287,29 @@ def scarica_documenti_automatici(mese_nome, anno):
                     try:
                         cs = {c['name']: c['value'] for c in context.cookies()}
                         response = requests.get(new_url, cookies=cs, timeout=30)
-                        if b'%PDF' in response.content[:10]:
-                            with open(path_cart, 'wb') as f: f.write(response.content)
-                        else:
-                            page.pdf(path=path_cart)
-                    except: page.pdf(path=path_cart)
+                        with open(path_cart, 'wb') as f: 
+                            f.write(response.content if b'%PDF' in response.content[:10] else page.pdf())
+                    except: 
+                        page.pdf(path=path_cart)
                 else:
                     page.pdf(path=path_cart)
                 
                 if os.path.exists(path_cart):
-                    size = os.path.getsize(path_cart)
                     cart_ok = True
-                    st_status.success(f"✅ Cartellino: {size} bytes")
+                    st_status.success(f"✅ Cartellino: {os.path.getsize(path_cart)} bytes")
 
             except Exception as e:
-                st_status.error(f"Err Cart: {e}")
+                st.error(f"Err Cart: {e}")
 
             browser.close()
             
     except Exception as e:
-        st_status.error(f"Errore Gen: {e}")
+        st.error(f"Errore Gen: {e}")
     
-    final_busta = path_busta if busta_ok and os.path.exists(path_busta) else None
-    final_cart = path_cart if cart_ok and os.path.exists(path_cart) else None
+    final_busta = path_busta if busta_ok else None
+    final_cart = path_cart if cart_ok else None
     
-    st.success(f"📦 Ritorno → Busta: {final_busta}, Cart: {final_cart}")
+    st.success(f"📦 Busta: {final_busta}, Cart: {final_cart}")
     
     return final_busta, final_cart
 
