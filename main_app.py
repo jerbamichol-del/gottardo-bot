@@ -69,7 +69,6 @@ def scarica_documenti_automatici(mese_nome, anno):
     target_cart_row = f"{mese_num:02d}/{anno}"
     last_day = calendar.monthrange(anno, mese_num)[1]
     
-    # Date formato italiano per widget
     d_from_vis = f"01/{mese_num:02d}/{anno}"
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
@@ -83,38 +82,57 @@ def scarica_documenti_automatici(mese_nome, anno):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                slow_mo=800,  # Rallentiamo per dare tempo ai widget Dojo
+                slow_mo=500,
                 args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
             )
-            context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36")
-            context.set_default_timeout(60000)
+            context = browser.new_context(
+                accept_downloads=True, 
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
+            )
+            context.set_default_timeout(45000)  # Ridotto a 45s
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
-            # LOGIN
+            # LOGIN ROBUSTO
             st_status.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
+            
+            # Aspetta che il form sia pronto
+            page.wait_for_selector('input[type="text"]', timeout=10000)
             page.fill('input[type="text"]', ZK_USER)
             page.fill('input[type="password"]', ZK_PASS)
             page.press('input[type="password"]', 'Enter')
-            page.wait_for_load_state('networkidle')
+            
+            # ✅ FIX: Aspetta elemento specifico menu invece di networkidle
+            try:
+                page.wait_for_selector("text=I miei dati", timeout=15000)
+                st_status.info("✅ Login OK")
+            except:
+                st_status.error("Login fallito - Menu non apparso")
+                st.image(page.screenshot(), caption="Errore Login")
+                browser.close()
+                return None, None
 
             # BUSTA PAGA
             st_status.info("💰 Busta Paga...")
             try:
                 page.click("text=I miei dati")
-                page.wait_for_selector("text=Documenti").click()
-                try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-                except: page.click("text=Cedolino")
+                page.wait_for_selector("text=Documenti", timeout=10000).click()
+                
+                try: 
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except: 
+                    page.click("text=Cedolino")
                 
                 page.wait_for_selector(".dgrid-row", timeout=15000)
+                time.sleep(2)
                 
                 rows = page.locator(f"tr:has-text('{target_busta}')")
                 found = False
                 for i in range(rows.count()):
                     txt = rows.nth(i).inner_text()
                     if "Tredicesima" not in txt:
-                        with page.expect_download(timeout=30000) as dl:
+                        with page.expect_download(timeout=20000) as dl:
                             if rows.nth(i).locator("text=Download").count(): 
                                 rows.nth(i).locator("text=Download").click()
                             else: 
@@ -125,85 +143,77 @@ def scarica_documenti_automatici(mese_nome, anno):
                         st_status.success("✅ Busta OK")
                         break
                 if not found: st_status.warning("Busta non trovata")
-            except Exception as e: st_status.error(f"Err Busta: {e}")
+            except Exception as e: 
+                st_status.error(f"Err Busta: {e}")
 
             # CARTELLINO
             st_status.info("📅 Cartellino...")
             try:
                 page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(1)
                 
-                # Navigazione Menu
-                st_status.info("📂 Apro menu Time...")
-                try: page.click("text=Time", timeout=5000)
-                except: page.evaluate("document.querySelector('span[title=\"Time\"]').click()")
+                # Menu Time
+                st_status.info("📂 Menu Time...")
+                try: 
+                    page.click("text=Time", timeout=5000)
+                except: 
+                    page.evaluate("document.querySelector('span[title=\"Time\"]').click()")
                 
-                try: page.wait_for_selector("text=Cartellino presenze", timeout=5000).click()
+                time.sleep(2)
+                
+                try: 
+                    page.wait_for_selector("text=Cartellino presenze", timeout=5000).click()
                 except:
-                     if page.locator("text=Gestione cartoline").is_visible(): 
-                         page.locator("text=Gestione cartoline").click()
-                     else: 
-                         page.click("text=Time")
-                         page.click("text=Cartellino presenze")
+                    if page.locator("text=Gestione cartoline").is_visible(): 
+                        page.locator("text=Gestione cartoline").click()
+                    else: 
+                        page.click("text=Time")
+                        page.click("text=Cartellino presenze")
                 
-                time.sleep(5)  # Attesa caricamento Dojo
+                time.sleep(5)
                 
-                # FIX AGENDA → Lista
-                if page.locator("text=Permessi del").count() > 0 or page.locator("text=Filtri").count() > 0:
-                    st_status.info("🔄 Fix Vista Agenda→Lista...")
-                    try: page.locator(".z-icon-print").first.click()
+                # Fix Agenda
+                if page.locator("text=Permessi del").count() > 0:
+                    st_status.info("🔄 Fix Agenda...")
+                    try: 
+                        page.locator(".z-icon-print").first.click()
+                        time.sleep(3)
                     except: 
                         if page.locator("text=Stampa").count() > 0: 
                             page.locator("text=Stampa").click()
-                    time.sleep(3)
+                            time.sleep(3)
                 
-                # ✍️ COMPILAZIONE DATE (CRITICA!)
-                st_status.info(f"✍️ Imposto date: {d_from_vis} → {d_to_vis}")
+                # DATE - Triplo tentativo
+                st_status.info(f"✍️ Date: {d_from_vis} → {d_to_vis}")
+                date_ok = False
                 
-                # STRATEGIA 1: Cerca input specifici Dojo (come codice PC)
-                date_set = False
+                # Tentativo 1: Input diretti
                 try:
-                    inp_dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
-                    inp_al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
+                    dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
+                    al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
-                    if inp_dal.count() > 0 and inp_al.count() > 0:
-                        # Metodo 1: Fill (veloce)
-                        inp_dal.click(force=True)
-                        inp_dal.fill(d_from_vis)
-                        inp_dal.press("Tab")
+                    if dal.count() > 0 and al.count() > 0:
+                        dal.click(force=True)
+                        dal.fill("")
+                        dal.type(d_from_vis, delay=80)
+                        dal.press("Tab")
                         time.sleep(0.5)
                         
-                        inp_al.click(force=True)
-                        inp_al.fill(d_to_vis)
-                        inp_al.press("Tab")
+                        al.click(force=True)
+                        al.fill("")
+                        al.type(d_to_vis, delay=80)
+                        al.press("Tab")
                         time.sleep(0.5)
                         
-                        # Verifica se fill ha funzionato
-                        if inp_dal.input_value() == d_from_vis and inp_al.input_value() == d_to_vis:
-                            date_set = True
-                            st_status.info("✅ Date impostate (fill)")
-                        else:
-                            # Metodo 2: Press Sequentially (fallback)
-                            inp_dal.click(force=True)
-                            page.keyboard.press("Control+A")
-                            inp_dal.press_sequentially(d_from_vis, delay=80)
-                            inp_dal.press("Tab")
-                            time.sleep(0.5)
-                            
-                            inp_al.click(force=True)
-                            page.keyboard.press("Control+A")
-                            inp_al.press_sequentially(d_to_vis, delay=80)
-                            inp_al.press("Tab")
-                            
-                            date_set = True
-                            st_status.info("✅ Date impostate (sequentially)")
+                        date_ok = True
+                        st_status.info("✅ Date OK (input)")
                 except Exception as e:
-                    st_status.warning(f"Input diretti falliti: {e}")
+                    st_status.warning(f"Input date fallito: {str(e)[:50]}")
                 
-                # STRATEGIA 2: Fallback JS Dojo (come codice PC)
-                if not date_set:
-                    st_status.info("🔧 Fallback JS Dojo...")
+                # Tentativo 2: JS Dojo
+                if not date_ok:
                     try:
-                        page.evaluate(f"""
+                        result = page.evaluate(f"""
                             () => {{
                                 try {{
                                     var ws = dijit.registry.toArray().filter(w => 
@@ -222,51 +232,50 @@ def scarica_documenti_automatici(mese_nome, anno):
                                 }}
                             }}
                         """)
-                        date_set = True
-                        st_status.info("✅ Date impostate (JS)")
+                        if "OK" in str(result):
+                            date_ok = True
+                            st_status.info("✅ Date OK (JS)")
                     except Exception as e:
-                        st_status.warning(f"JS Dojo fallito: {e}")
+                        st_status.warning(f"JS Dojo fallito: {str(e)[:50]}")
                 
-                # Screenshot debug
-                if not date_set:
-                    st.image(page.screenshot(), caption="Date NON impostate", use_container_width=True)
+                # Screenshot pre-ricerca
+                st.image(page.screenshot(), caption=f"Pre-ricerca ({d_from_vis} → {d_to_vis})", use_container_width=True)
                 
-                # ESEGUI RICERCA
-                st_status.info("🔍 Eseguo ricerca...")
+                # Ricerca
+                st_status.info("🔍 Ricerca...")
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 time.sleep(1)
                 
                 try: 
-                    page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
+                    btn = page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last
+                    btn.scroll_into_view_if_needed()
+                    btn.click(force=True)
                 except: 
                     page.keyboard.press("Enter")
                 
-                time.sleep(5)  # Attesa risultati
+                time.sleep(5)
                 
-                # Screenshot risultati
-                st.image(page.screenshot(), caption=f"Risultati ricerca {mese_nome}", use_container_width=True)
+                # Screenshot post-ricerca
+                st.image(page.screenshot(), caption=f"Risultati {mese_nome}", use_container_width=True)
                 
-                # DOWNLOAD PDF
-                st_status.info(f"📄 Cerco riga '{target_cart_row}'...")
+                # Download
+                st_status.info(f"📄 Download {target_cart_row}...")
                 
                 with context.expect_page(timeout=30000) as new_page_info:
                     try:
                         row = page.locator(f"tr:has-text('{target_cart_row}')").first
                         row.scroll_into_view_if_needed()
-                        # Cerca icona lente (search16.png) come nel codice PC
                         row.locator("img[src*='search16.png']").click()
                     except:
-                        # Fallback: prima icona lente della tabella
                         page.locator("img[src*='search16.png']").first.click()
                 
                 np = new_page_info.value
-                np.wait_for_load_state()
+                np.wait_for_load_state("domcontentloaded")
                 time.sleep(2)
                 
                 path_cart = f"cartellino_{mese_num}_{anno}.pdf"
                 
                 if ".pdf" in np.url.lower():
-                    # Download diretto
                     cs = {c['name']: c['value'] for c in context.cookies()}
                     with open(path_cart, 'wb') as f:
                         f.write(requests.get(np.url, cookies=cs).content)
@@ -277,8 +286,8 @@ def scarica_documenti_automatici(mese_nome, anno):
                 st_status.success("✅ Cartellino OK")
 
             except Exception as e:
-                st_status.warning(f"Errore Cart: {e}")
-                try: st.image(page.screenshot(), caption="Errore Finale", use_container_width=True)
+                st_status.warning(f"Err Cart: {e}")
+                try: st.image(page.screenshot(), caption="Errore Cartellino", use_container_width=True)
                 except: pass
 
             browser.close()
@@ -289,7 +298,7 @@ def scarica_documenti_automatici(mese_nome, anno):
 
     return path_busta, path_cart
 
-# --- UI STREAMLIT ---
+# --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="📱", layout="wide")
 st.title("📱 Gottardo Payroll Mobile")
 
@@ -299,7 +308,7 @@ with st.sidebar:
     sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                                      "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
     
-    if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
+    if st.button("🚀 AVVIA", type="primary", use_container_width=True):
         st.session_state.clear()
         busta, cart = scarica_documenti_automatici(sel_mese, sel_anno)
         st.session_state['busta'] = busta
@@ -308,7 +317,7 @@ with st.sidebar:
 
 if st.session_state.get('busta') or st.session_state.get('cart'):
     if not st.session_state.get('done'):
-        with st.spinner("🧠 Analisi AI..."):
+        with st.spinner("🧠 AI..."):
             db = estrai_dati_busta_dettagliata(st.session_state.get('busta'))
             dc = estrai_dati_cartellino(st.session_state.get('cart'))
             st.session_state['db'] = db
@@ -319,7 +328,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
     dc = st.session_state.get('dc')
     
     st.divider()
-    t1, t2 = st.tabs(["💰 Stipendio", "📅 Presenze"])
+    t1, t2 = st.tabs(["💰 Busta", "📅 Cartellino"])
     
     with t1:
         if db:
