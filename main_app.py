@@ -38,7 +38,8 @@ def clean_json_response(text):
         start = text.find('{')
         end = text.rfind('}') + 1
         return json.loads(text[start:end]) if start != -1 else json.loads(text)
-except: return None
+    except: 
+        return None
 
 def estrai_dati_busta_dettagliata(file_path):
     if not file_path: return None
@@ -47,7 +48,8 @@ def estrai_dati_busta_dettagliata(file_path):
         prompt = """Analizza cedolino. JSON: {"dati_generali": {"netto": float, "giorni_pagati": float}, "competenze": {"base": float, "straordinari": float}, "trattenute": {"inps": float, "irpef_netta": float}, "ferie_tfr": {"saldo": float}}"""
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
-    except: return None
+    except: 
+        return None
 
 def estrai_dati_cartellino(file_path):
     if not file_path: return None
@@ -56,7 +58,8 @@ def estrai_dati_cartellino(file_path):
         prompt = """Analizza cartellino. JSON: { "giorni_reali": int, "note": "string" }"""
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
-    except: return None
+    except: 
+        return None
 
 # --- CORE ---
 def scarica_documenti_automatici(mese_nome, anno):
@@ -173,7 +176,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                         try:
                             if elem.is_visible(timeout=500):
                                 text = elem.inner_text()
-                                if len(text) < 20:  # Evita elementi con troppo testo
+                                if len(text) < 20:
                                     elem.click(timeout=3000)
                                     time_clicked = True
                                     st_status.info(f"✅ Time: '{text}'")
@@ -187,15 +190,15 @@ def scarica_documenti_automatici(mese_nome, anno):
                     st.image(page.screenshot(), caption="Time non trovato", use_container_width=True)
                     raise Exception("Menu Time non trovato")
                 
-                time.sleep(3)  # Aspetta espansione menu
+                time.sleep(3)
                 
                 st.image(page.screenshot(), caption="Dopo Time", use_container_width=True)
                 
-                # ✅ CARTELLINO PRESENZE - CLICK JS CON ID ESATTO
-                st_status.info("📋 Cartellino presenze (JS)...")
+                # CARTELLINO PRESENZE - CLICK JS CON ID
+                st_status.info("📋 Cartellino presenze...")
                 cart_opened = False
                 
-                # Metodo 1: ID esatto (da inspector)
+                # Metodo 1: ID esatto
                 try:
                     result = page.evaluate("""
                         () => {
@@ -211,9 +214,9 @@ def scarica_documenti_automatici(mese_nome, anno):
                         cart_opened = True
                         st_status.info("✅ Cartellino (ID)")
                 except Exception as e:
-                    st_status.warning(f"ID click fallito: {str(e)[:50]}")
+                    st_status.warning(f"ID fallito: {str(e)[:50]}")
                 
-                # Metodo 2: Locator ID + click Playwright
+                # Metodo 2: Locator ID
                 if not cart_opened:
                     try:
                         cart_elem = page.locator("#lnktab_5_label")
@@ -224,7 +227,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                     except Exception as e:
                         st_status.warning(f"Locator fallito: {str(e)[:50]}")
                 
-                # Metodo 3: Testo generico
+                # Metodo 3: Testo
                 if not cart_opened:
                     try:
                         cart = page.locator("text=Cartellino presenze").first
@@ -234,7 +237,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                             st_status.info("✅ Cartellino (text)")
                     except: pass
                 
-                # Metodo 4: Span Dojo con classe
+                # Metodo 4: Dijit class
                 if not cart_opened:
                     try:
                         result = page.evaluate("""
