@@ -4,7 +4,7 @@ import re
 import requests
 import os
 import streamlit as st
-import google.generativeai as genai
+import google.generativeapi as genai
 from playwright.sync_api import sync_playwright
 import json
 import time
@@ -76,7 +76,7 @@ def scarica_documenti_automatici(mese_nome, anno):
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
     st_status = st.empty()
-    st_status.info(f"🤖 Bot Cloud: {mese_nome} {anno}")
+    st_status.info(f"🤖 Bot Cloud: {mese_nome} {anno} → {d_from_vis} / {d_to_vis}")
     
     path_busta = None
     path_cart = None
@@ -142,7 +142,6 @@ def scarica_documenti_automatici(mese_nome, anno):
             # CARTELLINO
             st_status.info("📅 Cartellino...")
             try:
-                # Reset navigazione
                 st_status.info("🏠 Reset...")
                 page.evaluate("window.scrollTo(0, 0)")
                 time.sleep(2)
@@ -161,15 +160,10 @@ def scarica_documenti_automatici(mese_nome, anno):
                     page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                     time.sleep(3)
                 
-                st.image(page.screenshot(), caption="Dopo reset", use_container_width=True)
-                
-                # ✅ MENU TIME - Con ID esatto e attesa popup
-                st_status.info("📂 Apro Time...")
-                
-                # Clicca Time con ID esatto
+                # MENU TIME
+                st_status.info("📂 Time...")
                 time_clicked = False
                 try:
-                    # JS click con ID
                     result = page.evaluate("""
                         () => {
                             const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
@@ -180,68 +174,32 @@ def scarica_documenti_automatici(mese_nome, anno):
                             return 'NOT_FOUND';
                         }
                     """)
-                    if result == 'OK':
+                    if result == 'OK': time_clicked = True
+                except: pass
+                
+                if not time_clicked:
+                    try:
+                        page.locator("#revit_navigation_NavHoverItem_2_label").click(timeout=3000)
                         time_clicked = True
-                        st_status.info("✅ Time cliccato (ID)")
-                except Exception as e:
-                    st_status.warning(f"Time ID fallito: {str(e)[:50]}")
-                
-                # Fallback: Locator
-                if not time_clicked:
-                    try:
-                        time_elem = page.locator("#revit_navigation_NavHoverItem_2_label")
-                        if time_elem.is_visible(timeout=3000):
-                            time_elem.click()
-                            time_clicked = True
-                            st_status.info("✅ Time cliccato (locator)")
-                    except: pass
-                
-                # Fallback: Testo
-                if not time_clicked:
-                    try:
-                        time_text = page.locator("text=Time").first
-                        if time_text.is_visible(timeout=3000):
-                            time_text.click()
-                            time_clicked = True
-                            st_status.info("✅ Time cliccato (text)")
                     except: pass
                 
                 if not time_clicked:
-                    st_status.error("❌ Time non trovato!")
-                    st.image(page.screenshot(), caption="Time non trovato", use_container_width=True)
+                    try:
+                        page.locator("text=Time").first.click(timeout=3000)
+                        time_clicked = True
+                    except: pass
+                
+                if not time_clicked:
                     raise Exception("Menu Time non trovato")
                 
-                # ✅ ATTESA ESPLICITA: Aspetta che il sottomenu sia pronto
-                st_status.info("⏳ Attendo sottomenu...")
+                time.sleep(3)
                 
-                # Aspetta che popupactive="true" sia settato
-                try:
-                    page.wait_for_function("""
-                        () => {
-                            const time_elem = document.getElementById('revit_navigation_NavHoverItem_2_label');
-                            return time_elem && time_elem.getAttribute('popupactive') === 'true';
-                        }
-                    """, timeout=5000)
-                    st_status.info("✅ Popup attivo")
-                except:
-                    st_status.warning("Popup non verificato, continuo...")
-                
-                time.sleep(2)  # Attesa aggiuntiva per animazioni
-                
-                st.image(page.screenshot(), caption="Menu Time aperto", use_container_width=True)
-                
-                # ✅ CARTELLINO PRESENZE - Aspetta elemento visibile
-                st_status.info("📋 Cerco Cartellino presenze...")
-                
-                # Aspetta che lnktab_5_label diventi visibile
+                # CARTELLINO PRESENZE
+                st_status.info("📋 Cartellino...")
                 cart_opened = False
                 
                 try:
-                    # Wait for selector con timeout lungo
                     page.wait_for_selector("#lnktab_5_label", state="visible", timeout=10000)
-                    st_status.info("✅ Elemento Cartellino visibile")
-                    
-                    # Click JS con ID
                     result = page.evaluate("""
                         () => {
                             const elem = document.getElementById('lnktab_5_label');
@@ -252,33 +210,15 @@ def scarica_documenti_automatici(mese_nome, anno):
                             return 'NOT_FOUND';
                         }
                     """)
-                    if result == 'OK':
-                        cart_opened = True
-                        st_status.info("✅ Cartellino cliccato (JS)")
-                except Exception as e:
-                    st_status.warning(f"Wait/Click ID fallito: {str(e)[:50]}")
+                    if result == 'OK': cart_opened = True
+                except: pass
                 
-                # Fallback: Locator con force
                 if not cart_opened:
                     try:
-                        cart_elem = page.locator("#lnktab_5_label")
-                        cart_elem.click(force=True, timeout=5000)
+                        page.locator("#lnktab_5_label").click(force=True, timeout=5000)
                         cart_opened = True
-                        st_status.info("✅ Cartellino (locator force)")
-                    except Exception as e:
-                        st_status.warning(f"Locator fallito: {str(e)[:50]}")
-                
-                # Fallback: Text selector
-                if not cart_opened:
-                    try:
-                        cart = page.locator("text=Cartellino presenze").first
-                        if cart.is_visible(timeout=3000):
-                            cart.click()
-                            cart_opened = True
-                            st_status.info("✅ Cartellino (text)")
                     except: pass
                 
-                # Fallback: Dijit class
                 if not cart_opened:
                     try:
                         result = page.evaluate("""
@@ -293,19 +233,15 @@ def scarica_documenti_automatici(mese_nome, anno):
                                 return 'NOT_FOUND';
                             }
                         """)
-                        if result == 'OK':
-                            cart_opened = True
-                            st_status.info("✅ Cartellino (dijit)")
+                        if result == 'OK': cart_opened = True
                     except: pass
                 
                 if not cart_opened:
-                    st_status.error("❌ Cartellino NON cliccato!")
-                    st.image(page.screenshot(), caption="Cartellino non cliccato", use_container_width=True)
                     raise Exception("Cartellino non accessibile")
                 
                 time.sleep(5)
                 
-                st.image(page.screenshot(), caption="Pagina Cartellini", use_container_width=True)
+                st.image(page.screenshot(), caption="Pagina Cartellini (pre-date)", use_container_width=True)
                 
                 # Fix Agenda
                 if page.locator("text=Permessi del").count() > 0:
@@ -315,46 +251,86 @@ def scarica_documenti_automatici(mese_nome, anno):
                         time.sleep(3)
                     except: pass
                 
-                # DATE
-                st_status.info(f"✍️ Date: {d_from_vis} → {d_to_vis}")
+                # ✅ DATE - PRIORITÀ MASSIMA CON VERIFICA
+                st_status.info(f"✍️ DATE: {d_from_vis} → {d_to_vis}")
                 
+                date_ok = False
+                
+                # TENTATIVO 1: Input diretti con verifica immediata
                 try:
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
                     if dal.count() > 0 and al.count() > 0:
+                        # Campo DAL
                         dal.click(force=True)
+                        page.keyboard.press("Control+A")
                         dal.fill("")
-                        dal.type(d_from_vis, delay=80)
+                        time.sleep(0.3)
+                        dal.type(d_from_vis, delay=100)
+                        time.sleep(0.5)
                         dal.press("Tab")
-                        time.sleep(0.5)
+                        time.sleep(1)
                         
+                        # Verifica DAL
+                        val_dal = dal.input_value()
+                        st_status.info(f"DAL verificato: '{val_dal}' (atteso: '{d_from_vis}')")
+                        
+                        # Campo AL
                         al.click(force=True)
+                        page.keyboard.press("Control+A")
                         al.fill("")
-                        al.type(d_to_vis, delay=80)
-                        al.press("Tab")
+                        time.sleep(0.3)
+                        al.type(d_to_vis, delay=100)
                         time.sleep(0.5)
-                        st_status.info("✅ Date OK")
+                        al.press("Tab")
+                        time.sleep(1)
+                        
+                        # Verifica AL
+                        val_al = al.input_value()
+                        st_status.info(f"AL verificato: '{val_al}' (atteso: '{d_to_vis}')")
+                        
+                        if val_dal == d_from_vis and val_al == d_to_vis:
+                            date_ok = True
+                            st_status.success("✅ Date OK (input)")
                 except Exception as e:
-                    st_status.warning(f"Date fallite: {str(e)[:50]}")
+                    st_status.warning(f"Input date fallito: {str(e)[:50]}")
+                
+                # TENTATIVO 2: JS Dojo diretto con verifica
+                if not date_ok:
+                    st_status.info("🔧 Dojo JS...")
                     try:
-                        page.evaluate(f"""
+                        result = page.evaluate(f"""
                             () => {{
-                                var ws = dijit.registry.toArray().filter(w => 
-                                    w.declaredClass === "dijit.form.DateTextBox" && 
-                                    w.domNode.offsetParent !== null
-                                );
-                                if (ws.length >= 2) {{
-                                    var i1 = ws.length >= 3 ? 1 : 0;
-                                    ws[i1].set('displayedValue', '{d_from_vis}');
-                                    ws[i1+1].set('displayedValue', '{d_to_vis}');
+                                try {{
+                                    var ws = dijit.registry.toArray().filter(w => 
+                                        w.declaredClass === "dijit.form.DateTextBox" && 
+                                        w.domNode.offsetParent !== null
+                                    );
+                                    if (ws.length >= 2) {{
+                                        var i1 = ws.length >= 3 ? 1 : 0;
+                                        ws[i1].set('displayedValue', '{d_from_vis}');
+                                        ws[i1+1].set('displayedValue', '{d_to_vis}');
+                                        return 'OK: ' + ws[i1].get('displayedValue') + ' / ' + ws[i1+1].get('displayedValue');
+                                    }}
+                                    return 'NO_WIDGETS';
+                                }} catch(e) {{
+                                    return 'ERROR: ' + e.message;
                                 }}
                             }}
                         """)
-                        st_status.info("✅ Date JS")
-                    except: pass
+                        st_status.info(f"JS result: {result}")
+                        if "OK" in str(result):
+                            date_ok = True
+                            st_status.success("✅ Date OK (JS)")
+                    except Exception as e:
+                        st_status.warning(f"JS fallito: {str(e)[:50]}")
                 
-                st.image(page.screenshot(), caption=f"Pre-ricerca", use_container_width=True)
+                # Screenshot post-date
+                st.image(page.screenshot(), caption=f"Dopo impostazione date", use_container_width=True)
+                
+                if not date_ok:
+                    st_status.error(f"❌ DATE NON IMPOSTATE! Previste: {d_from_vis} → {d_to_vis}")
                 
                 # Ricerca
                 st_status.info("🔍 Ricerca...")
@@ -372,32 +348,81 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 st.image(page.screenshot(), caption=f"Risultati", use_container_width=True)
                 
-                # Download
+                # Download - GESTIONE MULTIPLA
                 st_status.info(f"📄 Download {target_cart_row}...")
                 
-                with context.expect_page(timeout=30000) as new_page_info:
+                # Prova ad aspettare nuova pagina O download diretto
+                pdf_downloaded = False
+                
+                # Metodo 1: Nuova pagina
+                try:
+                    with context.expect_page(timeout=10000) as new_page_info:
+                        try:
+                            row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                            row.scroll_into_view_if_needed()
+                            row.locator("img[src*='search16.png']").click()
+                        except:
+                            page.locator("img[src*='search16.png']").first.click()
+                    
+                    np = new_page_info.value
+                    np.wait_for_load_state("domcontentloaded")
+                    time.sleep(2)
+                    
+                    path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                    
+                    if ".pdf" in np.url.lower():
+                        cs = {c['name']: c['value'] for c in context.cookies()}
+                        with open(path_cart, 'wb') as f:
+                            f.write(requests.get(np.url, cookies=cs).content)
+                    else:
+                        np.pdf(path=path_cart)
+                    
+                    np.close()
+                    pdf_downloaded = True
+                    st_status.success("✅ Cartellino OK")
+                except Exception as e:
+                    st_status.warning(f"Nuova pagina fallita: {str(e)[:50]}")
+                
+                # Metodo 2: Download diretto
+                if not pdf_downloaded:
                     try:
-                        row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                        row.scroll_into_view_if_needed()
-                        row.locator("img[src*='search16.png']").click()
-                    except:
-                        page.locator("img[src*='search16.png']").first.click()
+                        with page.expect_download(timeout=10000) as download_info:
+                            try:
+                                row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                                row.locator("img[src*='search16.png']").click()
+                            except:
+                                page.locator("img[src*='search16.png']").first.click()
+                        
+                        path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                        download_info.value.save_as(path_cart)
+                        pdf_downloaded = True
+                        st_status.success("✅ Cartellino OK (download)")
+                    except Exception as e:
+                        st_status.warning(f"Download diretto fallito: {str(e)[:50]}")
                 
-                np = new_page_info.value
-                np.wait_for_load_state("domcontentloaded")
-                time.sleep(2)
+                # Metodo 3: Cambio URL stesso tab
+                if not pdf_downloaded:
+                    try:
+                        old_url = page.url
+                        try:
+                            row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                            row.locator("img[src*='search16.png']").click()
+                        except:
+                            page.locator("img[src*='search16.png']").first.click()
+                        
+                        # Aspetta cambio URL
+                        page.wait_for_url(lambda url: url != old_url, timeout=10000)
+                        time.sleep(3)
+                        
+                        path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                        page.pdf(path=path_cart)
+                        pdf_downloaded = True
+                        st_status.success("✅ Cartellino OK (same tab)")
+                    except Exception as e:
+                        st_status.warning(f"Same tab fallito: {str(e)[:50]}")
                 
-                path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                
-                if ".pdf" in np.url.lower():
-                    cs = {c['name']: c['value'] for c in context.cookies()}
-                    with open(path_cart, 'wb') as f:
-                        f.write(requests.get(np.url, cookies=cs).content)
-                else:
-                    np.pdf(path=path_cart)
-                
-                np.close()
-                st_status.success("✅ Cartellino OK")
+                if not pdf_downloaded:
+                    st_status.error("❌ Cartellino NON scaricato!")
 
             except Exception as e:
                 st_status.warning(f"Err Cart: {e}")
