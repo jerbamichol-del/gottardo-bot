@@ -188,14 +188,12 @@ def estrai_dati_busta_groq(file_path, prompt):
     try:
         from groq import Groq
         
-        # Converti PDF in immagini
         images = pdf_to_images(file_path)
         if not images:
             return None
         
         client = Groq(api_key=GROQ_API_KEY)
         
-        # Usa solo prima pagina (busta paga di solito è 1 pagina)
         content = [
             {"type": "text", "text": prompt},
             {
@@ -207,7 +205,7 @@ def estrai_dati_busta_groq(file_path, prompt):
         ]
         
         response = client.chat.completions.create(
-            model="llama-3.2-90b-vision-preview",
+            model="llama-3.2-11b-vision-preview",  # ✅ CAMBIATO QUI
             messages=[{"role": "user", "content": content}],
             temperature=0.1,
             max_tokens=2048
@@ -215,7 +213,7 @@ def estrai_dati_busta_groq(file_path, prompt):
         
         result = clean_json_response(response.choices[0].message.content)
         if result:
-            st.success("✅ Analisi busta completata con Groq")
+            st.success("✅ Analisi busta completata con Groq (Llama 3.2 11B)")
         return result
         
     except ImportError:
@@ -223,6 +221,44 @@ def estrai_dati_busta_groq(file_path, prompt):
         return None
     except Exception as e:
         st.error(f"❌ Errore Groq busta: {e}")
+        return None
+
+def estrai_dati_cartellino_groq(file_path, prompt):
+    """Fallback Groq per cartellino"""
+    try:
+        from groq import Groq
+        
+        images = pdf_to_images(file_path)
+        if not images:
+            return None
+        
+        client = Groq(api_key=GROQ_API_KEY)
+        
+        content = [{"type": "text", "text": prompt}]
+        
+        for img_base64 in images[:3]:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+            })
+        
+        response = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",  # ✅ CAMBIATO QUI
+            messages=[{"role": "user", "content": content}],
+            temperature=0.1,
+            max_tokens=1024
+        )
+        
+        result = clean_json_response(response.choices[0].message.content)
+        if result:
+            st.success("✅ Analisi cartellino completata con Groq (Llama 3.2 11B)")
+        return result
+        
+    except ImportError:
+        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
+        return None
+    except Exception as e:
+        st.error(f"❌ Errore Groq cartellino: {e}")
         return None
 
 def estrai_dati_cartellino(file_path):
@@ -804,3 +840,4 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.info("ℹ️ Analisi comparativa non disponibile per Tredicesima.")
         else:
             st.warning("⚠️ Servono entrambi i documenti per l'analisi.")
+
