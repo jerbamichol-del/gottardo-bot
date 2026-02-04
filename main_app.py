@@ -65,18 +65,11 @@ def scarica_documenti_automatici(mese_nome, anno):
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
     except: return None, None
 
-    # Parametri per BUSTA (Testo esatto nella tabella)
-    target_busta = f"{mese_nome} {anno}" 
-    
-    # Parametri per CARTELLINO (Zucchetti usa formati vari, proviamoli tutti)
-    # Nella tua foto vedo "Dicembre 2025", non "12/2025"
-    target_cart_text = f"{mese_nome} {anno}"
-    
-    d_from_vis = f"01/{mese_num:02d}/{anno}"
-    d_to_vis = f"28/{mese_num:02d}/{anno}" # Mettiamo 28 per sicurezza (febbraio)
+    # Target: Es. "Dicembre 2025"
+    target_text = f"{mese_nome} {anno}"
     
     st_status = st.empty()
-    st_status.info(f"🤖 Bot Cloud: {mese_nome} {anno}")
+    st_status.info(f"🤖 Bot Cloud: {target_text}")
     
     path_busta = None
     path_cart = None
@@ -85,7 +78,7 @@ def scarica_documenti_automatici(mese_nome, anno):
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                slow_mo=500,
+                slow_mo=1000, # Rallentiamo per dare tempo a Zucchetti
                 args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
             )
             context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36")
@@ -109,17 +102,21 @@ def scarica_documenti_automatici(mese_nome, anno):
                 try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
                 except: page.click("text=Cedolino")
                 
-                try: page.wait_for_selector(f"tr:has-text('{target_busta}')", timeout=10000)
-                except: time.sleep(2)
+                # Attesa tabella
+                page.wait_for_selector(".dgrid-row", timeout=15000)
                 
-                rows = page.locator(f"tr:has-text('{target_busta}')")
+                # Cerca riga giusta (Escludendo Tredicesima se non richiesta)
+                rows = page.locator(f"tr:has-text('{target_text}')")
                 found = False
                 for i in range(rows.count()):
                     txt = rows.nth(i).inner_text()
                     if "Tredicesima" not in txt:
-                        with page.expect_download(timeout=20000) as dl:
-                            if rows.nth(i).locator("text=Download").count(): rows.nth(i).locator("text=Download").click()
-                            else: rows.nth(i).locator(".z-image").last.click()
+                        with page.expect_download(timeout=30000) as dl:
+                            # Prova vari selettori di download
+                            if rows.nth(i).locator("text=Download").count(): 
+                                rows.nth(i).locator("text=Download").click()
+                            else: 
+                                rows.nth(i).locator(".z-image").last.click()
                         path_busta = f"busta_{mese_num}_{anno}.pdf"
                         dl.value.save_as(path_busta)
                         found = True
@@ -132,7 +129,7 @@ def scarica_documenti_automatici(mese_nome, anno):
             st_status.info("📅 Cartellino...")
             try:
                 page.evaluate("window.scrollTo(0, 0)")
-                # Apertura Menu
+                # Navigazione Menu
                 try: page.click("text=Time", timeout=5000)
                 except: page.evaluate("document.querySelector('span[title=\"Time\"]').click()")
                 
@@ -152,76 +149,64 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 st_status.info("✍️ Ricerca...")
                 
-                # --- TENTATIVO DATE (SOFT) ---
-                # Proviamo a scrivere, ma se fallisce andiamo avanti lo stesso
-                # perché nella tua foto la tabella è già piena di dati!
-                try:
-                    # Cerchiamo input data visibili
-                    inputs = page.locator(".dijitInputInner")
-                    if inputs.count() >= 2:
-                        # Scrittura manuale (più sicura del JS che crasha)
-                        inputs.first.click(force=True)
-                        inputs.first.fill(d_from_vis)
-                        inputs.first.press("Tab")
-                        
-                        inputs.nth(1).click(force=True)
-                        inputs.nth(1).fill(d_to_vis)
-                        inputs.nth(1).press("Tab")
-                        
-                        # Click ricerca solo se abbiamo scritto le date
-                        page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
-                        time.sleep(4)
-                except Exception as e:
-                    print(f"Scrittura date fallita ({e}), proseguo cercando nella tabella esistente...")
+                # SKIP DATA ENTRY (La tabella c'è già!)
+                # Clicchiamo solo Esegui ricerca per refreshare, se possibile
+                try: 
+                    page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
+                    time.sleep(3)
+                except: pass
                 
-                # --- DOWNLOAD DALLA TABELLA ---
-                st_status.info(f"📄 Cerco '{target_cart_text}'...")
+                st_status.info(f"📄 Cerco riga '{target_text}'...")
                 
-                # Cerchiamo la riga che contiene "Dicembre 2025" (o mese scelto)
-                # Dalla tua foto, la colonna si chiama "Rif.temporale" e contiene "Dicembre 2025"
-                row = page.locator(f"tr:has-text('{target_cart_text}')").first
+                # Strategia Selettiva: Cerchiamo la riga che ha ESATTAMENTE "Dicembre 2025" nella colonna Mensilità
+                # Per evitare la Tredicesima.
                 
-                if row.count() == 0:
-                    st_status.warning(f"Riga '{target_cart_text}' non trovata. Provo filtro numerico...")
-                    # Fallback numerico "12/2025"
-                    row = page.locator(f"tr:has-text('{mese_num:02d}/{anno}')").first
+                # Prendiamo tutte le righe che contengono "Dicembre 2025"
+                rows = page.locator(f"tr:has-text('{target_text}')")
                 
-                if row.count() > 0:
+                target_row = None
+                
+                for i in range(rows.count()):
+                    r_text = rows.nth(i).inner_text()
+                    # Logica: Se cerchiamo Dicembre, vogliamo evitare "Tredicesima"
+                    # Se il mese non è Dicembre, la Tredicesima non dovrebbe esserci comunque
+                    if "Tredicesima" not in r_text:
+                        target_row = rows.nth(i)
+                        break
+                
+                # Se non abbiamo trovato una riga "pulita", prendiamo la prima che capita col mese
+                if not target_row and rows.count() > 0:
+                    target_row = rows.first
+                
+                if target_row:
                     with context.expect_page(timeout=30000) as new_page_info:
-                        # Dalla foto vedo bottoni "Download". Se ci sono, clicchiamo quelli!
-                        if row.locator("text=Download").count() > 0:
-                            row.locator("text=Download").click()
-                        elif row.locator("img[src*='search16.png']").count() > 0:
-                            row.locator("img[src*='search16.png']").click()
+                        target_row.scroll_into_view_if_needed()
+                        # Clicchiamo "Download"
+                        if target_row.locator("text=Download").count() > 0:
+                            target_row.locator("text=Download").click()
+                        elif target_row.locator(".z-image").count() > 0:
+                             target_row.locator(".z-image").last.click() # Spesso l'ultima icona è il download
                         else:
-                            # Clicca qualsiasi cosa cliccabile nella riga
-                            row.locator("a, .z-image").first.click()
-                else:
-                    # Se non trovo la riga specifica, scarico la PRIMA riga della tabella
-                    # (Che di solito è l'ultimo mese, vedi tua foto)
-                    st_status.warning("Mese specifico non trovato. Scarico l'ultimo disponibile...")
-                    with context.expect_page(timeout=30000) as new_page_info:
-                        # Prendi la prima riga dati della tabella
-                        first_row = page.locator(".dgrid-row").first
-                        if first_row.locator("text=Download").count() > 0:
-                             first_row.locator("text=Download").click()
-                        else:
-                             page.locator("img[src*='search16.png']").first.click()
+                             # Click generico sulla riga
+                             target_row.click()
 
-                # Gestione PDF
-                np = new_page_info.value
-                np.wait_for_load_state()
-                path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                
-                if ".pdf" in np.url.lower():
-                     import requests
-                     cs = {c['name']: c['value'] for c in context.cookies()}
-                     with open(path_cart, 'wb') as f: f.write(requests.get(np.url, cookies=cs).content)
+                    # Gestione PDF
+                    np = new_page_info.value
+                    np.wait_for_load_state()
+                    path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                    
+                    if ".pdf" in np.url.lower():
+                         import requests
+                         cs = {c['name']: c['value'] for c in context.cookies()}
+                         with open(path_cart, 'wb') as f: f.write(requests.get(np.url, cookies=cs).content)
+                    else:
+                        np.pdf(path=path_cart)
+                    
+                    np.close()
+                    st_status.success("✅ Cartellino OK")
                 else:
-                    np.pdf(path=path_cart)
-                
-                np.close()
-                st_status.success("✅ Cartellino OK")
+                    st_status.error("Riga non trovata in tabella.")
+                    st.image(page.screenshot(), caption="Tabella senza mese cercato", use_container_width=True)
 
             except Exception as e:
                 st_status.warning(f"Errore Cart: {e}")
@@ -231,7 +216,7 @@ def scarica_documenti_automatici(mese_nome, anno):
             browser.close()
             
     except Exception as e:
-        st_status.error(f"Errore: {e}")
+        st_status.error(f"Errore Gen: {e}")
         return None, None
 
     return path_busta, path_cart
