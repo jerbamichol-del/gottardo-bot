@@ -332,7 +332,7 @@ def pulisci_file(path_busta, path_cart):
 
 # --- CORE BOT ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot con gestione duplicati Dicembre + fix download cartellino"""
+    """✅ Bot con gestione duplicati Dicembre + fix download cartellino + screenshot debug"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
@@ -455,7 +455,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e: 
                 st.error(f"Errore: {e}")
 
-            # CARTELLINO - ✅ FIX COMPLETO
+            # CARTELLINO - ✅ FIX CON SCREENSHOT DEBUG
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 try:
@@ -524,97 +524,150 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except: 
                         page.keyboard.press("Enter")
                     
-                    # Aspetta risultati
-                    time.sleep(5)
+                    # ✅ ASPETTA PIÙ TEMPO per caricamento tabella
+                    time.sleep(8)
                     
                     try:
-                        page.wait_for_selector("text=Risultati della ricerca", timeout=10000)
+                        page.wait_for_selector("text=Risultati della ricerca", timeout=15000)
                         st.info("✅ Risultati ricerca trovati")
                     except:
                         st.warning("⚠️ Timeout risultati")
                     
-                    # ✅ CERCA LA RIGA CON IL MESE CORRETTO
-                    target_cart_text = f"{mese_num}/{str(anno)[-2:]}"  # Es: "12/25"
-                    st.info(f"🔍 Ricerca riga: {target_cart_text}")
+                    # ✅ SCREENSHOT DEBUG
+                    screenshot_bytes = page.screenshot()
+                    with st.expander("📸 Screenshot pagina risultati (DEBUG)"):
+                        st.image(screenshot_bytes, caption="Pagina dopo 'Esegui ricerca'", use_container_width=True)
                     
-                    try:
-                        riga_target = page.locator(f"tr:has-text('{target_cart_text}')").first
-                        
-                        if riga_target.count() > 0:
-                            st.success(f"✅ Riga trovata")
+                    # ✅ PROVA MULTIPLI PATTERN per trovare la riga
+                    pattern_da_provare = [
+                        f"{mese_num}/{str(anno)[-2:]}",      # "12/25"
+                        f"{mese_num}/{anno}",                 # "12/2025"
+                        f"{mese_num:02d}/{str(anno)[-2:]}",  # "12/25" con zero padding
+                        f"{mese_num:02d}/{anno}",            # "12/2025" con zero padding
+                        "BATTISTELLI",                        # Nome dipendente
+                        mese_nome                             # "Dicembre"
+                    ]
+                    
+                    riga_trovata = False
+                    riga_target = None
+                    pattern_match = None
+                    
+                    for pattern in pattern_da_provare:
+                        try:
+                            st.info(f"🔍 Provo pattern: '{pattern}'")
+                            riga_test = page.locator(f"tr:has-text('{pattern}')").first
                             
-                            # Clicca sull'icona search nella riga
-                            try:
+                            if riga_test.count() > 0:
+                                # Verifica che la riga contenga anche un'icona search
+                                if riga_test.locator("img[src*='search']").count() > 0:
+                                    riga_target = riga_test
+                                    pattern_match = pattern
+                                    riga_trovata = True
+                                    st.success(f"✅ Riga trovata con pattern: '{pattern}'")
+                                    break
+                        except:
+                            continue
+                    
+                    if not riga_trovata:
+                        st.warning("⚠️ Nessun pattern ha trovato la riga")
+                        
+                        # ✅ FALLBACK: Cerca TUTTE le icone search nella tabella
+                        try:
+                            all_search_icons = page.locator("img[src*='search']")
+                            num_icons = all_search_icons.count()
+                            
+                            st.info(f"🔍 Trovate {num_icons} icone search nella pagina")
+                            
+                            if num_icons > 0:
+                                # Prendi la PRIMA icona nella sezione risultati
+                                st.warning("⚠️ Usando PRIMA icona search come fallback")
+                                riga_target = all_search_icons.first
+                                riga_trovata = True
+                        except Exception as e:
+                            st.error(f"❌ Errore ricerca fallback: {e}")
+                    
+                    # ✅ CLICCA sulla riga trovata
+                    if riga_trovata and riga_target:
+                        try:
+                            st.info("📥 Click su icona dettaglio...")
+                            old_url = page.url
+                            
+                            # Se riga_target è un'icona diretta, clicca
+                            if "img" in str(riga_target):
+                                riga_target.click()
+                            else:
+                                # Altrimenti cerca l'icona dentro la riga
                                 icona_search = riga_target.locator("img[src*='search']").first
+                                icona_search.click()
+                            
+                            # Aspetta cambio pagina
+                            time.sleep(8)
+                            
+                            new_url = page.url
+                            
+                            if new_url != old_url:
+                                st.success(f"✅ Nuova pagina aperta")
                                 
-                                if icona_search.count() > 0:
-                                    st.info("📥 Click su dettaglio...")
-                                    old_url = page.url
+                                # Aspetta caricamento completo
+                                try:
+                                    page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
+                                except:
+                                    time.sleep(3)
+                                
+                                # ✅ SCREENSHOT della pagina dettaglio
+                                screenshot_dettaglio = page.screenshot()
+                                with st.expander("📸 Screenshot dettaglio cartellino (DEBUG)"):
+                                    st.image(screenshot_dettaglio, caption="Pagina dettaglio timbrature", use_container_width=True)
+                                
+                                # Scarica PDF
+                                try:
+                                    cs = {c['name']: c['value'] for c in context.cookies()}
+                                    response = requests.get(new_url, cookies=cs, timeout=30)
                                     
-                                    icona_search.click()
-                                    time.sleep(5)
-                                    
-                                    new_url = page.url
-                                    
-                                    if new_url != old_url:
-                                        st.success(f"✅ Nuova pagina aperta")
-                                        
-                                        # Aspetta caricamento
-                                        try:
-                                            page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
-                                        except:
-                                            time.sleep(3)
-                                        
-                                        # Scarica PDF
-                                        try:
-                                            cs = {c['name']: c['value'] for c in context.cookies()}
-                                            response = requests.get(new_url, cookies=cs, timeout=30)
-                                            
-                                            if b'%PDF' in response.content[:10]:
-                                                with open(path_cart, 'wb') as f:
-                                                    f.write(response.content)
-                                                st.success("✅ PDF via HTTP")
-                                            else:
-                                                page.pdf(path=path_cart)
-                                                st.success("✅ PDF generato")
-                                        except Exception as e:
-                                            st.warning(f"⚠️ Tentativo 1 fallito: {e}")
-                                            page.pdf(path=path_cart)
-                                            st.success("✅ PDF fallback")
+                                    if b'%PDF' in response.content[:10]:
+                                        with open(path_cart, 'wb') as f:
+                                            f.write(response.content)
+                                        st.success("✅ PDF via HTTP")
                                     else:
-                                        st.warning("⚠️ URL non cambiato")
-                                        time.sleep(3)
                                         page.pdf(path=path_cart)
-                                else:
-                                    st.error("❌ Icona search non trovata")
-                            except Exception as e:
-                                st.error(f"❌ Errore click: {e}")
-                        else:
-                            st.warning(f"⚠️ Riga '{target_cart_text}' non trovata")
-                            # Fallback: prima icona
-                            try:
-                                page.locator("img[src*='search16.png']").first.click()
-                                time.sleep(5)
+                                        st.success("✅ PDF generato da pagina")
+                                except Exception as e:
+                                    st.warning(f"⚠️ Tentativo 1 fallito: {e}")
+                                    page.pdf(path=path_cart)
+                                    st.success("✅ PDF fallback")
+                            else:
+                                st.warning("⚠️ URL non cambiato, genero PDF della pagina corrente")
+                                time.sleep(3)
                                 page.pdf(path=path_cart)
-                            except:
-                                pass
-                    except Exception as e:
-                        st.error(f"❌ Errore ricerca riga: {e}")
+                        except Exception as e:
+                            st.error(f"❌ Errore click: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                    else:
+                        st.error("❌ Impossibile trovare la riga con il cartellino")
+                        # Ultimo tentativo: PDF della pagina corrente
+                        try:
+                            page.pdf(path=path_cart)
+                            st.info("📄 Generato PDF della pagina corrente come ultima risorsa")
+                        except:
+                            pass
                     
                     # Verifica file
                     if os.path.exists(path_cart):
                         size = os.path.getsize(path_cart)
                         
-                        if size > 5000:  # Almeno 5KB
+                        if size > 5000:
                             cart_ok = True
                             st_status.success(f"✅ Cartellino OK ({size} bytes)")
                         else:
                             st.warning(f"⚠️ PDF piccolo ({size} bytes)")
                     else:
-                        st.error("❌ File non trovato")
+                        st.error("❌ File cartellino non trovato")
 
                 except Exception as e:
                     st.error(f"❌ Errore cartellino: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
             browser.close()
             
