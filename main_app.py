@@ -10,6 +10,7 @@ import json
 import time
 import calendar
 import locale
+from pathlib import Path
 
 # --- SETUP CLOUD ---
 os.system("playwright install chromium")
@@ -42,23 +43,47 @@ def clean_json_response(text):
         return None
 
 def estrai_dati_busta_dettagliata(file_path):
-    if not file_path or not os.path.exists(file_path): return None
+    if not file_path:
+        st.warning("⚠️ Path busta vuoto")
+        return None
+    if not os.path.exists(file_path):
+        st.warning(f"⚠️ File busta non esiste: {file_path}")
+        return None
+    
     try:
-        with open(file_path, "rb") as f: bytes_data = f.read()
+        file_size = os.path.getsize(file_path)
+        st.info(f"📄 Busta: {file_size} bytes")
+        
+        with open(file_path, "rb") as f: 
+            bytes_data = f.read()
+        
         prompt = """Analizza cedolino. JSON: {"dati_generali": {"netto": float, "giorni_pagati": float}, "competenze": {"base": float, "straordinari": float}, "trattenute": {"inps": float, "irpef_netta": float}, "ferie_tfr": {"saldo": float}}"""
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
-    except: 
+    except Exception as e:
+        st.error(f"❌ Errore estrazione busta: {e}")
         return None
 
 def estrai_dati_cartellino(file_path):
-    if not file_path or not os.path.exists(file_path): return None
+    if not file_path:
+        st.warning("⚠️ Path cartellino vuoto")
+        return None
+    if not os.path.exists(file_path):
+        st.warning(f"⚠️ File cartellino non esiste: {file_path}")
+        return None
+    
     try:
-        with open(file_path, "rb") as f: bytes_data = f.read()
+        file_size = os.path.getsize(file_path)
+        st.info(f"📄 Cartellino: {file_size} bytes")
+        
+        with open(file_path, "rb") as f: 
+            bytes_data = f.read()
+        
         prompt = """Analizza cartellino. JSON: { "giorni_reali": int, "note": "string" }"""
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
-    except: 
+    except Exception as e:
+        st.error(f"❌ Errore estrazione cartellino: {e}")
         return None
 
 # --- CORE ---
@@ -75,12 +100,14 @@ def scarica_documenti_automatici(mese_nome, anno):
     d_from_vis = f"01/{mese_num:02d}/{anno}"
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
     
-    # ✅ Path definitivi
-    path_busta = f"busta_{mese_num}_{anno}.pdf"
-    path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+    # ✅ Path assoluti
+    work_dir = Path.cwd()
+    path_busta = str(work_dir / f"busta_{mese_num}_{anno}.pdf")
+    path_cart = str(work_dir / f"cartellino_{mese_num}_{anno}.pdf")
     
     st_status = st.empty()
     st_status.info(f"🤖 Bot: {mese_nome} {anno}")
+    st.info(f"📁 Working dir: {work_dir}")
     
     busta_ok = False
     cart_ok = False
@@ -118,29 +145,49 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 try: 
                     page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                    st_status.info("✅ Sezione Cedolino aperta")
                 except: 
                     page.click("text=Cedolino")
+                    st_status.info("✅ Cedolino cliccato")
                 
                 page.wait_for_selector(".dgrid-row", timeout=15000)
                 time.sleep(2)
                 
+                st_status.info(f"🔍 Cerco: '{target_busta}'")
                 rows = page.locator(f"tr:has-text('{target_busta}')")
-                for i in range(rows.count()):
+                rows_count = rows.count()
+                st_status.info(f"📊 Righe trovate: {rows_count}")
+                
+                for i in range(rows_count):
                     txt = rows.nth(i).inner_text()
+                    st_status.info(f"Riga {i}: {txt[:50]}")
+                    
                     if "Tredicesima" not in txt:
-                        with page.expect_download(timeout=20000) as dl:
-                            if rows.nth(i).locator("text=Download").count(): 
-                                rows.nth(i).locator("text=Download").click()
-                            else: 
-                                rows.nth(i).locator(".z-image").last.click()
-                        
-                        dl.value.save_as(path_busta)
-                        busta_ok = True
-                        st_status.success(f"✅ Busta → {path_busta}")
-                        break
+                        st_status.info(f"✅ Riga valida: {i}")
+                        try:
+                            with page.expect_download(timeout=20000) as dl:
+                                if rows.nth(i).locator("text=Download").count(): 
+                                    rows.nth(i).locator("text=Download").click()
+                                else: 
+                                    rows.nth(i).locator(".z-image").last.click()
+                            
+                            dl.value.save_as(path_busta)
+                            
+                            # Verifica file
+                            if os.path.exists(path_busta):
+                                size = os.path.getsize(path_busta)
+                                busta_ok = True
+                                st_status.success(f"✅ Busta OK: {size} bytes")
+                            else:
+                                st_status.error("❌ File busta non creato!")
+                            break
+                        except Exception as e:
+                            st_status.error(f"❌ Download busta fallito: {e}")
                         
                 if not busta_ok: 
-                    st_status.warning("Busta non trovata")
+                    st_status.warning("⚠️ Busta non trovata/scaricata")
+                    st.image(page.screenshot(), caption="Sezione Cedolini", use_container_width=True)
+                    
             except Exception as e: 
                 st_status.error(f"Err Busta: {e}")
 
@@ -321,10 +368,8 @@ def scarica_documenti_automatici(mese_nome, anno):
                 # DOWNLOAD
                 st_status.info(f"📄 Download {target_cart_row}...")
                 
-                # Salva URL corrente
                 old_url = page.url
                 
-                # Click lente
                 try:
                     row = page.locator(f"tr:has-text('{target_cart_row}')").first
                     row.scroll_into_view_if_needed()
@@ -332,7 +377,6 @@ def scarica_documenti_automatici(mese_nome, anno):
                 except:
                     page.locator("img[src*='search16.png']").first.click()
                 
-                # Aspetta popup caricamento
                 st_status.info("⏳ Attendo...")
                 try:
                     page.wait_for_selector("text=Caricamento in corso", state="attached", timeout=5000)
@@ -344,7 +388,6 @@ def scarica_documenti_automatici(mese_nome, anno):
                 new_url = page.url
                 
                 if new_url != old_url:
-                    # URL cambiato
                     try:
                         cs = {c['name']: c['value'] for c in context.cookies()}
                         response = requests.get(new_url, cookies=cs, timeout=30)
@@ -352,25 +395,21 @@ def scarica_documenti_automatici(mese_nome, anno):
                         if b'%PDF' in response.content[:10]:
                             with open(path_cart, 'wb') as f:
                                 f.write(response.content)
-                            cart_ok = True
-                            st_status.success(f"✅ Cartellino → {path_cart}")
                         else:
                             page.pdf(path=path_cart)
-                            cart_ok = True
-                            st_status.success(f"✅ Cartellino → {path_cart} (print)")
                     except Exception as e:
                         st_status.warning(f"Download fallito: {str(e)[:50]}")
-                else:
-                    # Fallback iframe
-                    try:
                         page.pdf(path=path_cart)
-                        cart_ok = True
-                        st_status.success(f"✅ Cartellino → {path_cart} (iframe)")
-                    except Exception as e:
-                        st_status.error(f"PDF fallito: {str(e)[:50]}")
+                else:
+                    page.pdf(path=path_cart)
                 
-                if not cart_ok:
-                    st_status.error("❌ Cartellino NON scaricato!")
+                # Verifica file
+                if os.path.exists(path_cart):
+                    size = os.path.getsize(path_cart)
+                    cart_ok = True
+                    st_status.success(f"✅ Cartellino OK: {size} bytes")
+                else:
+                    st_status.error("❌ File cartellino non creato!")
 
             except Exception as e:
                 st_status.error(f"Err Cart: {e}")
@@ -380,11 +419,11 @@ def scarica_documenti_automatici(mese_nome, anno):
     except Exception as e:
         st_status.error(f"Errore Gen: {e}")
     
-    # ✅ Verifica file esistono
+    # Verifica finale
     final_busta = path_busta if busta_ok and os.path.exists(path_busta) else None
     final_cart = path_cart if cart_ok and os.path.exists(path_cart) else None
     
-    st_status.info(f"📦 Busta: {final_busta}, Cart: {final_cart}")
+    st.success(f"📦 Ritorno → Busta: {final_busta}, Cart: {final_cart}")
     
     return final_busta, final_cart
 
