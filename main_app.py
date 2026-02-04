@@ -313,83 +313,81 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 time.sleep(5)
                 
-                st.image(page.screenshot(), caption=f"Risultati", use_container_width=True)
-                
-                # ✅ DOWNLOAD - Same tab con URL change
+                # DOWNLOAD - Strategia robusta
                 st_status.info(f"📄 Download {target_cart_row}...")
                 
                 pdf_downloaded = False
                 
                 # Salva URL corrente
                 old_url = page.url
-                st_status.info(f"URL pre-click: {old_url}")
                 
                 # Click sulla lente
                 try:
                     row = page.locator(f"tr:has-text('{target_cart_row}')").first
                     row.scroll_into_view_if_needed()
                     row.locator("img[src*='search16.png']").click()
+                    st_status.info("✅ Click lente OK")
                 except:
                     page.locator("img[src*='search16.png']").first.click()
+                    st_status.info("✅ Click lente fallback")
                 
-                st_status.info("⏳ Attendo caricamento PDF...")
-                
-                # Aspetta cambio URL (max 15s)
+                # ✅ STEP 1: Aspetta che sparisca popup "Caricamento"
+                st_status.info("⏳ Attendo caricamento...")
                 try:
-                    page.wait_for_function(
-                        f"() => window.location.href !== '{old_url}'",
-                        timeout=15000
-                    )
-                    new_url = page.url
-                    st_status.info(f"✅ URL cambiato: {new_url}")
-                    
-                    # Aspetta caricamento completo
-                    time.sleep(5)
-                    
-                    # Salva PDF
+                    page.wait_for_selector("text=Caricamento in corso", state="attached", timeout=5000)
+                    st_status.info("📦 Popup caricamento apparso")
+                    page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=30000)
+                    st_status.info("✅ Popup sparito")
+                except:
+                    st_status.info("ℹ️ Popup non rilevato")
+                    time.sleep(3)
+                
+                # ✅ STEP 2: Verifica cambio URL
+                time.sleep(2)
+                new_url = page.url
+                st_status.info(f"URL: {new_url[:80]}...")
+                
+                if new_url != old_url:
+                    # URL cambiato!
                     path_cart = f"cartellino_{mese_num}_{anno}.pdf"
                     
-                    # Se URL contiene "DOPDF=y", è un PDF embedded
-                    if "DOPDF=y" in new_url or "SERVIZIO=JPSC" in new_url:
-                        # Download PDF via requests con cookies
-                        cs = {c['name']: c['value'] for c in context.cookies()}
-                        response = requests.get(new_url, cookies=cs)
-                        with open(path_cart, 'wb') as f:
-                            f.write(response.content)
-                        pdf_downloaded = True
-                        st_status.success("✅ Cartellino OK (URL)")
-                    else:
-                        # Fallback: print to PDF
-                        page.pdf(path=path_cart)
-                        pdf_downloaded = True
-                        st_status.success("✅ Cartellino OK (PDF)")
-                        
-                except Exception as e:
-                    st_status.warning(f"URL change fallito: {str(e)[:50]}")
-                
-                # Fallback: aspetta popup/dialog
-                if not pdf_downloaded:
-                    st_status.info("🔧 Tentativo popup...")
+                    # Download via requests
                     try:
-                        # Aspetta che sparisca il popup di caricamento
-                        page.wait_for_selector("text=Caricamento in corso", state="hidden", timeout=15000)
-                        time.sleep(3)
+                        cs = {c['name']: c['value'] for c in context.cookies()}
+                        response = requests.get(new_url, cookies=cs, timeout=30)
                         
-                        new_url = page.url
-                        if new_url != old_url:
-                            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                            cs = {c['name']: c['value'] for c in context.cookies()}
-                            response = requests.get(new_url, cookies=cs)
+                        # Verifica che sia un PDF
+                        if b'%PDF' in response.content[:10]:
                             with open(path_cart, 'wb') as f:
                                 f.write(response.content)
                             pdf_downloaded = True
-                            st_status.success("✅ Cartellino OK (popup)")
+                            st_status.success("✅ Cartellino OK")
+                        else:
+                            # Non è PDF, prova page.pdf()
+                            page.pdf(path=path_cart)
+                            pdf_downloaded = True
+                            st_status.success("✅ Cartellino OK (print)")
                     except Exception as e:
-                        st_status.warning(f"Popup fallito: {str(e)[:50]}")
+                        st_status.warning(f"Download fallito: {str(e)[:50]}")
+                else:
+                    st_status.warning("URL non cambiato")
+                
+                # Fallback: Aspetta iframe/embed
+                if not pdf_downloaded:
+                    st_status.info("🔧 Cerco iframe...")
+                    try:
+                        iframe = page.frame_locator("iframe").first
+                        if iframe:
+                            time.sleep(3)
+                            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+                            page.pdf(path=path_cart)
+                            pdf_downloaded = True
+                            st_status.success("✅ Cartellino OK (iframe)")
+                    except: pass
                 
                 if not pdf_downloaded:
                     st_status.error("❌ Cartellino NON scaricato!")
-                    st.image(page.screenshot(), caption="Errore download", use_container_width=True)
+                    st.image(page.screenshot(), caption="Errore", use_container_width=True)
 
             except Exception as e:
                 st_status.warning(f"Err Cart: {e}")
