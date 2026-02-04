@@ -4,7 +4,7 @@ import re
 import requests
 import os
 import streamlit as st
-import google.generativeapi as genai
+import google.generativeai as genai  # ✅ CORRETTO
 from playwright.sync_api import sync_playwright
 import json
 import time
@@ -251,18 +251,17 @@ def scarica_documenti_automatici(mese_nome, anno):
                         time.sleep(3)
                     except: pass
                 
-                # ✅ DATE - PRIORITÀ MASSIMA CON VERIFICA
+                # DATE - ROBUSTE CON VERIFICA
                 st_status.info(f"✍️ DATE: {d_from_vis} → {d_to_vis}")
                 
                 date_ok = False
                 
-                # TENTATIVO 1: Input diretti con verifica immediata
+                # TENTATIVO 1: Input diretti
                 try:
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
                     if dal.count() > 0 and al.count() > 0:
-                        # Campo DAL
                         dal.click(force=True)
                         page.keyboard.press("Control+A")
                         dal.fill("")
@@ -272,11 +271,9 @@ def scarica_documenti_automatici(mese_nome, anno):
                         dal.press("Tab")
                         time.sleep(1)
                         
-                        # Verifica DAL
                         val_dal = dal.input_value()
-                        st_status.info(f"DAL verificato: '{val_dal}' (atteso: '{d_from_vis}')")
+                        st_status.info(f"DAL: '{val_dal}' (atteso: '{d_from_vis}')")
                         
-                        # Campo AL
                         al.click(force=True)
                         page.keyboard.press("Control+A")
                         al.fill("")
@@ -286,9 +283,8 @@ def scarica_documenti_automatici(mese_nome, anno):
                         al.press("Tab")
                         time.sleep(1)
                         
-                        # Verifica AL
                         val_al = al.input_value()
-                        st_status.info(f"AL verificato: '{val_al}' (atteso: '{d_to_vis}')")
+                        st_status.info(f"AL: '{val_al}' (atteso: '{d_to_vis}')")
                         
                         if val_dal == d_from_vis and val_al == d_to_vis:
                             date_ok = True
@@ -296,7 +292,7 @@ def scarica_documenti_automatici(mese_nome, anno):
                 except Exception as e:
                     st_status.warning(f"Input date fallito: {str(e)[:50]}")
                 
-                # TENTATIVO 2: JS Dojo diretto con verifica
+                # TENTATIVO 2: JS Dojo
                 if not date_ok:
                     st_status.info("🔧 Dojo JS...")
                     try:
@@ -326,11 +322,10 @@ def scarica_documenti_automatici(mese_nome, anno):
                     except Exception as e:
                         st_status.warning(f"JS fallito: {str(e)[:50]}")
                 
-                # Screenshot post-date
-                st.image(page.screenshot(), caption=f"Dopo impostazione date", use_container_width=True)
+                st.image(page.screenshot(), caption=f"Dopo date", use_container_width=True)
                 
                 if not date_ok:
-                    st_status.error(f"❌ DATE NON IMPOSTATE! Previste: {d_from_vis} → {d_to_vis}")
+                    st_status.error(f"❌ DATE NON IMPOSTATE!")
                 
                 # Ricerca
                 st_status.info("🔍 Ricerca...")
@@ -348,10 +343,9 @@ def scarica_documenti_automatici(mese_nome, anno):
                 
                 st.image(page.screenshot(), caption=f"Risultati", use_container_width=True)
                 
-                # Download - GESTIONE MULTIPLA
+                # Download - 3 metodi
                 st_status.info(f"📄 Download {target_cart_row}...")
                 
-                # Prova ad aspettare nuova pagina O download diretto
                 pdf_downloaded = False
                 
                 # Metodo 1: Nuova pagina
@@ -398,9 +392,9 @@ def scarica_documenti_automatici(mese_nome, anno):
                         pdf_downloaded = True
                         st_status.success("✅ Cartellino OK (download)")
                     except Exception as e:
-                        st_status.warning(f"Download diretto fallito: {str(e)[:50]}")
+                        st_status.warning(f"Download fallito: {str(e)[:50]}")
                 
-                # Metodo 3: Cambio URL stesso tab
+                # Metodo 3: Same tab
                 if not pdf_downloaded:
                     try:
                         old_url = page.url
@@ -410,7 +404,6 @@ def scarica_documenti_automatici(mese_nome, anno):
                         except:
                             page.locator("img[src*='search16.png']").first.click()
                         
-                        # Aspetta cambio URL
                         page.wait_for_url(lambda url: url != old_url, timeout=10000)
                         time.sleep(3)
                         
