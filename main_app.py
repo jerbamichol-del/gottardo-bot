@@ -21,11 +21,9 @@ except: pass
 # --- CREDENZIALI DINAMICHE ---
 def get_credentials():
     """✅ Sistema di login con credenziali utente"""
-    # Controlla se ci sono credenziali in session_state
     if 'credentials_set' in st.session_state and st.session_state.get('credentials_set'):
         return st.session_state.get('username'), st.session_state.get('password')
     
-    # Altrimenti prova da secrets (per retrocompatibilità)
     try:
         return st.secrets["ZK_USER"], st.secrets["ZK_PASS"]
     except:
@@ -206,7 +204,7 @@ def pulisci_file(path_busta, path_cart):
 
 # --- CORE BOT ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot con gestione password scaduta"""
+    """✅ Bot senza falsi positivi password scaduta"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
@@ -234,7 +232,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
     
     busta_ok = False
     cart_ok = False
-    password_scaduta = False
 
     try:
         with sync_playwright() as p:
@@ -261,37 +258,12 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             
             time.sleep(3)
             
-            # RILEVA CAMBIO PASSWORD
-            try:
-                cambio_pass_indicators = [
-                    "text=cambia password",
-                    "text=password scaduta",
-                    "text=change password",
-                    "input[name*='newPassword']",
-                    "input[name*='nuovaPassword']",
-                    "text=La password è scaduta"
-                ]
-                
-                for indicator in cambio_pass_indicators:
-                    if page.locator(indicator).count() > 0:
-                        st_status.warning("⚠️ PASSWORD SCADUTA RILEVATA")
-                        password_scaduta = True
-                        screenshot = page.screenshot()
-                        st.image(screenshot, caption="Pagina cambio password rilevata", use_container_width=True)
-                        break
-                
-                if password_scaduta:
-                    browser.close()
-                    return None, None, "PASSWORD_SCADUTA"
-                
-            except: pass
-            
             # Verifica login riuscito
             try:
                 page.wait_for_selector("text=I miei dati", timeout=15000)
                 st_status.info("✅ Login OK")
             except:
-                st_status.error("❌ Login fallito - Credenziali errate o problema sito")
+                st_status.error("❌ Login fallito - Verifica credenziali o stato del sito")
                 screenshot = page.screenshot()
                 st.image(screenshot, caption="Errore login", use_container_width=True)
                 browser.close()
@@ -498,12 +470,7 @@ with st.sidebar:
             
             busta, cart, errore = scarica_documenti_automatici(sel_mese, sel_anno, username, password, tipo_documento=tipo)
             
-            if errore == "PASSWORD_SCADUTA":
-                st.error("🔐 **PASSWORD SCADUTA RILEVATA!**")
-                st.warning("⚠️ Devi cambiare la password sul sito Gottardo.")
-                st.info("📌 **Procedura:**\n1. Apri [Gottardo SelfService](https://selfservice.gottardospa.it)\n2. Cambia la password seguendo le istruzioni\n3. Torna qui e clicca 'Cambia Credenziali'\n4. Inserisci la nuova password")
-                st.stop()
-            elif errore == "LOGIN_FALLITO":
+            if errore == "LOGIN_FALLITO":
                 st.error("❌ **LOGIN FALLITO**")
                 st.warning("Verifica username e password oppure controlla lo stato del sito.")
                 st.stop()
