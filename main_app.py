@@ -18,13 +18,24 @@ if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsProacto
 try: locale.setlocale(locale.LC_TIME, 'it_IT.UTF-8')
 except: pass 
 
-# --- CREDENZIALI ---
+# --- CREDENZIALI DINAMICHE ---
+def get_credentials():
+    """✅ Sistema di login con credenziali utente"""
+    # Controlla se ci sono credenziali in session_state
+    if 'credentials_set' in st.session_state and st.session_state.get('credentials_set'):
+        return st.session_state.get('username'), st.session_state.get('password')
+    
+    # Altrimenti prova da secrets (per retrocompatibilità)
+    try:
+        return st.secrets["ZK_USER"], st.secrets["ZK_PASS"]
+    except:
+        return None, None
+
+# Google API Key
 try:
-    ZK_USER = st.secrets["ZK_USER"]
-    ZK_PASS = st.secrets["ZK_PASS"]
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except Exception as e:
-    st.error(f"❌ Secrets mancanti: {e}")
+    st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
 genai.configure(api_key=GOOGLE_API_KEY)
@@ -33,7 +44,7 @@ try:
 except: 
     model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- PARSING AI ULTRA-SPECIFICO ---
+# --- PARSING AI ---
 def clean_json_response(text):
     try:
         text = re.sub(r"```json|```", "", text).strip()
@@ -44,7 +55,6 @@ def clean_json_response(text):
         return None
 
 def estrai_dati_busta_dettagliata(file_path):
-    """✅ PROMPT ULTRA-SPECIFICO BASATO SUL CEDOLINO REALE"""
     if not file_path or not os.path.exists(file_path):
         return None
     
@@ -135,9 +145,7 @@ def estrai_dati_busta_dettagliata(file_path):
         st.error(f"❌ Err busta AI: {e}")
         return None
 
-
 def estrai_dati_cartellino(file_path):
-    """✅ PROMPT REALISTICO - Conta giorni dal periodo"""
     if not file_path or not os.path.exists(file_path):
         return None
     
@@ -174,17 +182,36 @@ def estrai_dati_cartellino(file_path):
         st.error(f"❌ Err cart AI: {e}")
         return None
 
+# --- PULIZIA FILE ---
+def pulisci_file(path_busta, path_cart):
+    """Elimina i file PDF scaricati dopo l'analisi"""
+    file_eliminati = []
+    
+    if path_busta and os.path.exists(path_busta):
+        try:
+            os.remove(path_busta)
+            file_eliminati.append(os.path.basename(path_busta))
+        except Exception as e:
+            st.warning(f"⚠️ Non riesco a eliminare {path_busta}: {e}")
+    
+    if path_cart and os.path.exists(path_cart):
+        try:
+            os.remove(path_cart)
+            file_eliminati.append(os.path.basename(path_cart))
+        except Exception as e:
+            st.warning(f"⚠️ Non riesco a eliminare {path_cart}: {e}")
+    
+    if file_eliminati:
+        st.info(f"🗑️ File eliminati: {', '.join(file_eliminati)}")
+
 # --- CORE BOT ---
-def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
-    """
-    ✅ tipo_documento: "cedolino" o "tredicesima"
-    """
+def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
+    """✅ Bot con gestione password scaduta"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try: mese_num = nomi_mesi_it.index(mese_nome) + 1
-    except: return None, None
+    except: return None, None, None
 
-    # ✅ Target diverso a seconda del tipo
     if tipo_documento == "tredicesima":
         target_busta = f"Tredicesima {anno}"
     else:
@@ -207,6 +234,7 @@ def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
     
     busta_ok = False
     cart_ok = False
+    password_scaduta = False
 
     try:
         with sync_playwright() as p:
@@ -227,11 +255,47 @@ def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
             st_status.info("🔐 Login...")
             page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
             page.wait_for_selector('input[type="text"]', timeout=10000)
-            page.fill('input[type="text"]', ZK_USER)
-            page.fill('input[type="password"]', ZK_PASS)
+            page.fill('input[type="text"]', username)
+            page.fill('input[type="password"]', password)
             page.press('input[type="password"]', 'Enter')
-            page.wait_for_selector("text=I miei dati", timeout=15000)
-            st_status.info("✅ Login OK")
+            
+            time.sleep(3)
+            
+            # RILEVA CAMBIO PASSWORD
+            try:
+                cambio_pass_indicators = [
+                    "text=cambia password",
+                    "text=password scaduta",
+                    "text=change password",
+                    "input[name*='newPassword']",
+                    "input[name*='nuovaPassword']",
+                    "text=La password è scaduta"
+                ]
+                
+                for indicator in cambio_pass_indicators:
+                    if page.locator(indicator).count() > 0:
+                        st_status.warning("⚠️ PASSWORD SCADUTA RILEVATA")
+                        password_scaduta = True
+                        screenshot = page.screenshot()
+                        st.image(screenshot, caption="Pagina cambio password rilevata", use_container_width=True)
+                        break
+                
+                if password_scaduta:
+                    browser.close()
+                    return None, None, "PASSWORD_SCADUTA"
+                
+            except: pass
+            
+            # Verifica login riuscito
+            try:
+                page.wait_for_selector("text=I miei dati", timeout=15000)
+                st_status.info("✅ Login OK")
+            except:
+                st_status.error("❌ Login fallito - Credenziali errate o problema sito")
+                screenshot = page.screenshot()
+                st.image(screenshot, caption="Errore login", use_container_width=True)
+                browser.close()
+                return None, None, "LOGIN_FALLITO"
 
             # BUSTA PAGA / TREDICESIMA
             st_status.info(f"💰 {nome_tipo}...")
@@ -248,9 +312,7 @@ def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
                 time.sleep(5)
                 
                 try:
-                    # ✅ LOGICA CORRETTA PER EVITARE TREDICESIMA
                     if tipo_documento == "tredicesima":
-                        # Cerca esplicitamente "Tredicesima ANNO"
                         links = page.locator(f"a:has-text('Tredicesima {anno}')")
                         if links.count() > 0:
                             st.info(f"✅ Trovata: Tredicesima {anno}")
@@ -265,20 +327,16 @@ def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
                         else:
                             st.warning(f"⚠️ Tredicesima {anno} non trovata")
                     else:
-                        # ✅ CERCA "Dicembre 2025" MA SKIPPA "Tredicesima"
                         links = page.locator(f"a:has-text('{target_busta}')")
                         
                         if links.count() > 0:
                             for i in range(links.count()):
                                 txt = links.nth(i).inner_text()
-                                st.info(f"Link {i}: {txt}")
                                 
-                                # ✅ SKIPPA ESPLICITAMENTE TREDICESIMA
                                 if "Tredicesima" in txt or "13ma" in txt or "13MA" in txt:
                                     st.info(f"⏭️ Skip Tredicesima (riga {i})")
                                     continue
                                 
-                                # ✅ Questo è il cedolino mensile!
                                 st.info(f"✅ Trovato cedolino: {txt}")
                                 with page.expect_download(timeout=20000) as dl:
                                     links.nth(i).click()
@@ -379,34 +437,85 @@ def scarica_documenti_automatici(mese_nome, anno, tipo_documento="cedolino"):
     
     st.success(f"📦 Busta: {final_busta}, Cart: {final_cart}")
     
-    return final_busta, final_cart
+    return final_busta, final_cart, None
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll Mobile", page_icon="💶", layout="wide")
 st.title("💶 Analisi Stipendio & Presenze")
 
+# SIDEBAR CON LOGIN
 with st.sidebar:
-    st.header("Parametri")
-    sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
-    sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
-                                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
+    st.header("🔐 Credenziali")
     
-    # ✅ RADIO BUTTON PER TIPO DOCUMENTO
-    tipo_doc = st.radio(
-        "Tipo documento",
-        ["📄 Cedolino Mensile", "🎄 Tredicesima"],
-        index=0
-    )
+    username, password = get_credentials()
     
-    if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
-        st.session_state.clear()
-        tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
-        busta, cart = scarica_documenti_automatici(sel_mese, sel_anno, tipo_documento=tipo)
-        st.session_state['busta'] = busta
-        st.session_state['cart'] = cart
-        st.session_state['tipo'] = tipo
-        st.session_state['done'] = False
+    if not st.session_state.get('credentials_set'):
+        st.info("Inserisci le tue credenziali Gottardo SelfService")
+        
+        input_user = st.text_input("Username", value=username if username else "", key="input_user")
+        input_pass = st.text_input("Password", type="password", value="", key="input_pass")
+        
+        if st.button("💾 Salva Credenziali"):
+            if input_user and input_pass:
+                st.session_state['username'] = input_user
+                st.session_state['password'] = input_pass
+                st.session_state['credentials_set'] = True
+                st.success("✅ Credenziali salvate!")
+                st.rerun()
+            else:
+                st.error("⚠️ Inserisci username e password")
+    else:
+        st.success(f"✅ Loggato come: **{st.session_state['username']}**")
+        if st.button("🔄 Cambia Credenziali"):
+            st.session_state['credentials_set'] = False
+            st.session_state.pop('username', None)
+            st.session_state.pop('password', None)
+            st.rerun()
+    
+    st.divider()
+    
+    # PARAMETRI ANALISI
+    if st.session_state.get('credentials_set'):
+        st.header("Parametri")
+        sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
+        sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
+                                         "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
+        
+        tipo_doc = st.radio(
+            "Tipo documento",
+            ["📄 Cedolino Mensile", "🎄 Tredicesima"],
+            index=0
+        )
+        
+        if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
+            for key in ['busta', 'cart', 'db', 'dc', 'done']:
+                st.session_state.pop(key, None)
+            
+            tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
+            
+            username = st.session_state.get('username')
+            password = st.session_state.get('password')
+            
+            busta, cart, errore = scarica_documenti_automatici(sel_mese, sel_anno, username, password, tipo_documento=tipo)
+            
+            if errore == "PASSWORD_SCADUTA":
+                st.error("🔐 **PASSWORD SCADUTA RILEVATA!**")
+                st.warning("⚠️ Devi cambiare la password sul sito Gottardo.")
+                st.info("📌 **Procedura:**\n1. Apri [Gottardo SelfService](https://selfservice.gottardospa.it)\n2. Cambia la password seguendo le istruzioni\n3. Torna qui e clicca 'Cambia Credenziali'\n4. Inserisci la nuova password")
+                st.stop()
+            elif errore == "LOGIN_FALLITO":
+                st.error("❌ **LOGIN FALLITO**")
+                st.warning("Verifica username e password oppure controlla lo stato del sito.")
+                st.stop()
+            
+            st.session_state['busta'] = busta
+            st.session_state['cart'] = cart
+            st.session_state['tipo'] = tipo
+            st.session_state['done'] = False
+    else:
+        st.warning("⚠️ Inserisci le credenziali per continuare")
 
+# ANALISI CON PULIZIA AUTOMATICA
 if st.session_state.get('busta') or st.session_state.get('cart'):
     
     if not st.session_state.get('done'):
@@ -416,18 +525,24 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.session_state['db'] = db
             st.session_state['dc'] = dc
             st.session_state['done'] = True
+            
+            # PULIZIA AUTOMATICA FILE
+            with st.spinner("🗑️ Pulizia file temporanei..."):
+                pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
+            
+            st.session_state.pop('busta', None)
+            st.session_state.pop('cart', None)
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
     tipo = st.session_state.get('tipo', 'cedolino')
     
-    # ✅ ALERT SE TREDICESIMA
     if db and db.get('e_tredicesima'):
         st.success("🎄 **Questo è un cedolino TREDICESIMA**")
     
     st.divider()
     
-    # --- 3 TAB ---
+    # 3 TAB
     tab1, tab2, tab3 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto"])
     
     with tab1:
@@ -438,7 +553,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             ferie = db.get('ferie', {})
             par = db.get('par', {})
 
-            # KPI CARDS
             k1, k2, k3 = st.columns(3)
             k1.metric("💵 NETTO IN BUSTA", f"€ {dg.get('netto', 0):.2f}", delta="Pagamento")
             k2.metric("📊 Lordo Totale", f"€ {comp.get('lordo_totale', 0):.2f}")
@@ -446,7 +560,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
 
             st.markdown("---")
             
-            # DETTAGLIO ENTRATE/USCITE
             c_entr, c_usc = st.columns(2)
             with c_entr:
                 st.subheader("➕ Competenze (Entrate)")
@@ -465,7 +578,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 if tratt.get('addizionali_totali', 0) > 0:
                     st.write(f"**Addizionali (da rateizzare):** € {tratt.get('addizionali_totali', 0):.2f}")
 
-            # FERIE ESPANDIBILI
             with st.expander("🏖️ Situazione Ferie"):
                 f1, f2, f3, f4 = st.columns(4)
                 f1.metric("Residue AP", f"{ferie.get('residue_ap', 0):.2f}")
