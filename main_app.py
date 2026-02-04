@@ -154,19 +154,27 @@ def estrai_dati_cartellino(file_path):
         prompt = """
         Questo PDF è un cartellino presenze o una ricerca.
         
-        **CERCA:**
-        1. Se vedi una TABELLA con timbrature dettagliate per giorno:
-           - Conta quanti giorni hanno almeno UNA timbratura (entrata/uscita)
-           - giorni_reali = quel numero
-           - giorni_senza_badge = giorni con anomalie/badge mancante
+        **ANALISI RICHIESTA:**
         
-        2. Se vedi SOLO "Periodo: XX/XX/XXXX - YY/YY/YYYY":
-           - Calcola i giorni del periodo (es. 01/12-31/12 = 31 giorni)
-           - giorni_reali = numero giorni nel periodo
+        1. **SE vedi una TABELLA DETTAGLIATA con timbrature giornaliere:**
+           - Conta SOLO i giorni che hanno almeno UNA timbratura valida (entrata/uscita)
+           - NON contare sabati/domeniche/festività se non hanno timbrature
+           - giorni_reali = numero di giorni con timbrature
+           - giorni_senza_badge = giorni con anomalie (badge mancante, errori)
+           - note = "Analisi da timbrature dettagliate"
+        
+        2. **SE vedi SOLO "Periodo: XX/XX/XXXX - YY/YY/YYYY" SENZA tabella timbrature:**
+           - NON contare tutti i giorni del calendario
+           - giorni_reali = 0
            - giorni_senza_badge = 0
-           - note = "Dati timbrature non disponibili, mostrato solo periodo"
+           - note = "Cartellino senza timbrature dettagliate. Impossibile determinare i giorni lavorati effettivi. Usa i giorni pagati dalla busta paga come riferimento."
         
-        JSON:
+        **IMPORTANTE:**
+        - Non inventare dati se non ci sono timbrature
+        - Considera che un mese lavorativo tipico ha circa 20-23 giorni (esclusi weekend/festività)
+        - Se il documento è vuoto o non contiene dati utili, metti giorni_reali = 0
+        
+        Restituisci SOLO questo JSON:
         {
             "giorni_reali": int,
             "giorni_senza_badge": int,
@@ -322,7 +330,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                                     
                                     if ha_target and not e_tredicesima:
                                         link_matches.append((i, txt))
-                                        st.info(f"📄 Match #{len(link_matches)}: '{txt}' (link #{i})")
                             except:
                                 continue
                         
@@ -333,7 +340,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                                 st.info(f"📌 Seleziono l'ULTIMO (probabilmente il cedolino, non la tredicesima)")
                             
                             link_index, link_txt = link_matches[-1]  # ULTIMO
-                            st.success(f"✅ Selezionato: '{link_txt}' (link #{link_index})")
+                            st.success(f"✅ Selezionato: '{link_txt}'")
                             
                             st.info(f"📥 Download in corso...")
                             
@@ -607,7 +614,12 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
         if dc:
             c1, c2 = st.columns([1, 2])
             with c1:
-                st.metric("📅 Giorni Lavorati", dc.get('giorni_reali', 0))
+                giorni_reali = dc.get('giorni_reali', 0)
+                if giorni_reali > 0:
+                    st.metric("📅 Giorni Lavorati", giorni_reali)
+                else:
+                    st.metric("📅 Giorni Lavorati", "N/D", help="Timbrature dettagliate non disponibili")
+                
                 anomalie = dc.get('giorni_senza_badge', 0)
                 if anomalie > 0:
                     st.metric("⚠️ Anomalie Badge", anomalie, delta="Controlla")
@@ -624,28 +636,36 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
         if db and dc:
             pagati = float(db.get('dati_generali', {}).get('giorni_pagati', 0))
             reali = float(dc.get('giorni_reali', 0))
-            diff = reali - pagati
             
             st.subheader("🔍 Analisi Discrepanze")
             
-            col_a, col_b = st.columns(2)
-            col_a.metric("Giorni Pagati (Busta)", pagati)
-            col_b.metric("Giorni Lavorati (Cartellino)", reali, delta=f"{diff:.1f}")
-            
-            st.markdown("---")
-            
-            if abs(diff) < 0.5:
-                st.success("✅ **Tutto perfetto!** I giorni lavorati corrispondono a quelli pagati.")
-            elif diff > 0:
-                st.info(f"ℹ️ Hai lavorato **{diff:.1f} giorni in più** rispetto a quelli pagati.\n\n"
-                       f"Controlla che siano compensati come **Straordinari** (€ {db.get('competenze', {}).get('straordinari', 0):.2f}) "
-                       f"o come **Festività** nella tab 'Dettaglio Stipendio'.")
+            # ✅ GESTIONE CARTELLINO SENZA TIMBRATURE
+            if reali == 0:
+                st.info("ℹ️ **Cartellino senza timbrature dettagliate**")
+                st.write(f"📋 Giorni pagati in busta: **{int(pagati)}**")
+                st.write(f"📝 {dc.get('note', '')}")
+                st.success("✅ Usa i **giorni pagati dalla busta** come riferimento per il mese.")
             else:
-                st.warning(f"⚠️ Risultano **{abs(diff):.1f} giorni pagati in più** rispetto alle timbrature.\n\n"
-                          f"Possibili cause:\n"
-                          f"- **Ferie godute:** {db.get('ferie', {}).get('godute', 0):.2f} giorni\n"
-                          f"- **Permessi:** {db.get('par', {}).get('fruite', 0):.2f} ore\n"
-                          f"- Controlla nella tab 'Dettaglio Stipendio' → Ferie/Permessi")
+                diff = reali - pagati
+                
+                col_a, col_b = st.columns(2)
+                col_a.metric("Giorni Pagati (Busta)", pagati)
+                col_b.metric("Giorni Lavorati (Cartellino)", reali, delta=f"{diff:.1f}")
+                
+                st.markdown("---")
+                
+                if abs(diff) < 0.5:
+                    st.success("✅ **Tutto perfetto!** I giorni lavorati corrispondono a quelli pagati.")
+                elif diff > 0:
+                    st.info(f"ℹ️ Hai lavorato **{diff:.1f} giorni in più** rispetto a quelli pagati.\n\n"
+                           f"Controlla che siano compensati come **Straordinari** (€ {db.get('competenze', {}).get('straordinari', 0):.2f}) "
+                           f"o come **Festività** nella tab 'Dettaglio Stipendio'.")
+                else:
+                    st.warning(f"⚠️ Risultano **{abs(diff):.1f} giorni pagati in più** rispetto alle timbrature.\n\n"
+                              f"Possibili cause:\n"
+                              f"- **Ferie godute:** {db.get('ferie', {}).get('godute', 0):.2f} giorni\n"
+                              f"- **Permessi:** {db.get('par', {}).get('fruite', 0):.2f} ore\n"
+                              f"- Controlla nella tab 'Dettaglio Stipendio' → Ferie/Permessi")
         elif tipo == "tredicesima":
             st.info("ℹ️ Analisi comparativa non disponibile per Tredicesima.")
         else:
