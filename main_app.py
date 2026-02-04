@@ -10,6 +10,7 @@ import json
 import time
 import calendar
 import locale
+from datetime import datetime
 
 # --- SETUP BASE ---
 os.system("playwright install chromium")
@@ -58,7 +59,7 @@ def estrai_dati_cartellino(file_path):
         return clean_json_response(response.text)
     except: return None
 
-# --- CORE: DOWNLOAD CON SCREENSHOT GARANTITO ---
+# --- CORE: DOWNLOAD ROBUSTO ---
 def scarica_documenti_veloce(mese_nome, anno):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -72,9 +73,8 @@ def scarica_documenti_veloce(mese_nome, anno):
     path_cart = None
     
     with sync_playwright() as p:
-        # SPOSTIAMO IL TRY DENTRO IL WITH, COSÌ IL BROWSER È VIVO SE C'È ERRORE
         try:
-            # 1. Browser Super Stealth & Fast
+            # 1. Browser Super Stealth
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-gpu', '--blink-settings=imagesEnabled=false', '--no-sandbox', '--disable-dev-shm-usage'] 
@@ -113,29 +113,49 @@ def scarica_documenti_veloce(mese_nome, anno):
             except Exception as e:
                 st_status.error(f"Err Busta: {e}")
 
-            # 3. CARTELLINO (DEBUG MODE)
+            # --- PUNTO CRITICO: REFRESH SESSIONE ---
+            # Prima di andare al cartellino, torniamo alla home per essere sicuri di essere vivi
+            st_status.info("🔄 Refresh Sessione...")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+            page.wait_for_load_state('domcontentloaded')
+            
+            # 3. CARTELLINO
             st_status.info("📅 Cartellino...")
             
-            page.evaluate("window.scrollTo(0,0)")
-            
-            # Menu
+            # Verifica Login ancora valido
+            if page.locator('input[type="password"]').count() > 0:
+                st_status.warning("⚠️ Sessione scaduta, riloggo...")
+                page.fill('input[type="text"]', ZK_USER)
+                page.fill('input[type="password"]', ZK_PASS)
+                page.press('input[type="password"]', 'Enter')
+                page.wait_for_load_state('domcontentloaded')
+
+            # Navigazione Menu
             menu_ok = False
             try:
                 page.locator("text=Time").click(timeout=5000)
+                time.sleep(1)
                 if page.locator("text=Cartellino presenze").is_visible():
                     page.locator("text=Cartellino presenze").click()
                     menu_ok = True
             except: pass
             
             if not menu_ok:
-                st_status.warning("Menu Time difficile, provo forza bruta...")
-                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y") # Ricarica soft
-                page.wait_for_load_state('domcontentloaded')
-                page.locator("text=Time").click(force=True)
-                page.locator("text=Cartellino presenze").click(force=True)
+                st_status.warning("Forzo apertura menu...")
+                # Js click brutale
+                page.evaluate("""
+                    var links = document.querySelectorAll('span, a');
+                    for(var i=0; i<links.length; i++){
+                        if(links[i].innerText.includes('Cartellino presenze')) {
+                            links[i].click();
+                            break;
+                        }
+                    }
+                """)
 
             st_status.info("✍️ Ricerca...")
-            page.wait_for_selector(".dijitInputInner", timeout=20000)
+            try: page.wait_for_selector(".dijitInputInner", timeout=25000)
+            except: raise Exception("Maschera non caricata (Possibile Logout)")
             
             # Date Injection
             last_day = calendar.monthrange(anno, mese_num)[1]
@@ -155,55 +175,46 @@ def scarica_documenti_veloce(mese_nome, anno):
             try: page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click()
             except: page.keyboard.press("Enter")
             
-            st_status.info("📄 Download (Race Condition)...")
+            st_status.info("📄 Download...")
             time.sleep(5) 
             
-            # TRUCCO DOPPIO: Aspetta O il download O la pagina
-            # Clicchiamo la lente via JS
-            page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
-
-            # Ora aspettiamo: o parte un download, o si apre una pagina
-            try:
-                # Definiamo due eventi
-                with context.expect_page(timeout=10000) as p_info:
-                    # Riprova click se il primo non è andato
+            # Click Lente
+            with context.expect_page(timeout=60000) as new_p:
+                count_lenti = page.locator("img[src*='search16.png']").count()
+                if count_lenti > 0:
                     page.evaluate("document.querySelectorAll('img[src*=\"search16.png\"]')[0].click()")
-                
-                # Se siamo qui, si è aperta una pagina
-                np = p_info.value
-                np.wait_for_load_state()
-                path_cart = f"cartellino_{mese_num}_{anno}.pdf"
-                if ".pdf" in np.url.lower():
-                    cookies = {c['name']: c['value'] for c in context.cookies()}
-                    r = requests.get(np.url, cookies=cookies)
-                    with open(path_cart, 'wb') as f: f.write(r.content)
                 else:
-                    np.pdf(path=path_cart)
+                    # Se non ci sono lenti, controlliamo se siamo tornati al login per errore
+                    if page.locator('input[type="password"]').count() > 0:
+                        raise Exception("Logout improvviso durante ricerca")
+                    raise Exception("Tabella vuota")
+
+            np = new_p.value
+            np.wait_for_load_state()
             
-            except:
-                # Se expect_page fallisce (timeout), forse è partito un download diretto?
-                st_status.warning("Nessuna nuova pagina, controllo download...")
-                # In realtà Zucchetti su download diretto è difficile da intercettare post-click se non hai wrappato l'evento.
-                # Ma spesso il timeout è perché la pagina ci mette >10s.
-                # Diamo per perso se fallisce qui.
-                raise Exception("Popup/Download fallito")
+            path_cart = f"cartellino_{mese_num}_{anno}.pdf"
+            if ".pdf" in np.url.lower():
+                cookies = {c['name']: c['value'] for c in context.cookies()}
+                r = requests.get(np.url, cookies=cookies)
+                with open(path_cart, 'wb') as f: f.write(r.content)
+            else:
+                np.pdf(path=path_cart)
             
             st_status.success("✅ Cartellino OK")
 
         except Exception as e:
-            st_status.error(f"❌ ERRORE: {str(e)[:100]}")
-            # FOTO DEBUG GARANTITA PERCHÉ SIAMO ANCORA NEL CONTEXT
+            st_status.warning(f"Errore Cartellino: {str(e)[:100]}")
+            # FOTO DEBUG
             try:
-                st.warning("📸 SCATTO FOTO ERRORE...")
-                st.image(page.screenshot(), caption="Schermata al momento dell'errore", use_container_width=True)
-            except Exception as img_err:
-                st.error(f"Impossibile scattare foto: {img_err}")
+                st.error("📸 FOTO ERRORE:")
+                st.image(page.screenshot(), caption="Cosa vedo ora", use_container_width=True)
+            except: pass
     
     return path_busta, path_cart
 
 # --- UI ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="⚡", layout="wide")
-st.title("⚡ Gottardo Payroll (Photo Debug)")
+st.title("⚡ Gottardo Payroll (Session Refresh)")
 
 with st.sidebar:
     st.header("Parametri")
