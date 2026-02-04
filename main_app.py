@@ -11,6 +11,7 @@ import time
 import calendar
 import locale
 from pathlib import Path
+import base64
 
 # --- SETUP CLOUD ---
 os.system("playwright install chromium")
@@ -36,11 +37,41 @@ except Exception as e:
     st.error(f"❌ Google API Key mancante in secrets")
     st.stop()
 
+# Groq API Key (fallback)
+try:
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", None)
+except:
+    GROQ_API_KEY = None
+
 genai.configure(api_key=GOOGLE_API_KEY)
 try: 
     model = genai.GenerativeModel('gemini-flash-latest')
 except: 
     model = genai.GenerativeModel('gemini-1.5-flash')
+
+# --- CONVERSIONE PDF -> IMMAGINI PER GROQ ---
+def pdf_to_images(pdf_path):
+    """Converte PDF in immagini per Groq"""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        images = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom per qualità
+            img_bytes = pix.tobytes("png")
+            img_base64 = base64.b64encode(img_bytes).decode()
+            images.append(img_base64)
+        
+        doc.close()
+        return images
+    except ImportError:
+        st.error("❌ PyMuPDF non installato. Aggiungi 'pymupdf' a requirements.txt")
+        return None
+    except Exception as e:
+        st.error(f"❌ Errore conversione PDF: {e}")
+        return None
 
 # --- PARSING AI ---
 def clean_json_response(text):
@@ -56,136 +87,236 @@ def estrai_dati_busta_dettagliata(file_path):
     if not file_path or not os.path.exists(file_path):
         return None
     
+    prompt = """
+    Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Segui ESATTAMENTE queste istruzioni:
+
+    **1. DATI GENERALI (PRIMA PAGINA, RIGA PROGRESSIVI):**
+    - **NETTO:** Cerca la riga "PROGRESSIVI" in fondo. Il NETTO è nella colonna finale prima di "ESTREMI ELABORAZIONE"
+    - **GIORNI PAGATI:** Cerca in alto la riga con "GG. INPS" (numero a sinistra della colonna, es. "26")
+    - **ORE ORDINARIE:** Cerca "ORE INAIL" oppure calcola: giorni_pagati × 8
+
+    **2. COMPETENZE (TABELLA CENTRALE):**
+    - **RETRIBUZIONE ORDINARIA (voce 1000):** Colonna "COMPETENZE" (es. 1.783,75)
+    - **STRAORDINARI:** Somma tutte le voci tipo "STRAORDINARIO", "SUPPLEMENTARI", "NOTTURNI" (es. voce 2050: 111,48)
+    - **FESTIVITA:** Somma voci "MAGG. FESTIVE", "FESTIVITA GODUTA" (es. voce 2250: 37,16)
+    - **ANZIANITA:** Se vedi voci "SCATTI", "EDR", "ANZ." usale, altrimenti 0
+    - **LORDO TOTALE:** Cerca riga "TOTALE COMPETENZE" o "PROGRESSIVI" → colonna "TOTALE COMPETENZE" (es. 2.011,99)
+
+    **3. TRATTENUTE (SEZIONE I.N.P.S. + IRPEF):**
+    - **INPS:** Sezione "IMPONIBILE / TRATTENUTE" → riga sotto "I.N.P.S." (es. 188,50)
+    - **IRPEF NETTA:** Sezione "FISCALI" → riga "TRATTENUTE" sotto "IRPEF CONG." (es. 58,90)
+    - **ADDIZIONALI:** Cerca voci "ADD.REG." e "ADD.COM." (sono rateizzate, non trattenute subito)
+
+    **4. FERIE (TABELLA IN ALTO A DESTRA):**
+    - Ci sono DUE colonne: FERIE e P.A.R. (Permessi)
+    - **Residue AP:** Riga "RES. PREC." colonna FERIE (es. -10,46)
+    - **Maturate:** Riga "SPETTANTI" colonna FERIE (es. 173,00)
+    - **Godute:** Riga "FRUITE" colonna FERIE (es. 162,67)
+    - **Saldo:** Riga "SALDO" colonna FERIE (es. -0,13)
+    
+    **PAR (Permessi):**
+    - **Residue:** Riga "RES. PREC." colonna P.A.R. (es. 5,30)
+    - **Spettanti:** Riga "SPETTANTI" colonna P.A.R. (es. 38,00)
+    - **Fruite:** Riga "FRUITE" colonna P.A.R. (es. 47,33)
+    - **Saldo:** Riga "SALDO" colonna P.A.R. (es. -4,03)
+
+    **5. TREDICESIMA:**
+    - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → è_tredicesima = true
+    - Altrimenti → è_tredicesima = false
+
+    **IMPORTANTE:**
+    - Usa SEMPRE i valori dalle colonne corrette
+    - Se un valore non esiste scrivi 0
+    - Usa il punto come separatore decimale
+    
+    Restituisci SOLO questo JSON:
+    {
+        "e_tredicesima": boolean,
+        "dati_generali": {
+            "netto": float,
+            "giorni_pagati": float,
+            "ore_ordinarie": float
+        },
+        "competenze": {
+            "base": float,
+            "anzianita": float,
+            "straordinari": float,
+            "festivita": float,
+            "lordo_totale": float
+        },
+        "trattenute": {
+            "inps": float,
+            "irpef_netta": float,
+            "addizionali_totali": float
+        },
+        "ferie": {
+            "residue_ap": float,
+            "maturate": float,
+            "godute": float,
+            "saldo": float
+        },
+        "par": {
+            "residue_ap": float,
+            "spettanti": float,
+            "fruite": float,
+            "saldo": float
+        }
+    }
+    """
+    
+    # ✅ TENTATIVO 1: GEMINI
     try:
         with open(file_path, "rb") as f: 
             bytes_data = f.read()
         
-        prompt = """
-        Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Segui ESATTAMENTE queste istruzioni:
-
-        **1. DATI GENERALI (PRIMA PAGINA, RIGA PROGRESSIVI):**
-        - **NETTO:** Cerca la riga "PROGRESSIVI" in fondo. Il NETTO è nella colonna finale prima di "ESTREMI ELABORAZIONE"
-        - **GIORNI PAGATI:** Cerca in alto la riga con "GG. INPS" (numero a sinistra della colonna, es. "26")
-        - **ORE ORDINARIE:** Cerca "ORE INAIL" oppure calcola: giorni_pagati × 8
-
-        **2. COMPETENZE (TABELLA CENTRALE):**
-        - **RETRIBUZIONE ORDINARIA (voce 1000):** Colonna "COMPETENZE" (es. 1.783,75)
-        - **STRAORDINARI:** Somma tutte le voci tipo "STRAORDINARIO", "SUPPLEMENTARI", "NOTTURNI" (es. voce 2050: 111,48)
-        - **FESTIVITA:** Somma voci "MAGG. FESTIVE", "FESTIVITA GODUTA" (es. voce 2250: 37,16)
-        - **ANZIANITA:** Se vedi voci "SCATTI", "EDR", "ANZ." usale, altrimenti 0
-        - **LORDO TOTALE:** Cerca riga "TOTALE COMPETENZE" o "PROGRESSIVI" → colonna "TOTALE COMPETENZE" (es. 2.011,99)
-
-        **3. TRATTENUTE (SEZIONE I.N.P.S. + IRPEF):**
-        - **INPS:** Sezione "IMPONIBILE / TRATTENUTE" → riga sotto "I.N.P.S." (es. 188,50)
-        - **IRPEF NETTA:** Sezione "FISCALI" → riga "TRATTENUTE" sotto "IRPEF CONG." (es. 58,90)
-        - **ADDIZIONALI:** Cerca voci "ADD.REG." e "ADD.COM." (sono rateizzate, non trattenute subito)
-
-        **4. FERIE (TABELLA IN ALTO A DESTRA):**
-        - Ci sono DUE colonne: FERIE e P.A.R. (Permessi)
-        - **Residue AP:** Riga "RES. PREC." colonna FERIE (es. -10,46)
-        - **Maturate:** Riga "SPETTANTI" colonna FERIE (es. 173,00)
-        - **Godute:** Riga "FRUITE" colonna FERIE (es. 162,67)
-        - **Saldo:** Riga "SALDO" colonna FERIE (es. -0,13)
-        
-        **PAR (Permessi):**
-        - **Residue:** Riga "RES. PREC." colonna P.A.R. (es. 5,30)
-        - **Spettanti:** Riga "SPETTANTI" colonna P.A.R. (es. 38,00)
-        - **Fruite:** Riga "FRUITE" colonna P.A.R. (es. 47,33)
-        - **Saldo:** Riga "SALDO" colonna P.A.R. (es. -4,03)
-
-        **5. TREDICESIMA:**
-        - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → è_tredicesima = true
-        - Altrimenti → è_tredicesima = false
-
-        **IMPORTANTE:**
-        - Usa SEMPRE i valori dalle colonne corrette
-        - Se un valore non esiste scrivi 0
-        - Usa il punto come separatore decimale
-        
-        Restituisci SOLO questo JSON:
-        {
-            "e_tredicesima": boolean,
-            "dati_generali": {
-                "netto": float,
-                "giorni_pagati": float,
-                "ore_ordinarie": float
-            },
-            "competenze": {
-                "base": float,
-                "anzianita": float,
-                "straordinari": float,
-                "festivita": float,
-                "lordo_totale": float
-            },
-            "trattenute": {
-                "inps": float,
-                "irpef_netta": float,
-                "addizionali_totali": float
-            },
-            "ferie": {
-                "residue_ap": float,
-                "maturate": float,
-                "godute": float,
-                "saldo": float
-            },
-            "par": {
-                "residue_ap": float,
-                "spettanti": float,
-                "fruite": float,
-                "saldo": float
-            }
-        }
-        """
-        
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
+        
     except Exception as e:
-        st.error(f"❌ Err busta AI: {e}")
+        error_msg = str(e)
+        
+        # ✅ TENTATIVO 2: GROQ FALLBACK
+        if ("429" in error_msg or "quota" in error_msg.lower()) and GROQ_API_KEY:
+            st.warning("⚠️ Quota Gemini esaurita per busta paga, uso Groq...")
+            return estrai_dati_busta_groq(file_path, prompt)
+        else:
+            st.error(f"❌ Err busta AI: {e}")
+            return None
+
+def estrai_dati_busta_groq(file_path, prompt):
+    """Fallback Groq per busta paga"""
+    try:
+        from groq import Groq
+        
+        # Converti PDF in immagini
+        images = pdf_to_images(file_path)
+        if not images:
+            return None
+        
+        client = Groq(api_key=GROQ_API_KEY)
+        
+        # Usa solo prima pagina (busta paga di solito è 1 pagina)
+        content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{images[0]}"
+                }
+            }
+        ]
+        
+        response = client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.1,
+            max_tokens=2048
+        )
+        
+        result = clean_json_response(response.choices[0].message.content)
+        if result:
+            st.success("✅ Analisi busta completata con Groq")
+        return result
+        
+    except ImportError:
+        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
+        return None
+    except Exception as e:
+        st.error(f"❌ Errore Groq busta: {e}")
         return None
 
 def estrai_dati_cartellino(file_path):
     if not file_path or not os.path.exists(file_path):
         return None
     
+    prompt = """
+    Questo PDF è un cartellino presenze o una ricerca.
+    
+    **ANALISI RICHIESTA:**
+    
+    1. **SE vedi una TABELLA DETTAGLIATA con timbrature giornaliere:**
+       - Conta SOLO i giorni che hanno almeno UNA timbratura valida (entrata/uscita)
+       - NON contare sabati/domeniche/festività se non hanno timbrature
+       - giorni_reali = numero di giorni con timbrature
+       - giorni_senza_badge = giorni con anomalie (badge mancante, errori)
+       - note = "Analisi da timbrature dettagliate"
+    
+    2. **SE vedi SOLO "Periodo: XX/XX/XXXX - YY/YY/YYYY" SENZA tabella timbrature:**
+       - NON contare tutti i giorni del calendario
+       - giorni_reali = 0
+       - giorni_senza_badge = 0
+       - note = "Cartellino senza timbrature dettagliate. Impossibile determinare i giorni lavorati effettivi. Usa i giorni pagati dalla busta paga come riferimento."
+    
+    **IMPORTANTE:**
+    - Non inventare dati se non ci sono timbrature
+    - Considera che un mese lavorativo tipico ha circa 20-23 giorni (esclusi weekend/festività)
+    - Se il documento è vuoto o non contiene dati utili, metti giorni_reali = 0
+    
+    Restituisci SOLO questo JSON:
+    {
+        "giorni_reali": int,
+        "giorni_senza_badge": int,
+        "note": "string"
+    }
+    """
+    
+    # ✅ TENTATIVO 1: GEMINI
     try:
         with open(file_path, "rb") as f: 
             bytes_data = f.read()
         
-        prompt = """
-        Questo PDF è un cartellino presenze o una ricerca.
-        
-        **ANALISI RICHIESTA:**
-        
-        1. **SE vedi una TABELLA DETTAGLIATA con timbrature giornaliere:**
-           - Conta SOLO i giorni che hanno almeno UNA timbratura valida (entrata/uscita)
-           - NON contare sabati/domeniche/festività se non hanno timbrature
-           - giorni_reali = numero di giorni con timbrature
-           - giorni_senza_badge = giorni con anomalie (badge mancante, errori)
-           - note = "Analisi da timbrature dettagliate"
-        
-        2. **SE vedi SOLO "Periodo: XX/XX/XXXX - YY/YY/YYYY" SENZA tabella timbrature:**
-           - NON contare tutti i giorni del calendario
-           - giorni_reali = 0
-           - giorni_senza_badge = 0
-           - note = "Cartellino senza timbrature dettagliate. Impossibile determinare i giorni lavorati effettivi. Usa i giorni pagati dalla busta paga come riferimento."
-        
-        **IMPORTANTE:**
-        - Non inventare dati se non ci sono timbrature
-        - Considera che un mese lavorativo tipico ha circa 20-23 giorni (esclusi weekend/festività)
-        - Se il documento è vuoto o non contiene dati utili, metti giorni_reali = 0
-        
-        Restituisci SOLO questo JSON:
-        {
-            "giorni_reali": int,
-            "giorni_senza_badge": int,
-            "note": "string"
-        }
-        """
-        
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
         return clean_json_response(response.text)
+        
     except Exception as e:
-        st.error(f"❌ Err cart AI: {e}")
+        error_msg = str(e)
+        
+        # ✅ TENTATIVO 2: GROQ FALLBACK
+        if ("429" in error_msg or "quota" in error_msg.lower()) and GROQ_API_KEY:
+            st.warning("⚠️ Quota Gemini esaurita per cartellino, uso Groq...")
+            return estrai_dati_cartellino_groq(file_path, prompt)
+        else:
+            st.error(f"❌ Err cart AI: {e}")
+            return None
+
+def estrai_dati_cartellino_groq(file_path, prompt):
+    """Fallback Groq per cartellino"""
+    try:
+        from groq import Groq
+        
+        # Converti PDF in immagini
+        images = pdf_to_images(file_path)
+        if not images:
+            return None
+        
+        client = Groq(api_key=GROQ_API_KEY)
+        
+        # Cartellino può avere più pagine, uso tutte le immagini
+        content = [{"type": "text", "text": prompt}]
+        
+        for img_base64 in images[:3]:  # Max 3 pagine per non superare token limit
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+            })
+        
+        response = client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",
+            messages=[{"role": "user", "content": content}],
+            temperature=0.1,
+            max_tokens=1024
+        )
+        
+        result = clean_json_response(response.choices[0].message.content)
+        if result:
+            st.success("✅ Analisi cartellino completata con Groq")
+        return result
+        
+    except ImportError:
+        st.error("❌ Libreria 'groq' non installata. Aggiungi a requirements.txt")
+        return None
+    except Exception as e:
+        st.error(f"❌ Errore Groq cartellino: {e}")
         return None
 
 # --- PULIZIA FILE ---
@@ -630,7 +761,10 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 note = dc.get('note', 'Nessuna nota rilevante.')
                 st.info(f"**📝 Note AI:** {note}")
         else:
-            st.warning("⚠️ Dati cartellino non disponibili (normale per Tredicesima).")
+            if tipo == "tredicesima":
+                st.warning("⚠️ Dati cartellino non disponibili (normale per Tredicesima).")
+            else:
+                st.error("❌ Errore nel download o analisi del cartellino.")
 
     with tab3:
         if db and dc:
