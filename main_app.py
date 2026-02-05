@@ -1,788 +1,590 @@
 import sys
 import asyncio
 import re
-import requests
 import os
+import time
+import json
+import calendar
+import locale
+import requests
 import streamlit as st
 import google.generativeai as genai
 from playwright.sync_api import sync_playwright
-import json
-import time
-import calendar
-import locale
 from pathlib import Path
 
-# --- SETUP CLOUD ---
+# --- GESTIONE DIPENDENZE OPZIONALI ---
+try:
+    from openai import OpenAI
+except ImportError:
+    # Fallback se l'utente non ha installato openai, non si romperà tutto subito
+    OpenAI = None
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+# --- SETUP AMBIENTE ---
+# Installa browser se necessario (solo prima volta, ma male non fa)
 os.system("playwright install chromium")
+
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 try:
     locale.setlocale(locale.LC_TIME, 'it_IT.UTF-8')
 except:
-    pass
+    pass  # Su cloud linux a volte it_IT non c'è, fa nulla
 
-# --- CREDENZIALI DINAMICHE ---
+# --- CREDENZIALI & CONFIGURAZIONE ---
 def get_credentials():
-    """✅ Sistema di login con credenziali utente"""
+    """Recupera credenziali da session_state o secrets"""
     if 'credentials_set' in st.session_state and st.session_state.get('credentials_set'):
         return st.session_state.get('username'), st.session_state.get('password')
-
     try:
         return st.secrets["ZK_USER"], st.secrets["ZK_PASS"]
     except:
         return None, None
 
-# Google API Key
+# 1. GOOGLE GEMINI
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except Exception:
-    st.error("❌ Google API Key mancante in secrets")
-    st.stop()
+    genai.configure(api_key=GOOGLE_API_KEY)
+    HAS_GEMINI = True
+except:
+    HAS_GEMINI = False
 
-# ✅ AUTO-DISCOVERY MODELLI GEMINI
-genai.configure(api_key=GOOGLE_API_KEY)
+# 2. DEEPSEEK (o OpenAI compatibile)
+try:
+    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+    HAS_DEEPSEEK = True
+except:
+    DEEPSEEK_API_KEY = None
+    HAS_DEEPSEEK = False
+
+# --- FUNZIONI AI ---
 
 @st.cache_resource
-def inizializza_modelli_gemini():
-    """Auto-discovery: Scopre automaticamente tutti i modelli Gemini disponibili"""
+def get_gemini_models():
+    """Restituisce lista modelli Gemini ordinati per priorità"""
+    if not HAS_GEMINI: return []
     try:
-        tutti_modelli = genai.list_models()
-        modelli_validi = [m for m in tutti_modelli if 'generateContent' in m.supported_generation_methods]
-
-        modelli_gemini = []
-        for m in modelli_validi:
-            nome_pulito = m.name.replace('models/', '')
-            if 'gemini' in nome_pulito.lower() and 'embedding' not in nome_pulito.lower():
-                try:
-                    modello = genai.GenerativeModel(nome_pulito)
-                    modelli_gemini.append((nome_pulito, modello))
-                except:
-                    continue
-
-        if len(modelli_gemini) == 0:
-            st.error("❌ Nessun modello Gemini disponibile")
-            st.stop()
-
-        def priorita(nome):
-            if 'flash' in nome.lower() and 'lite' not in nome.lower():
-                return 0
-            elif 'lite' in nome.lower():
-                return 1
-            elif 'pro' in nome.lower():
-                return 2
-            else:
-                return 3
-
-        modelli_gemini.sort(key=lambda x: priorita(x[0]))
-        return modelli_gemini
-
+        models = genai.list_models()
+        valid = [m for m in models if 'generateContent' in m.supported_generation_methods]
+        
+        # Filtra solo modelli gemini, escludi embedding e vision-only se necessario
+        gemini_list = []
+        for m in valid:
+            name = m.name.replace('models/', '')
+            if 'gemini' in name.lower():
+                # Creiamo istanza
+                gemini_list.append((name, genai.GenerativeModel(name)))
+        
+        # Ordina: Flash (veloce) -> Pro (potente)
+        def priority(n):
+            if 'flash' in n.lower(): return 0
+            if 'pro' in n.lower(): return 2
+            return 1
+        return sorted(gemini_list, key=lambda x: priority(x[0]))
     except Exception as e:
-        st.error(f"❌ Errore caricamento modelli: {e}")
-        st.stop()
+        st.error(f"Errore Gemini Init: {e}")
+        return []
 
-MODELLI_DISPONIBILI = inizializza_modelli_gemini()
-
-if 'modelli_mostrati' not in st.session_state:
-    st.sidebar.success(f"✅ {len(MODELLI_DISPONIBILI)} modelli AI pronti")
-    st.session_state['modelli_mostrati'] = True
-
-# --- PARSING AI ---
-def clean_json_response(text):
-    """Estrae JSON pulito da risposta AI"""
+def extract_text_from_pdf(file_path):
+    """Estrae testo puro da PDF (per DeepSeek che non vede immagini)"""
+    if not fitz:
+        st.warning("⚠️ Libreria PyMuPDF non trovata. Impossibile usare DeepSeek su PDF.")
+        return None
     try:
+        doc = fitz.open(file_path)
+        text = ""
+        for page in doc:
+            text += page.get_text() + "\n"
+        return text
+    except Exception as e:
+        st.error(f"Errore lettura PDF: {e}")
+        return None
+
+def clean_json(text):
+    """Pulisce la risposta dell'AI per ottenere un JSON valido"""
+    try:
+        # Rimuove markdown code blocks
         text = re.sub(r"```json|```", "", text).strip()
+        # Cerca la prima graffa aperta e l'ultima chiusa
         start = text.find('{')
         end = text.rfind('}') + 1
-        return json.loads(text[start:end]) if start != -1 else json.loads(text)
+        if start != -1 and end != -1:
+            return json.loads(text[start:end])
+        return json.loads(text) # Prova diretta
     except:
         return None
 
-def estrai_con_fallback(file_path, prompt, tipo="documento", validate_fn=None):
+def estrai_con_ai(file_path, prompt, tipo_doc, validate_fn=None):
     """
-    ✅ Prova multipli modelli Gemini con fallback automatico.
-    validate_fn(result_dict) -> bool: se False, prova il modello successivo.
+    Motore principale di estrazione:
+    1. Prova tutti i modelli Gemini disponibili (Multimodale, legge PDF come immagine/blob)
+    2. Se falliscono, prova DeepSeek (Testuale, legge testo estratto)
     """
-    if not file_path or not os.path.exists(file_path):
+    if not os.path.exists(file_path):
         return None
 
-    with open(file_path, "rb") as f:
-        bytes_data = f.read()
+    status_box = st.empty()
+    
+    # --- FASE 1: GEMINI ---
+    gemini_models = get_gemini_models()
+    if gemini_models:
+        with open(file_path, "rb") as f:
+            pdf_bytes = f.read()
 
-    if not bytes_data[:4] == b'%PDF':
-        st.error(f"❌ Il file {tipo} non è un PDF valido")
-        return None
+        for name, model in gemini_models:
+            try:
+                status_box.info(f"🤖 Analisi {tipo_doc} con Gemini ({name})...")
+                
+                response = model.generate_content([
+                    prompt,
+                    {"mime_type": "application/pdf", "data": pdf_bytes}
+                ])
+                
+                res = clean_json(response.text)
+                if res and isinstance(res, dict):
+                    # Validazione opzionale
+                    if validate_fn and not validate_fn(res):
+                        continue # Risultato non valido, prova prossimo modello
+                    
+                    status_box.success(f"✅ {tipo_doc} analizzato con Google Gemini!")
+                    time.sleep(1)
+                    status_box.empty()
+                    return res
+            except Exception as e:
+                # Se è un errore di quota (429), continua col prossimo. Altrimenti logga.
+                err_msg = str(e).lower()
+                if "429" in err_msg or "quota" in err_msg:
+                    continue
+                # Altri errori potrebbero essere fatali, ma proviamo il prossimo modello cmq
 
-    progress_placeholder = st.empty()
+    # --- FASE 2: DEEPSEEK (Fallback) ---
+    if HAS_DEEPSEEK and OpenAI:
+        status_box.warning("⚠️ Gemini fallito/esaurito. Passo a DeepSeek...")
+        
+        pdf_text = extract_text_from_pdf(file_path)
+        if pdf_text and len(pdf_text) > 50:
+            try:
+                client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+                
+                full_prompt = f"{prompt}\n\n--- CONTENUTO DEL DOCUMENTO ---\n{pdf_text[:60000]}" # Tronca per sicurezza
+                
+                response = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "Sei un estrattore dati JSON rigoroso. Rispondi SOLO col JSON richiesto."},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000
+                )
+                
+                res_content = response.choices[0].message.content
+                res = clean_json(res_content)
+                
+                if res and isinstance(res, dict):
+                     if validate_fn and not validate_fn(res):
+                         status_box.error("❌ Dati DeepSeek non validi")
+                     else:
+                         status_box.success(f"✅ {tipo_doc} analizzato con DeepSeek!")
+                         time.sleep(1)
+                         status_box.empty()
+                         return res
+            except Exception as e:
+                status_box.error(f"❌ Errore DeepSeek: {e}")
+        else:
+            status_box.error("❌ Impossibile estrarre testo per DeepSeek (PDF scannerizzato?)")
 
-    for idx, (nome_modello, modello) in enumerate(MODELLI_DISPONIBILI, 1):
-        try:
-            progress_placeholder.info(f"🔄 Analisi {tipo}: modello {idx}/{len(MODELLI_DISPONIBILI)}...")
-
-            response = modello.generate_content([
-                prompt,
-                {"mime_type": "application/pdf", "data": bytes_data}
-            ])
-
-            result = clean_json_response(response.text)
-
-            if result and isinstance(result, dict):
-                if validate_fn is not None:
-                    try:
-                        if not validate_fn(result):
-                            continue
-                    except:
-                        continue
-
-                progress_placeholder.success(f"✅ {tipo.capitalize()} analizzato!")
-                time.sleep(0.7)
-                progress_placeholder.empty()
-                return result
-
-        except Exception as e:
-            msg = str(e).lower()
-            if "429" in msg or "quota" in msg or "resource_exhausted" in msg:
-                continue
-            else:
-                continue
-
-    progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite o parsing instabile)")
+    status_box.error(f"❌ Impossibile analizzare {tipo_doc} con nessuna AI.")
     return None
 
-def estrai_dati_busta_dettagliata(file_path):
-    """Estrae dati dalla busta paga"""
+# --- PROMPTS SPECIFICI ---
 
-    prompt = """
-    Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Segui ESATTAMENTE queste istruzioni:
+def get_busta_prompt():
+    return """
+    Sei un esperto paghe italiano. Analizza questo cedolino GOTTARDO SPA.
+    Estrai i seguenti dati in formato JSON rigoroso:
+    
+    1. DATI GENERALI:
+       - netto (riga Progressivi -> netto del mese)
+       - giorni_pagati (spesso "GG. INPS" o "GIORNI RETRIBUITI")
+    
+    2. COMPETENZE:
+       - base (paga base)
+       - straordinari (somma voci straordinario/banca ore/notturno/supplementare)
+       - festivita (somma voci festività/ex festività)
+       - lordo_totale (totale competenze)
+       
+    3. TRATTENUTE:
+       - inps (totale contributi sociali)
+       - irpef_netta (trattenuta irpef netta)
+       - addizionali_totali (somma addizionali reg/comunali)
+       
+    4. FERIE: {residue_ap, maturate, godute, saldo} (Dalla casella FERIE)
+    5. PERMESSI (PAR/ROL): {residue_ap, spettanti, fruite, saldo} (Dalla casella P.A.R.)
+    
+    6. TREDICESIMA: boolean (true se è la busta della tredicesima/gratifica natalizia)
 
-    **1. DATI GENERALI (PRIMA PAGINA, RIGA PROGRESSIVI):**
-    - **NETTO:** Cerca la riga "PROGRESSIVI" in fondo. Il NETTO è nella colonna finale prima di "ESTREMI ELABORAZIONE"
-    - **GIORNI PAGATI:** Cerca in alto la riga con "GG. INPS" (numero a sinistra della colonna, es. "26")
-    - **ORE ORDINARIE:** Cerca "ORE INAIL" oppure calcola: giorni_pagati × 8
-
-    **2. COMPETENZE (TABELLA CENTRALE):**
-    - **RETRIBUZIONE ORDINARIA (voce 1000):** Colonna "COMPETENZE"
-    - **STRAORDINARI:** Somma tutte le voci tipo "STRAORDINARIO", "SUPPLEMENTARI", "NOTTURNI"
-    - **FESTIVITA:** Somma voci "MAGG. FESTIVE", "FESTIVITA GODUTA"
-    - **ANZIANITA:** Se vedi voci "SCATTI", "EDR", "ANZ." usale, altrimenti 0
-    - **LORDO TOTALE:** Cerca riga "TOTALE COMPETENZE" o "PROGRESSIVI" → colonna "TOTALE COMPETENZE"
-
-    **3. TRATTENUTE (SEZIONE I.N.P.S. + IRPEF):**
-    - **INPS:** Sezione "IMPONIBILE / TRATTENUTE" → riga sotto "I.N.P.S."
-    - **IRPEF NETTA:** Sezione "FISCALI" → riga "TRATTENUTE" sotto "IRPEF CONG."
-    - **ADDIZIONALI:** Cerca voci "ADD.REG." e "ADD.COM." (sono rateizzate, non trattenute subito)
-
-    **4. FERIE / PAR (TABELLA IN ALTO A DESTRA):**
-    - Compila FERIE e P.A.R. dalle righe RES. PREC., SPETTANTI, FRUITE, SALDO
-
-    **5. TREDICESIMA:**
-    - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → e_tredicesima = true
-
-    **IMPORTANTE:**
-    - Se un valore non esiste scrivi 0
-    - Usa il punto come separatore decimale
-
-    Restituisci SOLO questo JSON:
+    Usa 0.0 se il valore manca. JSON Format:
     {
-        "e_tredicesima": boolean,
-        "dati_generali": {
-            "netto": float,
-            "giorni_pagati": float,
-            "ore_ordinarie": float
-        },
-        "competenze": {
-            "base": float,
-            "anzianita": float,
-            "straordinari": float,
-            "festivita": float,
-            "lordo_totale": float
-        },
-        "trattenute": {
-            "inps": float,
-            "irpef_netta": float,
-            "addizionali_totali": float
-        },
-        "ferie": {
-            "residue_ap": float,
-            "maturate": float,
-            "godute": float,
-            "saldo": float
-        },
-        "par": {
-            "residue_ap": float,
-            "spettanti": float,
-            "fruite": float,
-            "saldo": float
-        }
+        "e_tredicesima": false,
+        "dati_generali": {"netto": 0.0, "giorni_pagati": 0.0, "ore_ordinarie": 0.0},
+        "competenze": {"base": 0.0, "anzianita": 0.0, "straordinari": 0.0, "festivita": 0.0, "lordo_totale": 0.0},
+        "trattenute": {"inps": 0.0, "irpef_netta": 0.0, "addizionali_totali": 0.0},
+        "ferie": {"residue_ap": 0.0, "maturate": 0.0, "godute": 0.0, "saldo": 0.0},
+        "par": {"residue_ap": 0.0, "spettanti": 0.0, "fruite": 0.0, "saldo": 0.0}
     }
     """
-    return estrai_con_fallback(file_path, prompt, tipo="busta paga")
 
-def _validate_cartellino(result: dict) -> bool:
-    """
-    ✅ Anti-hallucination migliorata:
-    Accetta se ci sono dati numerici validi OPPURE evidenze testuali nel debug.
-    """
-    # 1. Se abbiamo dati numerici > 0, accettiamo subito
-    giorni_reali = float(result.get('giorni_reali', 0) or 0)
-    gg_presenza = float(result.get('gg_presenza', 0) or 0)
-    ore_0251 = float(result.get('ore_ordinarie_0251', 0) or 0)
-    ore_0253 = float(result.get('ore_lavorate_0253', 0) or 0)
-
-    if any([giorni_reali > 0, gg_presenza > 0, ore_0251 > 0, ore_0253 > 0]):
-        return True
-
-    # 2. Controllo testuale (con typo corretto: TIMBRATURE non TIMBRATURES)
-    dbg = (result.get("debug_prime_righe") or "")[:4000].upper()
-    note = (result.get("note") or "").upper()
-
-    has_timbr = "TIMBRATURE" in dbg
-    has_pres = ("GG PRESENZA" in dbg) or ("0265" in dbg)
-    has_day = re.search(r"\b[LMGVSD]\d{2}\b", dbg) is not None
-    says_empty = "NESSUN DATO" in note or "NESSUN DATO" in dbg
-
-    # Se dice "vuoto" ma nel debug ci sono timbrature/presenza -> accetta
-    if says_empty and (has_timbr or has_pres or has_day):
-        return True
-
-    # Se dice "vuoto" e non c'è nessuna evidenza -> scarta
-    if says_empty and not (has_timbr or has_pres or has_day):
-        return False
-
-    # Normale: accetta se c'è almeno un'evidenza testuale
-    return has_timbr or has_pres or has_day
-
-def estrai_dati_cartellino(file_path):
-    """Estrae dati dal cartellino con validazione anti-hallucination"""
-
-    prompt = r"""
-    Analizza questo cartellino presenze GOTTARDO S.p.A.
-
-    REGOLE IMPORTANTI (NO ALLUCINAZIONI):
-    - Se dichiari che è "vuoto" o "Nessun dato", devi riportare nel campo debug_prime_righe
-      la riga/frase ESATTA presente nel PDF che lo dimostra.
-    - Se nel PDF compare "TIMBRATURE" o una tabella con giorni tipo L01/M02/... allora NON è vuoto.
-
-    OBIETTIVO:
-    1) Estrai "0265 GG PRESENZA" se presente (numero finale, es. 24,00) -> gg_presenza
-    2) Estrai i totali ore se presenti:
-       - Riga che contiene "0251 ORE ORDINARIE" -> ore_ordinarie_0251 (es. 146,00)
-       - Riga che contiene "0253 ORE LAVORATE" -> ore_lavorate_0253 (es. 165,00)
-       - Se trovi una riga separata con totali tipo "160,00 7,00 13,00 15,00 ..." salva il primo numero -> ore_ordinarie_riepilogo
-    3) giorni_reali:
-       - Conta i giorni (L01..M31 ecc.) presenti nella tabella timbrature (conta i token \b[LMGVSD]\d{2}\b unici).
-       - Se non riesci, metti 0 e spiegalo in note.
-
-    OUTPUT (solo JSON):
+def get_cartellino_prompt():
+    return """
+    Analizza questo cartellino presenze.
+    
+    REGOLE:
+    1. Verifica se ci sono timbrature reali (es. L01 8:00... M02 8:00...).
+       - Se ci sono, conta i giorni univoci -> "giorni_reali".
+       - Se è vuoto (solo intestazione), giorni_reali = 0.
+    
+    2. Estrai i totali se presenti in fondo o in alto:
+       - "GG PRESENZA" o "Giorni lavorati" -> "gg_presenza"
+       - "Totale Ore Ordinarie" -> "ore_ordinarie"
+    
+    3. Note: scrivi eventuali anomalie (es. "Mancata timbratura uscita gg 15").
+    
+    OUTPUT JSON:
     {
-      "giorni_reali": float,
-      "gg_presenza": float,
-      "ore_ordinarie_riepilogo": float,
-      "ore_ordinarie_0251": float,
-      "ore_lavorate_0253": float,
-      "giorni_senza_badge": float,
-      "note": "string",
-      "debug_prime_righe": "prime ~30 righe (testo) copiate dal PDF, senza inventare"
+      "giorni_reali": 0.0,
+      "gg_presenza": 0.0,
+      "ore_ordinarie_riepilogo": 0.0,
+      "giorni_senza_badge": 0.0,
+      "note": "breve descrizione",
+      "debug_prime_righe": "copia qui del testo per debug"
     }
-
-    NOTE:
-    - Usa il punto come separatore decimale.
-    - Se un valore non esiste, metti 0.
     """
 
-    return estrai_con_fallback(file_path, prompt, tipo="cartellino", validate_fn=_validate_cartellino)
+def validate_cartellino(res):
+    """Anti-hallucination per check cartellino vuoto"""
+    # 1. Numeri presenti?
+    numeri = [res.get('giorni_reali', 0), res.get('gg_presenza', 0)]
+    if any(float(x or 0) > 0 for x in numeri): return True
+    
+    # 2. Testo "prova" presente nella risposta?
+    dbg = str(res.get('debug_prime_righe', '')).upper()
+    if "TIMBRATURE" in dbg or "0265" in dbg or "GG PRESENZA" in dbg: return True
+    
+    # Se dice vuoto e non ci sono numeri, va bene (è davvero vuoto)
+    return True # Accettiamo anche risultati "vuoti" se coerenti
 
-# --- PULIZIA FILE ---
-def pulisci_file(path_busta, path_cart):
-    """Elimina i file PDF scaricati dopo l'analisi"""
-    file_eliminati = []
-
-    if path_busta and os.path.exists(path_busta):
-        try:
-            os.remove(path_busta)
-            file_eliminati.append(os.path.basename(path_busta))
-        except:
-            pass
-
-    if path_cart and os.path.exists(path_cart):
-        try:
-            os.remove(path_cart)
-            file_eliminati.append(os.path.basename(path_cart))
-        except:
-            pass
-
-    if file_eliminati:
-        st.info(f"🗑️ File eliminati: {', '.join(file_eliminati)}")
-
-# --- CORE BOT ---
-def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot completo con gestione dialog browser warning"""
-    nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-                    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+# --- DOWNLOADER BOT (Playwright) ---
+def run_downloader(mese_nome, anno, username, password, tipo_doc):
+    """Esegue il download headless"""
+    
+    # Mappatura Mesi
+    mesi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
+            "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try:
-        mese_num = nomi_mesi_it.index(mese_nome) + 1
+        mese_num = mesi.index(mese_nome) + 1
     except:
-        return None, None, None
+        return None, None, "Mese non valido"
 
-    if tipo_documento == "tredicesima":
-        target_busta = f"Tredicesima {anno}"
-    else:
-        target_busta = f"{mese_nome} {anno}"
-
-    last_day = calendar.monthrange(anno, mese_num)[1]
-    d_from_vis = f"01/{mese_num:02d}/{anno}"
-    d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
-
-    work_dir = Path.cwd()
-    suffix = "_13" if tipo_documento == "tredicesima" else ""
-    path_busta = str(work_dir / f"busta_{mese_num}_{anno}{suffix}.pdf")
-    path_cart = str(work_dir / f"cartellino_{mese_num}_{anno}.pdf")
-
-    st_status = st.empty()
-    nome_tipo = "Tredicesima" if tipo_documento == "tredicesima" else "Cedolino"
-    st_status.info(f"🤖 Bot: {nome_tipo} {mese_nome} {anno}")
-
+    # Percorsi temporanei
+    wd = Path.cwd()
+    path_busta = str(wd / f"temp_busta.pdf")
+    path_cart = str(wd / f"temp_cartellino.pdf")
+    
+    # Init flags
     busta_ok = False
     cart_ok = False
+    
+    status_log = st.empty()
+    status_log.info("🚀 Avvio browser sicuro...")
 
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless=True,
-                slow_mo=500,
-                args=['--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage']
+                headless=True, # Metti False se vuoi vederlo aprirsi
+                args=['--no-sandbox', '--disable-gpu']
             )
-            context = browser.new_context(
-                accept_downloads=True,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
-            )
-            context.set_default_timeout(45000)
+            # Context con download automatici
+            context = browser.new_context(accept_downloads=True)
             page = context.new_page()
-            page.set_viewport_size({"width": 1920, "height": 1080})
+            page.set_default_timeout(30000)
 
-            # LOGIN
-            st_status.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
-            page.wait_for_selector('input[type="text"]', timeout=10000)
+            # 1. LOGIN
+            status_log.info("🔐 Accesso al portale...")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+            
+            # Compilazione form
             page.fill('input[type="text"]', username)
             page.fill('input[type="password"]', password)
             page.press('input[type="password"]', 'Enter')
-            time.sleep(3)
-
+            
+            # Verifica accesso
             try:
                 page.wait_for_selector("text=I miei dati", timeout=15000)
-                st_status.info("✅ Login OK")
             except:
-                st_status.error("❌ Login fallito")
                 browser.close()
                 return None, None, "LOGIN_FALLITO"
 
-            # ✅ CHIUDI DIALOG BROWSER WARNING (se presente)
+            # 2. GESTIONE POPUP MOLESTI
+            # Gottardo spesso ha dei dialog overlay che bloccano i click. Li rimuoviamo.
             try:
-                # Prova a chiudere con Escape
                 page.keyboard.press("Escape")
-                time.sleep(0.5)
-            except:
-                pass
-
-            # Prova a cliccare su pulsanti di chiusura comuni
-            try:
-                close_btns = page.locator("span.dijitDialogCloseIcon, button:has-text('OK'), button:has-text('Chiudi'), .dijitDialogCloseIcon")
-                if close_btns.count() > 0:
-                    close_btns.first.click(force=True)
-                    time.sleep(1)
-            except:
-                pass
-
-            # Prova a nascondere l'overlay via JavaScript
-            try:
                 page.evaluate("""
-                    var overlay = document.querySelector('.dijitDialogUnderlay, #browserWarningDialog_underlay');
-                    if (overlay) overlay.style.display = 'none';
-                    var dialog = document.querySelector('[id*="browserWarning"]');
-                    if (dialog) dialog.style.display = 'none';
+                    document.querySelectorAll('.dijitDialogUnderlay').forEach(e => e.remove());
+                    document.querySelectorAll('.dijitDialog').forEach(e => e.style.display='none');
                 """)
-                time.sleep(0.5)
-            except:
-                pass
+                time.sleep(1)
+            except: pass
 
-            # BUSTA PAGA
-            st_status.info(f"💰 Download {nome_tipo}...")
+            # 3. DOWNLOAD BUSTA
+            status_log.info(f"📄 Cerco {tipo_doc}...")
+            
+            # Navigazione sicura
+            page.click("text=I miei dati", force=True) 
+            time.sleep(1)
+            page.click("text=Documenti", force=True)
+            time.sleep(3)
+            
+            # Clicca tab Cedolino
             try:
-                page.click("text=I miei dati", force=True)
-                page.wait_for_selector("text=Documenti", timeout=10000).click()
-                time.sleep(3)
+                page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").first.click()
+            except:
+                page.click("text=Cedolino", force=True)
+            
+            time.sleep(3)
 
+            # Logica ricerca link
+            search_term = f"Tredicesima {anno}" if "Tredicesima" in tipo_doc else f"{mese_nome} {anno}"
+            
+            links = page.locator("a")
+            found_idx = -1
+            
+            for i in range(links.count()):
+                txt = links.nth(i).inner_text().strip()
+                if search_term.lower() in txt.lower():
+                    # Filtro anti-ambiguità
+                    if "Tredicesima" in tipo_doc and "13" not in txt: continue
+                    if "Tredicesima" not in tipo_doc and "13" in txt: continue
+                    found_idx = i
+            
+            if found_idx >= 0:
+                with page.expect_download(timeout=20000) as dl_info:
+                    links.nth(found_idx).click()
+                dl = dl_info.value
+                dl.save_as(path_busta)
+                busta_ok = True
+                status_log.success("✅ Busta scaricata!")
+            else:
+                status_log.warning("⚠️ Busta non trovata per questo mese.")
+
+            # 4. DOWNLOAD CARTELLINO (Solo se non è Tredicesima)
+            if "Tredicesima" not in tipo_doc:
+                status_log.info("📅 Cerco Cartellino...")
+                
+                # Navigazione rapida
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2")
+                time.sleep(2)
+                
+                # Menu -> Time -> Cartellino
+                page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+                time.sleep(1)
+                page.evaluate("document.getElementById('lnktab_5_label')?.click()")
+                time.sleep(4)
+                
+                # Imposta date (1° al Fine Mese)
+                last_day = calendar.monthrange(anno, mese_num)[1]
+                d_start = f"01/{mese_num:02d}/{anno}"
+                d_end = f"{last_day}/{mese_num:02d}/{anno}"
+                
                 try:
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
-                except:
-                    page.click("text=Cedolino")
-
-                time.sleep(5)
-
-                try:
-                    if tipo_documento == "tredicesima":
-                        links = page.locator(f"a:has-text('Tredicesima {anno}')")
-                        if links.count() > 0:
-                            with page.expect_download(timeout=20000) as dl:
-                                links.first.click()
-                            dl.value.save_as(path_busta)
-                            if os.path.exists(path_busta):
-                                busta_ok = True
-                                st_status.success("✅ Tredicesima scaricata")
-                    else:
-                        all_links = page.locator("a")
-                        total_links = all_links.count()
-                        link_matches = []
-
-                        for i in range(total_links):
-                            try:
-                                txt = all_links.nth(i).inner_text().strip()
-                                if not txt or len(txt) < 3:
-                                    continue
-                                if any(mese in txt for mese in nomi_mesi_it) and str(anno) in txt:
-                                    ha_target = target_busta.lower() in txt.lower()
-                                    e_tredicesima = any(kw in txt for kw in ["Tredicesima", "13", "XIII"])
-                                    if ha_target and not e_tredicesima:
-                                        link_matches.append((i, txt))
-                            except:
-                                continue
-
-                        if len(link_matches) > 0:
-                            link_index, _ = link_matches[-1]
-                            with page.expect_download(timeout=20000) as download_info:
-                                all_links.nth(link_index).click()
-                            download = download_info.value
-                            download.save_as(path_busta)
-                            if os.path.exists(path_busta):
-                                busta_ok = True
-                                st_status.success("✅ Cedolino scaricato")
-                except Exception as e:
-                    st.error(f"❌ Errore: {e}")
-            except Exception as e:
-                st.error(f"Errore: {e}")
-
-            # CARTELLINO
-            if tipo_documento != "tredicesima":
-                st_status.info("📅 Download cartellino...")
-                try:
-                    page.evaluate("window.scrollTo(0, 0)")
-                    time.sleep(1)
-                    try:
-                        page.keyboard.press("Escape")
-                        time.sleep(0.5)
-                    except:
-                        pass
-
-                    try:
-                        logo = page.locator("img[src*='logo'], .logo").first
-                        if logo.is_visible(timeout=2000):
-                            logo.click()
-                            time.sleep(2)
-                    except:
-                        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
-                        time.sleep(3)
-
-                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                    time.sleep(3)
-
-                    page.evaluate("document.getElementById('lnktab_5_label')?.click()")
+                    # Compila date e cerca
+                    page.locator("input[id*='CLRICHIE']").fill(d_start)
+                    page.locator("input[id*='CLRICHI2']").fill(d_end)
+                    page.keyboard.press("Enter")
                     time.sleep(5)
+                except:
+                    pass
 
-                    # date
+                # Cerca icona lente d'ingrandimento nella riga del mese
+                row_label = f"{mese_num:02d}/{anno}"
+                icon = page.locator(f"tr:has-text('{row_label}')").locator("img[src*='search']").first
+                
+                if icon.count() > 0:
+                    with context.expect_page() as popup_ev:
+                        icon.click()
+                    popup = popup_ev.value
+                    
+                    # Trick: Prendi l'URL del popup e aggiungi EMBED=y per avere il PDF raw
+                    clean_url = popup.url.replace("/js_rev//", "/js_rev/")
+                    if "EMBED=y" not in clean_url:
+                        clean_url += "&EMBED=y" if "?" in clean_url else "?EMBED=y"
+                    
                     try:
-                        dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
-                        al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
-                        if dal.count() > 0 and al.count() > 0:
-                            dal.click(force=True)
-                            page.keyboard.press("Control+A")
-                            dal.fill("")
-                            dal.type(d_from_vis, delay=80)
-                            dal.press("Tab")
-                            time.sleep(0.5)
-
-                            al.click(force=True)
-                            page.keyboard.press("Control+A")
-                            al.fill("")
-                            al.type(d_to_vis, delay=80)
-                            al.press("Tab")
-                            time.sleep(0.5)
+                        resp = context.request.get(clean_url)
+                        if resp.body()[:4] == b"%PDF":
+                            Path(path_cart).write_bytes(resp.body())
+                            cart_ok = True
+                            status_log.success("✅ Cartellino scaricato!")
                     except:
-                        pass
-
-                    # ricerca
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(0.5)
-                    try:
-                        page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
-                    except:
-                        page.keyboard.press("Enter")
-
-                    try:
-                        page.wait_for_selector("text=Risultati della ricerca", timeout=20000)
-                    except:
-                        pass
-
-                    target_cart_row = f"{mese_num:02d}/{anno}"
-                    riga_row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                    if riga_row.count() > 0 and riga_row.locator("img[src*='search']").count() > 0:
-                        icona = riga_row.locator("img[src*='search']").first
-                    else:
-                        icona = page.locator("img[src*='search']").first
-
-                    if icona.count() == 0:
-                        page.pdf(path=path_cart)
-                    else:
-                        with context.expect_page(timeout=20000) as popup_info:
-                            icona.click()
-                        popup = popup_info.value
-
-                        popup_url = (popup.url or "").replace("/js_rev//", "/js_rev/")
-                        if "EMBED=y" not in popup_url:
-                            popup_url = popup_url + ("&" if "?" in popup_url else "?") + "EMBED=y"
-
-                        resp = context.request.get(popup_url, timeout=60000)
-                        body = resp.body()
-
-                        if body[:4] == b"%PDF":
-                            Path(path_cart).write_bytes(body)
-                        else:
-                            try:
-                                popup.pdf(path=path_cart, format="A4")
-                            except:
-                                page.pdf(path=path_cart)
-
-                        try:
-                            popup.close()
-                        except:
-                            pass
-
-                    if os.path.exists(path_cart) and os.path.getsize(path_cart) > 5000:
-                        cart_ok = True
-                        st_status.success("✅ Cartellino OK")
-                    else:
-                        st.warning("⚠️ Cartellino scaricato ma sembra piccolo/vuoto")
-
-                except Exception as e:
-                    st.error(f"❌ Errore cartellino: {e}")
-                    try:
-                        page.pdf(path=path_cart)
-                    except:
-                        pass
-
+                        status_log.error("Errore download stream cartellino")
+                
             browser.close()
+            status_log.empty()
 
     except Exception as e:
-        st.error(f"Errore bot: {e}")
+        status_log.error(f"Errore critico bot: {e}")
+        return None, None, str(e)
 
-    final_busta = path_busta if busta_ok else None
-    final_cart = path_cart if cart_ok else None
-    return final_busta, final_cart, None
+    return (path_busta if busta_ok else None), (path_cart if cart_ok else None), None
 
-# --- UI ---
-st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
-st.title("💶 Analisi Stipendio & Presenze")
+# --- UI APP ---
 
-# SIDEBAR
+st.set_page_config(page_title="Analisi Buste & Presenze AI", layout="wide", page_icon="💶")
+
+st.title("💶 Analisi Stipendio & Presenze Integrata")
+
+# SIDEBAR CONTROLLI
 with st.sidebar:
-    st.header("🔐 Credenziali")
-
-    username, password = get_credentials()
-
-    if not st.session_state.get('credentials_set'):
-        st.info("Inserisci le tue credenziali Gottardo SelfService")
-
-        input_user = st.text_input("Username", value=username if username else "", key="input_user")
-        input_pass = st.text_input("Password", type="password", value="", key="input_pass")
-
-        if st.button("💾 Salva Credenziali"):
-            if input_user and input_pass:
-                st.session_state['username'] = input_user
-                st.session_state['password'] = input_pass
+    st.header("⚙️ Impostazioni")
+    
+    # Credenziali
+    user, pwd = get_credentials()
+    if not user:
+        with st.form("creds"):
+            u = st.text_input("Username Portale")
+            p = st.text_input("Password Portale", type="password")
+            if st.form_submit_button("Salva"):
+                st.session_state['username'] = u
+                st.session_state['password'] = p
                 st.session_state['credentials_set'] = True
-                st.success("✅ Credenziali salvate!")
                 st.rerun()
-            else:
-                st.error("⚠️ Inserisci username e password")
     else:
-        st.success(f"✅ Loggato: **{st.session_state['username']}**")
-        if st.button("🔄 Cambia Credenziali"):
-            st.session_state['credentials_set'] = False
-            st.session_state.pop('username', None)
-            st.session_state.pop('password', None)
+        st.success(f"Utente: **{user}**")
+        if st.button("Logout"):
+            st.session_state.clear()
             st.rerun()
 
     st.divider()
-
-    if st.session_state.get('credentials_set'):
-        st.header("Parametri")
+    
+    if user:
         sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
-        sel_mese = st.selectbox(
-            "Mese",
-            ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-             "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"],
-            index=11
-        )
+        sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=11)
+        sel_tipo = st.radio("Tipo Documento", ["Cedolino Mensile", "Tredicesima"])
+        
+        btn_start = st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True)
 
-        tipo_doc = st.radio(
-            "Tipo documento",
-            ["📄 Cedolino Mensile", "🎄 Tredicesima"],
-            index=0
-        )
+# LOGICA PRINCIPALE
+if 'result_data' not in st.session_state:
+    st.session_state['result_data'] = None
 
-        if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
-            for key in ['busta', 'cart', 'db', 'dc', 'done']:
-                st.session_state.pop(key, None)
-
-            tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
-            username = st.session_state.get('username')
-            password = st.session_state.get('password')
-
-            busta, cart, errore = scarica_documenti_automatici(sel_mese, sel_anno, username, password, tipo_documento=tipo)
-
-            if errore == "LOGIN_FALLITO":
-                st.error("❌ LOGIN FALLITO")
-                st.stop()
-
-            st.session_state['busta'] = busta
-            st.session_state['cart'] = cart
-            st.session_state['tipo'] = tipo
-            st.session_state['done'] = False
+if user and btn_start:
+    # 1. DOWNLOAD
+    tipo_cod = "tredicesima" if "Tredicesima" in sel_tipo else "cedolino"
+    pb, pc, err = run_downloader(sel_mese, sel_anno, user, pwd, sel_cod=tipo_cod)
+    
+    if err == "LOGIN_FALLITO":
+        st.error("Credenziali sbagliate o sito irraggiungibile.")
+    elif err:
+        st.error(f"Errore: {err}")
     else:
-        st.warning("⚠️ Inserisci le credenziali")
+        # 2. ANALISI AI
+        with st.spinner("🤖 Analisi documenti con Intelligenza Artificiale..."):
+            db = None
+            dc = None
+            
+            if pb: db = estrai_con_ai(pb, get_busta_prompt(), "Busta Paga")
+            if pc: dc = estrai_con_ai(pc, get_cartellino_prompt(), "Cartellino", validate_fn=validate_cartellino)
+            
+            st.session_state['result_data'] = {'db': db, 'dc': dc, 'tipo': tipo_cod}
+            
+            # Pulizia
+            if pb and os.path.exists(pb): os.remove(pb)
+            if pc and os.path.exists(pc): os.remove(pc)
 
-# ANALISI
-if st.session_state.get('busta') or st.session_state.get('cart'):
+# DISPLAY RISULTATI
+res = st.session_state['result_data']
 
-    if not st.session_state.get('done'):
-        with st.spinner("🧠 Analisi AI in corso..."):
-            db = estrai_dati_busta_dettagliata(st.session_state.get('busta'))
-            dc = estrai_dati_cartellino(st.session_state.get('cart')) if st.session_state.get('cart') else None
-            st.session_state['db'] = db
-            st.session_state['dc'] = dc
-            st.session_state['done'] = True
+if res:
+    db = res.get('db')
+    dc = res.get('dc')
+    is_13 = res.get('tipo') == 'tredicesima'
 
-            pulisci_file(st.session_state.get('busta'), st.session_state.get('cart'))
-            st.session_state.pop('busta', None)
-            st.session_state.pop('cart', None)
+    if not db and not dc:
+        st.warning("Nessun dato estratto. Controlla se i documenti erano presenti sul portale.")
+    else:
+        # TABELLA DASHBOARD
+        tab1, tab2, tab3 = st.tabs(["💰 STIPENDIO", "📅 PRESENZE", "📊 CONFRONTO"])
+        
+        with tab1:
+            if db:
+                gen = db.get('dati_generali', {})
+                comp = db.get('competenze', {})
+                tratt = db.get('trattenute', {})
+                
+                # HERO METRICS
+                c1, c2, c3 = st.columns(3)
+                c1.metric("💵 NETTO PAGATO", f"€ {gen.get('netto', 0):.2f}", delta="Bonifico")
+                c2.metric("LORDO TOTALE", f"€ {comp.get('lordo_totale', 0):.2f}")
+                c3.metric("GIORNI COMPIUTI", gen.get('giorni_pagati', 0))
+                
+                st.divider()
+                
+                # DETTAGLI
+                col_sx, col_dx = st.columns(2)
+                with col_sx:
+                    st.subheader("Entrate Variabili")
+                    st.write(f"⏱️ **Straordinari:** € {comp.get('straordinari', 0):.2f}")
+                    st.write(f"🎉 **Festività:** € {comp.get('festivita', 0):.2f}")
+                
+                with col_dx:
+                    st.subheader("Saldo Ferie & PAR")
+                    f_saldo = db.get('ferie', {}).get('saldo', 0)
+                    p_saldo = db.get('par', {}).get('saldo', 0)
+                    st.metric("Ferie Residue", f"{f_saldo:.2f}")
+                    st.metric("PAR Residui", f"{p_saldo:.2f}")
 
-    db = st.session_state.get('db')
-    dc = st.session_state.get('dc')
-    tipo = st.session_state.get('tipo', 'cedolino')
-
-    if db and db.get('e_tredicesima'):
-        st.success("🎄 **Cedolino TREDICESIMA**")
-
-    st.divider()
-
-    tab1, tab2, tab3 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto"])
-
-    with tab1:
-        if db:
-            dg = db.get('dati_generali', {})
-            comp = db.get('competenze', {})
-            tratt = db.get('trattenute', {})
-            ferie = db.get('ferie', {})
-            par = db.get('par', {})
-
-            k1, k2, k3 = st.columns(3)
-            k1.metric("💵 NETTO IN BUSTA", f"€ {dg.get('netto', 0):.2f}", delta="Pagamento")
-            k2.metric("📊 Lordo Totale", f"€ {comp.get('lordo_totale', 0):.2f}")
-            k3.metric("📆 GG INPS (Busta)", int(dg.get('giorni_pagati', 0)))
-
-            st.markdown("---")
-
-            c_entr, c_usc = st.columns(2)
-            with c_entr:
-                st.subheader("➕ Competenze")
-                st.write(f"**Paga Base:** € {comp.get('base', 0):.2f}")
-                if comp.get('anzianita', 0) > 0:
-                    st.write(f"**Anzianità:** € {comp.get('anzianita', 0):.2f}")
-                if comp.get('straordinari', 0) > 0:
-                    st.write(f"**Straordinari/Suppl.:** € {comp.get('straordinari', 0):.2f}")
-                if comp.get('festivita', 0) > 0:
-                    st.write(f"**Festività/Maggiorazioni:** € {comp.get('festivita', 0):.2f}")
-
-            with c_usc:
-                st.subheader("➖ Trattenute")
-                st.write(f"**Contributi INPS:** € {tratt.get('inps', 0):.2f}")
-                st.write(f"**IRPEF Netta:** € {tratt.get('irpef_netta', 0):.2f}")
-                if tratt.get('addizionali_totali', 0) > 0:
-                    st.write(f"**Addizionali:** € {tratt.get('addizionali_totali', 0):.2f}")
-
-            with st.expander("🏖️ Situazione Ferie"):
-                f1, f2, f3, f4 = st.columns(4)
-                f1.metric("Residue AP", f"{ferie.get('residue_ap', 0):.2f}")
-                f2.metric("Maturate", f"{ferie.get('maturate', 0):.2f}")
-                f3.metric("Fruite", f"{ferie.get('godute', 0):.2f}")
-                saldo_f = ferie.get('saldo', 0)
-                f4.metric("Saldo", f"{saldo_f:.2f}", delta="OK" if saldo_f >= 0 else "Negativo")
-
-            with st.expander("⏱️ Situazione Permessi"):
-                p1, p2, p3, p4 = st.columns(4)
-                p1.metric("Residue AP", f"{par.get('residue_ap', 0):.2f}")
-                p2.metric("Spettanti", f"{par.get('spettanti', 0):.2f}")
-                p3.metric("Fruite", f"{par.get('fruite', 0):.2f}")
-                saldo_p = par.get('saldo', 0)
-                p4.metric("Saldo", f"{saldo_p:.2f}", delta="OK" if saldo_p >= 0 else "Negativo")
-        else:
-            st.warning("⚠️ Dati busta non disponibili")
-
-    with tab2:
-        if dc:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                gg_presenza = float(dc.get('gg_presenza', 0) or 0)
-                giorni_reali = float(dc.get('giorni_reali', 0) or 0)
-
-                # Preferisci gg_presenza quando c'è
-                if gg_presenza > 0:
-                    st.metric("📅 GG Presenza (Cartellino)", gg_presenza)
-                elif giorni_reali > 0:
-                    st.metric("📅 Giorni timbrati (stimati)", giorni_reali)
-                else:
-                    st.metric("📅 Presenze", "N/D")
-
-                anomalie = dc.get('giorni_senza_badge', 0)
-                if anomalie and anomalie > 0:
-                    st.metric("⚠️ Anomalie Badge", anomalie, delta="Controlla")
-                else:
-                    st.metric("✅ Anomalie Badge", 0, delta="OK")
-
-            with c2:
-                note = dc.get('note', '')
-                st.info(f"**📝 Note:** {note}")
-        else:
-            if tipo == "tredicesima":
-                st.warning("⚠️ Cartellino non disponibile (Tredicesima)")
             else:
-                st.error("❌ Errore cartellino")
+                st.info("Dati busta non disponibili.")
 
-    with tab3:
-        if db and dc:
-            gg_inps = float(db.get('dati_generali', {}).get('giorni_pagati', 0) or 0)
-            gg_presenza = float(dc.get('gg_presenza', 0) or 0)
-            giorni_reali = float(dc.get('giorni_reali', 0) or 0)
-
-            st.subheader("🔍 Analisi Discrepanze")
-
-            # Confronto più sensato: GG INPS vs GG PRESENZA (se disponibile)
-            if gg_presenza > 0:
-                diff = gg_presenza - gg_inps
-                col_a, col_b = st.columns(2)
-                col_a.metric("GG INPS (Busta)", gg_inps)
-                col_b.metric("GG Presenza (Cartellino)", gg_presenza, delta=f"{diff:.1f}")
+        with tab2:
+            if dc:
+                pres = dc.get('gg_presenza', 0)
+                reali = dc.get('giorni_reali', 0)
+                
+                valore_guida = pres if pres > 0 else reali
+                
+                st.metric("📅 GIORNI LAVORATI (Cartellino)", f"{valore_guida:.1f}")
+                
+                if dc.get('note'):
+                    st.info(f"**Note:** {dc['note']}")
+                
+                debug_txt = dc.get('debug_prime_righe', '')
+                if debug_txt:
+                    with st.expander("Vedi dati grezzi"):
+                        st.text(debug_txt)
             else:
-                diff = giorni_reali - gg_inps
-                col_a, col_b = st.columns(2)
-                col_a.metric("GG INPS (Busta)", gg_inps)
-                col_b.metric("Giorni timbrati (stimati)", giorni_reali, delta=f"{diff:.1f}")
+                st.info("Cartellino non disponibile.")
 
-            st.markdown("---")
-            st.info(
-                "ℹ️ GG INPS e presenze/timbrature non sono la stessa cosa: "
-                "GG INPS può includere giornate retribuite non timbrate (es. festività/assenze)."
-            )
-        elif tipo == "tredicesima":
-            st.info("ℹ️ Analisi non disponibile per Tredicesima")
-        else:
-            st.warning("⚠️ Servono entrambi i documenti")
+        with tab3:
+            if db and dc:
+                pagati = float(db.get('dati_generali', {}).get('giorni_pagati', 0))
+                lavorati = float(dc.get('gg_presenza', 0) or dc.get('giorni_reali', 0))
+                
+                diff = lavorati - pagati
+                
+                st.subheader("Discrepanza Giorni")
+                col_a, col_b = st.columns(2)
+                col_a.metric("Busta (Pagati)", pagati)
+                col_b.metric("Cartellino (Timbrati)", lavorati, delta=f"{diff:.2f}")
+                
+                if abs(diff) > 0.5:
+                    st.warning(f"⚠️ C'è una differenza di {diff:.1f} giorni.")
+                else:
+                    st.success("✅ I conti tornano!")
+            else:
+                st.write("Confronto non possibile (manca uno dei due documenti).")
