@@ -207,7 +207,7 @@ def validate_cartellino(res):
     txt = str(res.get('debug_prime_righe','')).upper() + str(res.get('note','')).upper()
     return "TIMBRATURE" in txt or "PRESENZA" in txt or "NESSUN DATO" in txt
 
-# --- BOT DOWNLOAD ---
+# --- BOT DOWNLOAD ROBUSTO ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -226,56 +226,82 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
-            context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36")
+            # Opzioni Browser Stealth
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox', 
+                    '--disable-gpu', 
+                    '--disable-blink-features=AutomationControlled', # Anti-detection
+                    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                ]
+            )
+            context = browser.new_context(
+                accept_downloads=True, 
+                locale='it-IT'
+            )
             page = context.new_page()
             page.set_default_timeout(45000)
 
             # LOGIN
             log.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
+            time.sleep(2) # Pausa tattica
+            
             page.fill('input[type="text"]', username)
+            time.sleep(0.5)
             page.fill('input[type="password"]', password)
+            time.sleep(0.5)
             page.press('input[type="password"]', 'Enter')
             
-            try: page.wait_for_selector("text=I miei dati", timeout=15000)
-            except: 
-                browser.close(); return None, None, "LOGIN_FALLITO"
-
-            # FIX DIALOG & POPUP BLOCKERS
-            try:
+            # Ciclo di controllo "intelligente" post-login
+            logged_in = False
+            for _ in range(15): # Prova per 15 secondi
+                time.sleep(1)
+                # Killa popup
                 page.keyboard.press("Escape")
-                page.evaluate("document.querySelectorAll('.dijitDialogUnderlay').forEach(e => e.remove())")
-            except: pass
+                try: page.evaluate("document.querySelectorAll('.dijitDialogUnderlay, .dijitDialog').forEach(e => e.style.display='none')")
+                except: pass
+                
+                # Check successo
+                if page.locator("text=I miei dati").count() > 0:
+                    logged_in = True
+                    break
+            
+            if not logged_in:
+                browser.close()
+                return None, None, "LOGIN_FALLITO"
 
             # BUSTA
             log.info(f"📄 Scarico Busta...")
-            page.click("text=I miei dati", force=True)
-            page.click("text=Documenti", force=True)
-            time.sleep(3)
-            
-            try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").first.click()
-            except: page.click("text=Cedolino", force=True)
-            
-            time.sleep(3)
-            
-            # Ricerca Link
-            links = page.locator("a")
-            idx = -1
-            for i in range(links.count()):
-                t = links.nth(i).inner_text()
-                if target_busta.lower() in t.lower():
-                    if tipo_documento == "tredicesima" and "13" not in t: continue
-                    if tipo_documento != "tredicesima" and "13" in t: continue
-                    idx = i
-            
-            if idx >= 0:
-                with page.expect_download(timeout=20000) as dl: links.nth(idx).click()
-                dl.value.save_as(path_busta)
-                b_ok = True
-                log.success("✅ Busta OK")
-            else:
-                log.warning("⚠️ Busta non trovata")
+            try:
+                page.click("text=I miei dati", force=True)
+                time.sleep(0.5)
+                page.click("text=Documenti", force=True)
+                time.sleep(3)
+                
+                try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").first.click()
+                except: page.click("text=Cedolino", force=True)
+                time.sleep(3)
+                
+                links = page.locator("a")
+                idx = -1
+                for i in range(links.count()):
+                    t = links.nth(i).inner_text()
+                    if target_busta.lower() in t.lower():
+                        if tipo_documento == "tredicesima" and "13" not in t: continue
+                        if tipo_documento != "tredicesima" and "13" in t: continue
+                        idx = i
+                
+                if idx >= 0:
+                    with page.expect_download(timeout=20000) as dl: links.nth(idx).click()
+                    dl.value.save_as(path_busta)
+                    b_ok = True
+                    log.success("✅ Busta OK")
+                else:
+                    log.warning("⚠️ Busta non trovata")
+            except Exception as e:
+                log.warning(f"Errore step Busta: {e}")
 
             # CARTELLINO
             if tipo_documento != "tredicesima":
@@ -283,13 +309,11 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2")
                 time.sleep(3)
                 
-                # Navigazione Menu
                 page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()") # Time
                 time.sleep(2)
                 page.evaluate("document.getElementById('lnktab_5_label')?.click()") # Cartellino
                 time.sleep(4)
                 
-                # Date
                 last = calendar.monthrange(anno, mese_num)[1]
                 d1 = f"01/{mese_num:02d}/{anno}"
                 d2 = f"{last}/{mese_num:02d}/{anno}"
@@ -301,39 +325,32 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     time.sleep(5)
                 except: pass
                 
-                # CERCA RIGA (Logica "Aggressiva" User Originale)
-                target_row = f"{mese_num:02d}/{anno}"
-                row = page.locator(f"tr:has-text('{target_row}')").first
-                
-                if row.count() > 0 and row.locator("img[src*='search']").count() > 0:
-                    icon = row.locator("img[src*='search']").first
-                else:
-                    # Fallback user original: prima icona search disponibile
-                    icon = page.locator("img[src*='search']").first
-                
-                if icon.count() > 0:
-                    with context.expect_page() as popup_ev: icon.click()
-                    popup = popup_ev.value
+                # Check riga + scarica
+                try:
+                    target_row = f"{mese_num:02d}/{anno}"
+                    row = page.locator(f"tr:has-text('{target_row}')").first
+                    icon = row.locator("img[src*='search']").first if row.count() > 0 else page.locator("img[src*='search']").first
                     
-                    # Trick EMBED=y
-                    url = popup.url.replace("/js_rev//", "/js_rev/")
-                    if "EMBED=y" not in url: url += "&EMBED=y" if "?" in url else "?EMBED=y"
-                    
-                    try:
+                    if icon.count() > 0:
+                        with context.expect_page() as popup_ev: icon.click()
+                        popup = popup_ev.value
+                        
+                        url = popup.url.replace("/js_rev//", "/js_rev/")
+                        if "EMBED=y" not in url: url += "&EMBED=y" if "?" in url else "?EMBED=y"
+                        
                         resp = context.request.get(url)
                         if resp.body()[:4] == b"%PDF":
                             Path(path_cart).write_bytes(resp.body())
                             c_ok = True
                             log.success("✅ Cartellino OK")
-                    except: log.error("Errore download stream")
-                else:
-                    log.warning("⚠️ Nessun cartellino trovato")
-            
+                except Exception as e:
+                    log.error(f"Errore Cartellino: {e}")
+
             browser.close()
             log.empty()
 
     except Exception as e:
-        log.error(f"Err: {e}")
+        log.error(f"Err Generico: {e}")
         return None, None, str(e)
     
     return (path_busta if b_ok else None), (path_cart if c_ok else None), None
@@ -371,11 +388,11 @@ with st.sidebar:
             
             pb, pc, err = scarica_documenti_automatici(sel_mese, sel_anno, st.session_state['username'], st.session_state['password'], tipo)
             
-            if err == "LOGIN_FALLITO": st.error("LOGIN FALLITO")
+            if err == "LOGIN_FALLITO": st.error("LOGIN FALLITO - Controlla credenziali o riprova")
             else:
                 st.session_state.update({'busta': pb, 'cart': pc, 'tipo': tipo})
 
-# RISULTATI UI (Originale)
+# RISULTATI UI
 if st.session_state.get('busta') or st.session_state.get('cart'):
     if not st.session_state.get('done'):
         with st.spinner("🧠 Analisi AI..."):
@@ -480,6 +497,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             
             st.markdown("---")
             if abs(diff) < 0.5: st.success("✅ Tutto OK")
-            else: st.warning(f"⚠️ Discrepanza di {diff} giorni")
+            else: st.warning(f"⚠️ Discrepanza di {diff:.1f} giorni")
         elif tipo == "tredicesima": st.info("Analisi non disponibile per Tredicesima")
         else: st.warning("Servono entrambi i documenti")
