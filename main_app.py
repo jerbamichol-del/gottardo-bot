@@ -481,11 +481,13 @@ with st.sidebar:
 # LOGICA PRINCIPALE
 if 'result_data' not in st.session_state:
     st.session_state['result_data'] = None
-
 if user and btn_start:
     # 1. DOWNLOAD
     tipo_cod = "tredicesima" if "Tredicesima" in sel_tipo else "cedolino"
-    pb, pc, err = run_downloader(sel_mese, sel_anno, user, pwd, sel_cod=tipo_cod)
+    
+    # --- CORREZIONE QUI ---
+    pb, pc, err = run_downloader(sel_mese, sel_anno, user, pwd, tipo_doc=tipo_cod)
+    # -----------------------
     
     if err == "LOGIN_FALLITO":
         st.error("Credenziali sbagliate o sito irraggiungibile.")
@@ -502,18 +504,15 @@ if user and btn_start:
             
             st.session_state['result_data'] = {'db': db, 'dc': dc, 'tipo': tipo_cod}
             
-            # Pulizia
+            # Pulizia file temporanei
             if pb and os.path.exists(pb): os.remove(pb)
             if pc and os.path.exists(pc): os.remove(pc)
-
 # DISPLAY RISULTATI
 res = st.session_state['result_data']
-
 if res:
     db = res.get('db')
     dc = res.get('dc')
-    is_13 = res.get('tipo') == 'tredicesima'
-
+    
     if not db and not dc:
         st.warning("Nessun dato estratto. Controlla se i documenti erano presenti sul portale.")
     else:
@@ -524,7 +523,6 @@ if res:
             if db:
                 gen = db.get('dati_generali', {})
                 comp = db.get('competenze', {})
-                tratt = db.get('trattenute', {})
                 
                 # HERO METRICS
                 c1, c2, c3 = st.columns(3)
@@ -547,44 +545,27 @@ if res:
                     p_saldo = db.get('par', {}).get('saldo', 0)
                     st.metric("Ferie Residue", f"{f_saldo:.2f}")
                     st.metric("PAR Residui", f"{p_saldo:.2f}")
-
             else:
                 st.info("Dati busta non disponibili.")
-
         with tab2:
             if dc:
                 pres = dc.get('gg_presenza', 0)
                 reali = dc.get('giorni_reali', 0)
-                
                 valore_guida = pres if pres > 0 else reali
-                
                 st.metric("📅 GIORNI LAVORATI (Cartellino)", f"{valore_guida:.1f}")
-                
-                if dc.get('note'):
-                    st.info(f"**Note:** {dc['note']}")
-                
-                debug_txt = dc.get('debug_prime_righe', '')
-                if debug_txt:
-                    with st.expander("Vedi dati grezzi"):
-                        st.text(debug_txt)
+                if dc.get('note'): st.info(f"**Note:** {dc['note']}")
+                if dc.get('debug_prime_righe'):
+                    with st.expander("Vedi dati debug"): st.text(dc['debug_prime_righe'])
             else:
                 st.info("Cartellino non disponibile.")
-
         with tab3:
             if db and dc:
                 pagati = float(db.get('dati_generali', {}).get('giorni_pagati', 0))
                 lavorati = float(dc.get('gg_presenza', 0) or dc.get('giorni_reali', 0))
-                
                 diff = lavorati - pagati
-                
-                st.subheader("Discrepanza Giorni")
                 col_a, col_b = st.columns(2)
                 col_a.metric("Busta (Pagati)", pagati)
                 col_b.metric("Cartellino (Timbrati)", lavorati, delta=f"{diff:.2f}")
-                
-                if abs(diff) > 0.5:
-                    st.warning(f"⚠️ C'è una differenza di {diff:.1f} giorni.")
-                else:
-                    st.success("✅ I conti tornano!")
             else:
-                st.write("Confronto non possibile (manca uno dei due documenti).")
+                st.write("Confronto non disponibile.")
+
