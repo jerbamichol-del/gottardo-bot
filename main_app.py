@@ -6,6 +6,7 @@ import time
 import json
 import calendar
 import locale
+import base64
 import streamlit as st
 import google.generativeai as genai
 from playwright.sync_api import sync_playwright
@@ -92,17 +93,37 @@ def extract_text_from_pdf(file_path):
     except:
         return None
 
+def get_pdf_download_link(file_path, filename):
+    """Genera link per scaricare il PDF"""
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "rb") as f:
+        data = base64.b64encode(f.read()).decode()
+    return f'<a href="data:application/pdf;base64,{data}" download="{filename}">📥 Scarica {filename}</a>'
+
 def cartellino_parse_deterministico(file_path: str):
-    """Parser deterministico per cartellino (regex su testo estratto)."""
+    """Parser deterministico per cartellino."""
     text = extract_text_from_pdf(file_path)
     if not text or len(text.strip()) < 20:
-        return None
+        return {
+            "giorni_reali": 0.0,
+            "gg_presenza": 0.0,
+            "ore_ordinarie_riepilogo": 0.0,
+            "ore_ordinarie_0251": 0.0,
+            "ore_lavorate_0253": 0.0,
+            "giorni_senza_badge": 0.0,
+            "note": "PDF vuoto o illeggibile.",
+            "debug_prime_righe": text[:500] if text else "Nessun testo estratto"
+        }
 
     upper = text.upper()
+    debug_text = "\n".join(text.splitlines()[:40])
 
     has_days = re.search(r"\b[LMGVSD]\d{2}\b", upper) is not None
-    has_timbr = "TIMBRATURE" in upper
-    if ("NESSUN DATO" in upper) and (not has_days) and (not has_timbr):
+    has_timbr = "TIMBRATURE" in upper or "TIMBRATURA" in upper
+    
+    # Se contiene "nessun dato" e non ha timbrature reali
+    if ("NESSUN DATO" in upper or "NESSUNA" in upper) and (not has_days) and (not has_timbr):
         return {
             "giorni_reali": 0.0,
             "gg_presenza": 0.0,
@@ -111,21 +132,25 @@ def cartellino_parse_deterministico(file_path: str):
             "ore_lavorate_0253": 0.0,
             "giorni_senza_badge": 0.0,
             "note": "Cartellino vuoto (testo contiene 'Nessun dato' e nessuna timbratura).",
-            "debug_prime_righe": "\n".join(text.splitlines()[:35])
+            "debug_prime_righe": debug_text
         }
 
+    # Giorni timbrati (token unici)
     day_tokens = sorted(set(re.findall(r"\b[LMGVSD]\d{2}\b", upper)))
     giorni_reali = float(len(day_tokens))
 
+    # GG PRESENZA (0265)
     m = re.search(r"0265\s+GG\s+PRESENZA.*?(\d{1,3}[.,]\d{2})", upper)
     gg_presenza = parse_it_number(m.group(1)) if m else 0.0
 
+    # Ore 0251 / 0253
     m1 = re.search(r"0251\s+ORE\s+ORDINARIE.*?(\d{1,3}[.,]\d{2})", upper)
     ore_ord_0251 = parse_it_number(m1.group(1)) if m1 else 0.0
 
     m2 = re.search(r"0253\s+ORE\s+LAVORATE.*?(\d{1,3}[.,]\d{2})", upper)
     ore_lav_0253 = parse_it_number(m2.group(1)) if m2 else 0.0
 
+    # Riepilogo ore
     ore_riep = 0.0
     for line in text.splitlines():
         ln = line.strip()
@@ -139,8 +164,6 @@ def cartellino_parse_deterministico(file_path: str):
                 ore_riep = parse_it_number(first_num[0])
             break
 
-    giorni_senza_badge = 0.0
-
     note_parts = []
     if gg_presenza > 0:
         note_parts.append(f"0265 GG PRESENZA={gg_presenza:.2f}.")
@@ -153,19 +176,15 @@ def cartellino_parse_deterministico(file_path: str):
     if giorni_reali > 0:
         note_parts.append(f"Token giorni={int(giorni_reali)}.")
 
-    strong = (gg_presenza > 0) or (ore_ord_0251 > 0) or (ore_lav_0253 > 0) or (ore_riep > 0) or (giorni_reali > 0 and has_timbr)
-    if not strong:
-        return None
-
     return {
         "giorni_reali": giorni_reali,
         "gg_presenza": gg_presenza,
         "ore_ordinarie_riepilogo": ore_riep,
         "ore_ordinarie_0251": ore_ord_0251,
         "ore_lavorate_0253": ore_lav_0253,
-        "giorni_senza_badge": giorni_senza_badge,
-        "note": " ".join(note_parts) if note_parts else "Cartellino parsato.",
-        "debug_prime_righe": "\n".join(text.splitlines()[:35])
+        "giorni_senza_badge": 0.0,
+        "note": " ".join(note_parts) if note_parts else "Nessun dato numerico trovato.",
+        "debug_prime_righe": debug_text
     }
 
 @st.cache_resource
@@ -335,7 +354,7 @@ def validate_cartellino_ai_fallback(res):
     return ("TIMBRATURE" in txt) or ("GG PRESENZA" in txt) or ("0265" in txt)
 
 
-# --- BOT DOWNLOAD (VERSIONE ROBUSTA CARTELLINO) ---
+# --- BOT DOWNLOAD ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -359,6 +378,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
     st_status.info(f"🤖 Bot avviato: {mese_nome} {anno}")
 
     b_ok, c_ok = False, False
+    debug_info = []
 
     try:
         with sync_playwright() as p:
@@ -387,6 +407,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             try:
                 page.wait_for_selector("text=I miei dati", timeout=15000)
                 st_status.info("✅ Login OK")
+                debug_info.append("Login: OK")
             except:
                 st_status.error("❌ Login fallito")
                 browser.close()
@@ -406,7 +427,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
 
                 time.sleep(5)
 
-                # Cerca link
                 links = page.locator("a")
                 total_links = links.count()
                 link_matches = []
@@ -430,8 +450,11 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except:
                         continue
 
+                debug_info.append(f"Busta links trovati: {len(link_matches)}")
+
                 if len(link_matches) > 0:
-                    link_index, _ = link_matches[-1]
+                    link_index, link_txt = link_matches[-1]
+                    debug_info.append(f"Busta click: {link_txt}")
                     with page.expect_download(timeout=20000) as download_info:
                         links.nth(link_index).click()
                     download = download_info.value
@@ -440,9 +463,10 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         b_ok = True
                         st_status.success("✅ Busta scaricata")
             except Exception as e:
+                debug_info.append(f"Busta errore: {e}")
                 st.error(f"Errore busta: {e}")
 
-            # CARTELLINO - VERSIONE PULITA E VELOCE
+            # CARTELLINO
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 try:
@@ -467,10 +491,12 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     # Vai su Time
                     page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     time.sleep(3)
+                    debug_info.append("Cartellino: Menu Time cliccato")
 
                     # Vai su Cartellino presenze
                     page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
+                    debug_info.append("Cartellino: Tab Cartellino cliccato")
 
                     # Imposta date
                     try:
@@ -491,48 +517,63 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                             al.type(d_to_vis, delay=80)
                             al.press("Tab")
                             time.sleep(0.5)
-                    except:
-                        pass
+                            debug_info.append(f"Cartellino: Date impostate {d_from_vis} - {d_to_vis}")
+                    except Exception as e:
+                        debug_info.append(f"Cartellino: Errore date: {e}")
 
                     # Esegui ricerca
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     time.sleep(0.5)
                     try:
                         page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
+                        debug_info.append("Cartellino: Esegui ricerca cliccato")
                     except:
                         page.keyboard.press("Enter")
+                        debug_info.append("Cartellino: Enter premuto")
 
                     # Attendi risultati
+                    time.sleep(5)
                     try:
-                        page.wait_for_selector("text=Risultati della ricerca", timeout=20000)
+                        page.wait_for_selector("text=Risultati della ricerca", timeout=15000)
+                        debug_info.append("Cartellino: Risultati trovati")
                     except:
-                        pass
+                        debug_info.append("Cartellino: Nessun risultato visibile")
 
                     # Trova riga e lente
                     target_cart_row = f"{mese_num:02d}/{anno}"
                     riga_row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                    
+                    icona = None
                     if riga_row.count() > 0 and riga_row.locator("img[src*='search']").count() > 0:
                         icona = riga_row.locator("img[src*='search']").first
+                        debug_info.append(f"Cartellino: Riga {target_cart_row} trovata con icona")
                     else:
                         icona = page.locator("img[src*='search']").first
+                        debug_info.append(f"Cartellino: Fallback prima icona search")
 
-                    if icona.count() == 0:
+                    if icona is None or icona.count() == 0:
+                        debug_info.append("Cartellino: Nessuna icona trovata, salvo pagina")
                         page.pdf(path=path_cart)
                     else:
                         with context.expect_page(timeout=20000) as popup_info:
                             icona.click()
                         popup = popup_info.value
+                        debug_info.append(f"Cartellino: Popup aperto")
 
                         popup_url = (popup.url or "").replace("/js_rev//", "/js_rev/")
                         if "EMBED=y" not in popup_url:
                             popup_url = popup_url + ("&" if "?" in popup_url else "?") + "EMBED=y"
+                        
+                        debug_info.append(f"Cartellino: URL = {popup_url[:100]}...")
 
                         resp = context.request.get(popup_url, timeout=60000)
                         body = resp.body()
 
                         if body[:4] == b"%PDF":
                             Path(path_cart).write_bytes(body)
+                            debug_info.append(f"Cartellino: PDF salvato ({len(body)} bytes)")
                         else:
+                            debug_info.append(f"Cartellino: Risposta non PDF, provo stampa")
                             try:
                                 popup.pdf(path=path_cart, format="A4")
                             except:
@@ -550,6 +591,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         st.warning("⚠️ Cartellino scaricato ma sembra piccolo/vuoto")
 
                 except Exception as e:
+                    debug_info.append(f"Cartellino: Errore {e}")
                     st.error(f"❌ Errore cartellino: {e}")
                     try:
                         page.pdf(path=path_cart)
@@ -562,6 +604,9 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
     except Exception as e:
         st_status.error(f"Errore: {e}")
         return None, None, str(e)
+
+    # Salva debug info
+    st.session_state['debug_info'] = debug_info
 
     return (path_busta if b_ok else None), (path_cart if c_ok else None), None
 
@@ -596,16 +641,12 @@ with st.sidebar:
             "Mese",
             ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
              "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"],
-            index=11
+            index=0  # Gennaio default
         )
         tipo_doc = st.radio("Tipo", ["📄 Cedolino Mensile", "🎄 Tredicesima"])
-        
-        # ✅ OPZIONE SETTIMANA 6 GIORNI
-        settimana_6gg = st.checkbox("⏱️ Settimana 6 giorni (40h/sett)", value=False, 
-                                     help="Se attivo, calcola ore attese come GG × 6.67 invece di × 8")
 
         if st.button("🚀 AVVIA ANALISI", type="primary"):
-            for k in ["done", "busta", "cart", "db", "dc", "tipo"]:
+            for k in ["done", "busta", "cart", "db", "dc", "tipo", "debug_info", "path_busta_temp", "path_cart_temp"]:
                 st.session_state.pop(k, None)
 
             tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
@@ -616,7 +657,14 @@ with st.sidebar:
             elif err:
                 st.error(err)
             else:
-                st.session_state.update({'busta': pb, 'cart': pc, 'tipo': tipo, 'done': False, 'sett6': settimana_6gg})
+                st.session_state.update({
+                    'busta': pb, 
+                    'cart': pc, 
+                    'tipo': tipo, 
+                    'done': False,
+                    'path_busta_temp': pb,
+                    'path_cart_temp': pc
+                })
     else:
         st.warning("⚠️ Inserisci le credenziali")
 
@@ -631,39 +679,39 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             dc = None
             if st.session_state.get('cart'):
                 dc = cartellino_parse_deterministico(st.session_state.get('cart'))
-                if dc is None:
-                    dc = estrai_con_fallback(
+                # Se il parser deterministico non trova nulla di utile, prova AI
+                if dc and dc.get('giorni_reali', 0) == 0 and dc.get('gg_presenza', 0) == 0:
+                    dc_ai = estrai_con_fallback(
                         st.session_state.get('cart'),
                         get_cartellino_prompt_ai_only(),
                         "Cartellino",
                         validate_fn=validate_cartellino_ai_fallback
                     )
+                    if dc_ai and (dc_ai.get('giorni_reali', 0) > 0 or dc_ai.get('gg_presenza', 0) > 0):
+                        dc = dc_ai
 
             st.session_state.update({'db': db, 'dc': dc, 'done': True})
 
-            try:
-                if st.session_state.get('busta') and os.path.exists(st.session_state['busta']):
-                    os.remove(st.session_state['busta'])
-            except:
-                pass
-            try:
-                if st.session_state.get('cart') and os.path.exists(st.session_state['cart']):
-                    os.remove(st.session_state['cart'])
-            except:
-                pass
+            # NON eliminiamo i file per debug
+            # try:
+            #     if st.session_state.get('busta') and os.path.exists(st.session_state['busta']):
+            #         os.remove(st.session_state['busta'])
+            # except:
+            #     pass
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
     tipo = st.session_state.get('tipo', 'cedolino')
-    sett6 = st.session_state.get('sett6', False)
-    ore_per_giorno = 6.67 if sett6 else 8.0  # 40h/6gg vs 40h/5gg
+
+    # Costante: settimana 6 giorni
+    ORE_PER_GIORNO = 6.67
 
     if db and db.get('e_tredicesima'):
         st.success("🎄 **Cedolino TREDICESIMA**")
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto"])
+    tab1, tab2, tab3, tab4 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto", "🔧 Debug"])
 
     with tab1:
         if db:
@@ -738,7 +786,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             with c2:
                 st.info(f"**📝 Note:** {dc.get('note', '')}")
                 
-                # Ore estratte
                 ore_ord = float(dc.get("ore_ordinarie_0251", 0) or 0)
                 ore_lav = float(dc.get("ore_lavorate_0253", 0) or 0)
                 ore_riep = float(dc.get("ore_ordinarie_riepilogo", 0) or 0)
@@ -748,6 +795,11 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                         st.write(f"**0251 Ore Ordinarie:** {ore_ord:.2f}")
                         st.write(f"**0253 Ore Lavorate:** {ore_lav:.2f}")
                         st.write(f"**Riepilogo Ore:** {ore_riep:.2f}")
+                
+                # Debug: mostra prime righe del PDF
+                if dc.get('debug_prime_righe'):
+                    with st.expander("🔍 Debug: Contenuto PDF"):
+                        st.code(dc['debug_prime_righe'], language=None)
         else:
             if tipo == "tredicesima":
                 st.warning("⚠️ Cartellino non disponibile (Tredicesima)")
@@ -766,23 +818,58 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             col_a.metric("GG INPS (Busta)", gg_inps)
             col_b.metric("GG Cartellino", val_cart, delta=f"{(val_cart - gg_inps):.1f}")
 
-            # Calcolo ore attese
-            ore_attese = gg_inps * ore_per_giorno
-            ore_effettive = float(dc.get("ore_ordinarie_0251", 0) or dc.get("ore_lavorate_0253", 0) or dc.get("ore_ordinarie_riepilogo", 0) or 0)
+            # Calcolo ore (settimana 6 giorni = 6.67h/gg)
+            ore_attese = gg_inps * ORE_PER_GIORNO
+            ore_effettive = float(
+                dc.get("ore_ordinarie_0251", 0) or 
+                dc.get("ore_lavorate_0253", 0) or 
+                dc.get("ore_ordinarie_riepilogo", 0) or 0
+            )
             
             if ore_effettive > 0:
                 st.markdown("---")
                 st.subheader("⏱️ Confronto Ore")
                 c_ore1, c_ore2 = st.columns(2)
-                c_ore1.metric(f"Ore Attese ({ore_per_giorno:.2f}h/gg)", f"{ore_attese:.2f}")
-                c_ore2.metric("Ore Effettive (Cartellino)", f"{ore_effettive:.2f}", delta=f"{(ore_effettive - ore_attese):.2f}")
-                
-                if sett6:
-                    st.caption("📌 Calcolo basato su settimana 6 giorni (40h / 6gg = 6.67h/gg)")
-                else:
-                    st.caption("📌 Calcolo basato su settimana 5 giorni (40h / 5gg = 8h/gg)")
+                c_ore1.metric("Ore Attese (6.67h/gg)", f"{ore_attese:.2f}")
+                c_ore2.metric("Ore Effettive", f"{ore_effettive:.2f}", delta=f"{(ore_effettive - ore_attese):.2f}")
+                st.caption("📌 Calcolo: 40h settimanali ÷ 6 giorni = 6.67h/giorno")
 
         elif tipo == "tredicesima":
             st.info("Analisi non disponibile per Tredicesima")
         else:
             st.warning("Servono entrambi i documenti")
+
+    with tab4:
+        st.subheader("🔧 Debug Bot")
+        
+        # Mostra log debug
+        if st.session_state.get('debug_info'):
+            st.write("**Log operazioni:**")
+            for line in st.session_state['debug_info']:
+                st.text(f"• {line}")
+        
+        st.markdown("---")
+        
+        # Download PDF per verifica manuale
+        st.write("**Scarica PDF per verifica:**")
+        col_d1, col_d2 = st.columns(2)
+        
+        with col_d1:
+            pb = st.session_state.get('path_busta_temp')
+            if pb and os.path.exists(pb):
+                link = get_pdf_download_link(pb, "busta.pdf")
+                if link:
+                    st.markdown(link, unsafe_allow_html=True)
+                    st.caption(f"Dimensione: {os.path.getsize(pb)} bytes")
+            else:
+                st.write("Busta non disponibile")
+        
+        with col_d2:
+            pc = st.session_state.get('path_cart_temp')
+            if pc and os.path.exists(pc):
+                link = get_pdf_download_link(pc, "cartellino.pdf")
+                if link:
+                    st.markdown(link, unsafe_allow_html=True)
+                    st.caption(f"Dimensione: {os.path.getsize(pc)} bytes")
+            else:
+                st.write("Cartellino non disponibile")
