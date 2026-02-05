@@ -101,6 +101,139 @@ def get_pdf_download_link(file_path, filename):
         data = base64.b64encode(f.read()).decode()
     return f'<a href="data:application/pdf;base64,{data}" download="{filename}">📥 Scarica {filename}</a>'
 
+
+# -------------------------
+# AGENDA (NUOVO)
+# -------------------------
+AGENDA_KEYWORDS = [
+    "OMESSA TIMBRATURA",
+    "MALATTIA",
+    "RIPOSO",
+    "FERIE",
+    "PERMESS",
+    "CHIUSURA",
+    "INFORTUN",
+]
+
+def agenda_set_month_enter(page, mese_num, anno, debug_info):
+    """
+    Agenda è landing page: imposta mese/anno tramite popup calendario e ENTER (niente frecce).
+    Se serve, clicca anche il giorno 1 come fallback di applicazione.
+    """
+    nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+    mese_nome = nomi_mesi_it[mese_num - 1]
+
+    # forza vista Mese (toolbar Agenda)
+    try:
+        page.locator("#dijit_form_Button_10_label").click(timeout=6000)  # "Mese"
+        time.sleep(0.5)
+        debug_info.append("Agenda: vista Mese cliccata")
+    except Exception as e:
+        debug_info.append(f"Agenda: vista Mese non cliccabile ({e})")
+
+    # apri popup calendario (icona)
+    page.locator("#revit_form_Button_6").click(timeout=8000)
+    page.wait_for_selector("div.dijitCalendarMonthLabel.dijitCalendarCurrentMonthLabel", timeout=8000)
+    time.sleep(0.2)
+    debug_info.append("Agenda: popup calendario aperto")
+
+    labels = page.locator("div.dijitCalendarMonthLabel.dijitCalendarCurrentMonthLabel")
+    month_label = labels.nth(0)  # es. "Gennaio"
+    year_label = labels.nth(1)   # es. "2026"
+
+    # Imposta mese (menu)
+    try:
+        month_label.click()
+        time.sleep(0.15)
+        page.locator(".dijitMenuItemLabel, .dijitMenuItem").filter(has_text=mese_nome).first.click(timeout=2500)
+        time.sleep(0.2)
+        debug_info.append(f"Agenda: mese selezionato {mese_nome}")
+    except Exception as e:
+        debug_info.append(f"Agenda: selezione mese fallita ({e})")
+
+    # Imposta anno (menu se presente, altrimenti typing + Enter)
+    try:
+        year_label.click()
+        time.sleep(0.15)
+        try:
+            page.locator(".dijitMenuItemLabel, .dijitMenuItem").filter(has_text=str(anno)).first.click(timeout=2500)
+            time.sleep(0.2)
+            debug_info.append(f"Agenda: anno selezionato {anno} (menu)")
+        except Exception:
+            # fallback: typing anno e Enter
+            try:
+                page.keyboard.press("Control+A")
+            except:
+                pass
+            page.keyboard.type(str(anno), delay=40)
+            page.keyboard.press("Enter")
+            time.sleep(0.4)
+            debug_info.append(f"Agenda: anno selezionato {anno} (typing)")
+    except Exception as e:
+        debug_info.append(f"Agenda: selezione anno fallita ({e})")
+
+    # Applica (Enter)
+    try:
+        page.keyboard.press("Enter")
+        time.sleep(1.0)
+        debug_info.append("Agenda: Enter premuto per applicare")
+    except Exception as e:
+        debug_info.append(f"Agenda: Enter non riuscito ({e})")
+
+    # Fallback: click giorno 1 (spesso forza aggiornamento vista)
+    try:
+        page.locator("span.dijitCalendarDateLabel", has_text=re.compile(r"^1$")).first.click(timeout=1200)
+        time.sleep(0.8)
+        debug_info.append("Agenda: click giorno 1 (fallback apply)")
+    except:
+        pass
+
+def agenda_extract_events_fast(page):
+    """
+    Estrae testo eventi dall'Agenda (best-effort) e conta keyword utili.
+    """
+    texts = []
+    candidates = page.locator("[class*='event'], [class*='Event'], [class*='appointment'], [class*='Appunt']")
+    try:
+        n = candidates.count()
+    except:
+        n = 0
+
+    if n > 0:
+        for i in range(min(n, 300)):
+            t = (candidates.nth(i).inner_text() or "").strip()
+            if t:
+                texts.append(t)
+
+    if not texts:
+        texts = [page.inner_text("body") or ""]
+
+    blob = "\n".join(texts)
+    up = blob.upper()
+
+    counts = {k: up.count(k) for k in AGENDA_KEYWORDS}
+
+    lines = []
+    for ln in blob.splitlines():
+        s = (ln or "").strip()
+        if not s:
+            continue
+        su = s.upper()
+        if any(k in su for k in AGENDA_KEYWORDS):
+            lines.append(s)
+
+    # dedup preservando ordine
+    seen, uniq = set(), []
+    for s in lines:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+
+    return {"counts": counts, "lines": uniq[:200], "raw_len": len(blob)}
+
+
 def cartellino_parse_deterministico(file_path: str):
     """Parser deterministico per cartellino."""
     text = extract_text_from_pdf(file_path)
@@ -121,7 +254,7 @@ def cartellino_parse_deterministico(file_path: str):
 
     has_days = re.search(r"\b[LMGVSD]\d{2}\b", upper) is not None
     has_timbr = "TIMBRATURE" in upper or "TIMBRATURA" in upper
-    
+
     # Se contiene "nessun dato" e non ha timbrature reali
     if ("NESSUN DATO" in upper or "NESSUNA" in upper) and (not has_days) and (not has_timbr):
         return {
@@ -413,6 +546,20 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 browser.close()
                 return None, None, "LOGIN_FALLITO"
 
+            # -------------------------
+            # AGENDA (NUOVO): prima lettura subito dopo login (landing page)
+            # -------------------------
+            try:
+                st_status.info("🗓️ Lettura Agenda (mese)...")
+                agenda_set_month_enter(page, mese_num, anno, debug_info)
+                agenda_data = agenda_extract_events_fast(page)
+                st.session_state["agenda_data"] = agenda_data
+                debug_info.append(f"Agenda: OK (raw_len={agenda_data.get('raw_len')})")
+                st_status.success("✅ Agenda letta")
+            except Exception as e:
+                st.session_state["agenda_data"] = None
+                debug_info.append(f"Agenda: errore ({e})")
+
             # BUSTA PAGA
             st_status.info(f"💰 Download busta...")
             try:
@@ -542,7 +689,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     # Trova riga e lente
                     target_cart_row = f"{mese_num:02d}/{anno}"
                     riga_row = page.locator(f"tr:has-text('{target_cart_row}')").first
-                    
+
                     icona = None
                     if riga_row.count() > 0 and riga_row.locator("img[src*='search']").count() > 0:
                         icona = riga_row.locator("img[src*='search']").first
@@ -563,8 +710,8 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         popup_url = (popup.url or "").replace("/js_rev//", "/js_rev/")
                         if "EMBED=y" not in popup_url:
                             popup_url = popup_url + ("&" if "?" in popup_url else "?") + "EMBED=y"
-                        
-                        debug_info.append(f"Cartellino: URL = {popup_url[:100]}...")
+
+                        debug_info.append(f"Cartellino: URL = {popup_url[:120]}...")
 
                         resp = context.request.get(popup_url, timeout=60000)
                         body = resp.body()
@@ -646,7 +793,8 @@ with st.sidebar:
         tipo_doc = st.radio("Tipo", ["📄 Cedolino Mensile", "🎄 Tredicesima"])
 
         if st.button("🚀 AVVIA ANALISI", type="primary"):
-            for k in ["done", "busta", "cart", "db", "dc", "tipo", "debug_info", "path_busta_temp", "path_cart_temp"]:
+            for k in ["done", "busta", "cart", "db", "dc", "tipo", "debug_info",
+                      "path_busta_temp", "path_cart_temp", "agenda_data"]:
                 st.session_state.pop(k, None)
 
             tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
@@ -658,9 +806,9 @@ with st.sidebar:
                 st.error(err)
             else:
                 st.session_state.update({
-                    'busta': pb, 
-                    'cart': pc, 
-                    'tipo': tipo, 
+                    'busta': pb,
+                    'cart': pc,
+                    'tipo': tipo,
                     'done': False,
                     'path_busta_temp': pb,
                     'path_cart_temp': pc
@@ -693,11 +841,6 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             st.session_state.update({'db': db, 'dc': dc, 'done': True})
 
             # NON eliminiamo i file per debug
-            # try:
-            #     if st.session_state.get('busta') and os.path.exists(st.session_state['busta']):
-            #         os.remove(st.session_state['busta'])
-            # except:
-            #     pass
 
     db = st.session_state.get('db')
     dc = st.session_state.get('dc')
@@ -785,18 +928,17 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
 
             with c2:
                 st.info(f"**📝 Note:** {dc.get('note', '')}")
-                
+
                 ore_ord = float(dc.get("ore_ordinarie_0251", 0) or 0)
                 ore_lav = float(dc.get("ore_lavorate_0253", 0) or 0)
                 ore_riep = float(dc.get("ore_ordinarie_riepilogo", 0) or 0)
-                
+
                 if ore_ord > 0 or ore_lav > 0 or ore_riep > 0:
                     with st.expander("⏱️ Dettaglio Ore"):
                         st.write(f"**0251 Ore Ordinarie:** {ore_ord:.2f}")
                         st.write(f"**0253 Ore Lavorate:** {ore_lav:.2f}")
                         st.write(f"**Riepilogo Ore:** {ore_riep:.2f}")
-                
-                # Debug: mostra prime righe del PDF
+
                 if dc.get('debug_prime_righe'):
                     with st.expander("🔍 Debug: Contenuto PDF"):
                         st.code(dc['debug_prime_righe'], language=None)
@@ -821,11 +963,11 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             # Calcolo ore (settimana 6 giorni = 6.67h/gg)
             ore_attese = gg_inps * ORE_PER_GIORNO
             ore_effettive = float(
-                dc.get("ore_ordinarie_0251", 0) or 
-                dc.get("ore_lavorate_0253", 0) or 
+                dc.get("ore_ordinarie_0251", 0) or
+                dc.get("ore_lavorate_0253", 0) or
                 dc.get("ore_ordinarie_riepilogo", 0) or 0
             )
-            
+
             if ore_effettive > 0:
                 st.markdown("---")
                 st.subheader("⏱️ Confronto Ore")
@@ -841,19 +983,36 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
 
     with tab4:
         st.subheader("🔧 Debug Bot")
-        
+
+        # AGENDA (NUOVO): mostra risultati lettura
+        ad = st.session_state.get("agenda_data")
+        st.markdown("### Agenda (mese)")
+        if ad:
+            cA1, cA2, cA3 = st.columns(3)
+            cA1.metric("Omesse timbrature", ad["counts"].get("OMESSA TIMBRATURA", 0))
+            cA2.metric("Malattia", ad["counts"].get("MALATTIA", 0))
+            cA3.metric("Riposo", ad["counts"].get("RIPOSO", 0))
+
+            with st.expander("Dettagli Agenda (righe trovate)"):
+                for s in ad.get("lines", []):
+                    st.text(s)
+        else:
+            st.info("Agenda non letta / non disponibile.")
+
+        st.markdown("---")
+
         # Mostra log debug
         if st.session_state.get('debug_info'):
             st.write("**Log operazioni:**")
             for line in st.session_state['debug_info']:
                 st.text(f"• {line}")
-        
+
         st.markdown("---")
-        
+
         # Download PDF per verifica manuale
         st.write("**Scarica PDF per verifica:**")
         col_d1, col_d2 = st.columns(2)
-        
+
         with col_d1:
             pb = st.session_state.get('path_busta_temp')
             if pb and os.path.exists(pb):
@@ -863,7 +1022,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                     st.caption(f"Dimensione: {os.path.getsize(pb)} bytes")
             else:
                 st.write("Busta non disponibile")
-        
+
         with col_d2:
             pc = st.session_state.get('path_cart_temp')
             if pc and os.path.exists(pc):
