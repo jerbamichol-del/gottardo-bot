@@ -432,9 +432,12 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e: 
                 st.error(f"Errore: {e}")
 
-            # CARTELLINO - ✅ FIX CON GESTIONE POPUP/IFRAME
+            # CARTELLINO - ✅ FIX CON ROUTE INTERCEPTION + DEBUG
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
+                
+                debug_log = []  # Log debug completo
+                
                 try:
                     page.evaluate("window.scrollTo(0, 0)")
                     time.sleep(2)
@@ -445,32 +448,41 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         pass
                     
                     # Torna alla home
+                    debug_log.append("🏠 Tornando alla home...")
                     try:
                         logo = page.locator("img[src*='logo'], .logo").first
                         if logo.is_visible(timeout=2000): 
                             logo.click()
                             time.sleep(2)
+                            debug_log.append("✅ Click logo OK")
                     except:
                         page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                         time.sleep(3)
+                        debug_log.append("✅ Goto home OK")
                     
                     # Vai su Time
+                    debug_log.append("⏰ Navigazione a Time...")
                     page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     time.sleep(3)
+                    debug_log.append("✅ Time aperto")
                     
                     # Vai su Cartellino presenze
+                    debug_log.append("📋 Apertura Cartellino presenze...")
                     page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
+                    debug_log.append("✅ Cartellino presenze aperto")
                     
                     # Chiudi eventuali popup
                     if page.locator("text=Permessi del").count() > 0:
                         try: 
                             page.locator(".z-icon-print").first.click()
                             time.sleep(3)
+                            debug_log.append("✅ Popup permessi chiuso")
                         except: 
                             pass
                     
                     # Imposta date
+                    debug_log.append(f"📅 Impostazione date: {d_from_vis} - {d_to_vis}")
                     try:
                         dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                         al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
@@ -489,32 +501,73 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                             al.type(d_to_vis, delay=100)
                             al.press("Tab")
                             time.sleep(1)
+                            debug_log.append("✅ Date impostate")
                     except Exception as e:
-                        st.warning(f"⚠️ Errore date: {e}")
+                        debug_log.append(f"⚠️ Errore date: {e}")
                     
                     # Esegui ricerca
+                    debug_log.append("🔍 Esecuzione ricerca...")
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     time.sleep(1)
                     
                     try: 
                         page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
+                        debug_log.append("✅ Click 'Esegui ricerca' OK")
                     except: 
                         page.keyboard.press("Enter")
+                        debug_log.append("✅ Enter per ricerca OK")
                     
-                    time.sleep(10)  # Aspetta caricamento completo
+                    time.sleep(10)
                     
                     try:
                         page.wait_for_selector("text=Risultati della ricerca", timeout=15000)
-                        st.info("✅ Risultati trovati")
+                        debug_log.append("✅ Risultati caricati")
                     except:
-                        st.warning("⚠️ Timeout risultati")
+                        debug_log.append("⚠️ Timeout risultati")
                     
                     # Screenshot PRIMA del click
                     screenshot_pre = page.screenshot()
                     with st.expander("📸 Screenshot PRIMA del click"):
                         st.image(screenshot_pre, use_container_width=True)
                     
-                    # ✅ CERCA LA RIGA
+                    # ✅ INTERCETTA RICHIESTE PDF E FORZA DOWNLOAD
+                    debug_log.append("🛡️ Attivazione intercettazione PDF...")
+                    
+                    route_triggered = []  # Track quali route vengono triggerate
+                    
+                    def handle_pdf_route(route):
+                        """Intercetta PDF e forza download"""
+                        url = route.request.url
+                        route_triggered.append(url)
+                        debug_log.append(f"🔍 Route intercettata: {url[:80]}")
+                        
+                        try:
+                            response = context.request.get(url)
+                            
+                            # Forza download invece di viewer
+                            new_headers = {
+                                **response.headers,
+                                "Content-Disposition": "attachment",
+                                "Content-Type": "application/pdf"
+                            }
+                            
+                            route.fulfill(
+                                response=response,
+                                headers=new_headers
+                            )
+                            debug_log.append(f"✅ PDF intercettato e modificato")
+                            
+                        except Exception as e:
+                            debug_log.append(f"⚠️ Route error: {str(e)[:60]}")
+                            route.continue_()
+                    
+                    # Attiva intercettazione per tutti i PDF
+                    page.route(re.compile(r".*\.pdf", re.IGNORECASE), handle_pdf_route)
+                    page.route("**/*iSipert*", handle_pdf_route)  # Percorsi specifici Gottardo
+                    debug_log.append("✅ Intercettazione PDF attivata")
+                    
+                    # CERCA LA RIGA
+                    debug_log.append("🔍 Ricerca riga cartellino...")
                     pattern_da_provare = [
                         f"{mese_num}/{anno}",
                         f"{mese_num}/{str(anno)[-2:]}",
@@ -527,90 +580,117 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     
                     for pattern in pattern_da_provare:
                         try:
-                            st.info(f"🔍 Pattern: '{pattern}'")
+                            debug_log.append(f"🔍 Cerco pattern: '{pattern}'")
                             riga_test = page.locator(f"tr:has-text('{pattern}')").first
                             
                             if riga_test.count() > 0:
                                 if riga_test.locator("img[src*='search']").count() > 0:
                                     riga_target = riga_test
                                     riga_trovata = True
-                                    st.success(f"✅ Riga trovata: '{pattern}'")
+                                    debug_log.append(f"✅ Riga trovata con pattern: '{pattern}'")
                                     break
                         except:
                             continue
                     
                     if not riga_trovata:
-                        st.warning("⚠️ Fallback: prima icona")
+                        debug_log.append("⚠️ Pattern non trovati, fallback icona...")
                         try:
                             all_icons = page.locator("img[src*='search']")
-                            if all_icons.count() > 0:
+                            icon_count = all_icons.count()
+                            debug_log.append(f"🔍 Trovate {icon_count} icone search")
+                            if icon_count > 0:
                                 riga_target = all_icons.first
                                 riga_trovata = True
-                        except:
-                            pass
+                                debug_log.append("✅ Uso prima icona")
+                        except Exception as e:
+                            debug_log.append(f"❌ Errore fallback: {e}")
                     
-                    # ✅ CLICK CON GESTIONE POPUP
+                    # ✅ CLICK CON GESTIONE DOWNLOAD + POPUP
                     if riga_trovata and riga_target:
                         try:
-                            st.info("📥 Click con attesa popup...")
+                            debug_log.append("📥 Tentativo 1: Download con route...")
                             
-                            # Metodo 1: Click e aspetta popup
-                            try:
-                                with context.expect_page(timeout=5000) as popup_info:
-                                    if "img" in str(riga_target):
-                                        riga_target.click()
-                                    else:
-                                        icona = riga_target.locator("img[src*='search']").first
-                                        icona.click()
-                                
-                                # ✅ POPUP TROVATO!
-                                popup = popup_info.value
-                                st.success("✅ Popup aperto!")
-                                
-                                # Aspetta caricamento popup
-                                popup.wait_for_load_state("networkidle", timeout=15000)
-                                time.sleep(3)
-                                
-                                # Screenshot popup
-                                screenshot_popup = popup.screenshot()
-                                with st.expander("📸 Screenshot POPUP"):
-                                    st.image(screenshot_popup, use_container_width=True)
-                                
-                                # Scarica PDF dal popup
-                                popup.pdf(path=path_cart)
-                                st.success("✅ PDF generato dal popup")
-                                
-                                popup.close()
-                                
-                            except Exception as e_popup:
-                                st.warning(f"⚠️ Nessun popup: {str(e_popup)[:80]}")
-                                
-                                # Metodo 2: Click normale e aspetta cambio contenuto
+                            # Prepara la cattura del download
+                            with page.expect_download(timeout=30000) as download_info:
+                                # Click sulla lente
                                 if "img" in str(riga_target):
                                     riga_target.click()
                                 else:
                                     icona = riga_target.locator("img[src*='search']").first
                                     icona.click()
                                 
-                                time.sleep(10)  # Aspetta caricamento
+                                debug_log.append("✅ Click eseguito, attendo download...")
+                            
+                            # Salva il download
+                            download = download_info.value
+                            download.save_as(path_cart)
+                            debug_log.append(f"✅ PDF scaricato: {download.suggested_filename}")
+                            st.success(f"✅ Download OK: {download.suggested_filename}")
+                            
+                        except Exception as e_download:
+                            debug_log.append(f"⚠️ Download fallito: {str(e_download)[:100]}")
+                            
+                            # FALLBACK 1: Gestione popup manuale
+                            try:
+                                debug_log.append("📥 Tentativo 2: Gestione popup...")
                                 
-                                # Screenshot DOPO click
-                                screenshot_post = page.screenshot()
-                                with st.expander("📸 Screenshot DOPO il click"):
-                                    st.image(screenshot_post, use_container_width=True)
+                                with context.expect_page(timeout=10000) as popup_info:
+                                    if "img" in str(riga_target):
+                                        riga_target.click()
+                                    else:
+                                        icona = riga_target.locator("img[src*='search']").first
+                                        icona.click()
                                 
-                                # Controlla se il contenuto è cambiato
+                                popup = popup_info.value
+                                debug_log.append(f"✅ Popup catturato: {popup.url[:80]}")
+                                
+                                # Aspetta caricamento
+                                popup.wait_for_load_state("networkidle", timeout=15000)
+                                time.sleep(3)
+                                
+                                # Screenshot debug
+                                screenshot_popup = popup.screenshot()
+                                with st.expander("📸 Screenshot POPUP"):
+                                    st.image(screenshot_popup, use_container_width=True)
+                                
+                                # Genera PDF dal popup
+                                popup.pdf(path=path_cart, format="A4")
+                                debug_log.append("✅ PDF generato da popup")
+                                st.success("✅ PDF generato da popup")
+                                
+                                popup.close()
+                                
+                            except Exception as e_popup:
+                                debug_log.append(f"⚠️ Popup fallito: {str(e_popup)[:100]}")
+                                
+                                # FALLBACK 2: Aspetta cambio contenuto pagina
                                 try:
-                                    # Cerca indicatori della pagina dettaglio
+                                    debug_log.append("📥 Tentativo 3: Attesa cambio contenuto...")
+                                    
+                                    if "img" in str(riga_target):
+                                        riga_target.click()
+                                    else:
+                                        icona = riga_target.locator("img[src*='search']").first
+                                        icona.click()
+                                    
+                                    time.sleep(10)
+                                    
+                                    # Screenshot DOPO click
+                                    screenshot_post = page.screenshot()
+                                    with st.expander("📸 Screenshot DOPO click"):
+                                        st.image(screenshot_post, use_container_width=True)
+                                    
+                                    # Controlla se il contenuto è cambiato
                                     if page.locator("text=TIMBRATURE").count() > 0 or \
                                        page.locator("text=PRESENZE DEL MESE").count() > 0 or \
                                        page.locator("text=*ORD*").count() > 0:
-                                        st.success("✅ Pagina dettaglio caricata!")
+                                        debug_log.append("✅ Pagina dettaglio rilevata")
                                         page.pdf(path=path_cart)
+                                        debug_log.append("✅ PDF generato da pagina")
                                     else:
-                                        st.warning("⚠️ Contenuto non cambiato, riprovo con doppio click...")
+                                        debug_log.append("⚠️ Contenuto non cambiato, doppio click...")
                                         
-                                        # Metodo 3: Doppio click
+                                        # Doppio click
                                         if "img" in str(riga_target):
                                             riga_target.dblclick()
                                         else:
@@ -619,34 +699,60 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                                         
                                         time.sleep(10)
                                         page.pdf(path=path_cart)
+                                        debug_log.append("✅ PDF generato dopo doppio click")
                                         
-                                except:
+                                except Exception as e_page:
+                                    debug_log.append(f"⚠️ Cambio contenuto fallito: {str(e_page)[:100]}")
                                     page.pdf(path=path_cart)
-                            
-                        except Exception as e:
-                            st.error(f"❌ Errore click: {e}")
-                            import traceback
-                            st.code(traceback.format_exc())
+                                    debug_log.append("✅ PDF pagina corrente salvato")
+                        
                     else:
-                        st.error("❌ Riga non trovata")
+                        debug_log.append("❌ Riga non trovata")
                         page.pdf(path=path_cart)
+                        debug_log.append("✅ PDF pagina corrente salvato")
+                    
+                    # Mostra route triggerate
+                    if route_triggered:
+                        debug_log.append(f"🔍 Route intercettate: {len(route_triggered)}")
+                        for r in route_triggered:
+                            debug_log.append(f"  - {r[:100]}")
+                    else:
+                        debug_log.append("⚠️ Nessuna route intercettata")
                     
                     # Verifica file
                     if os.path.exists(path_cart):
                         size = os.path.getsize(path_cart)
+                        debug_log.append(f"📊 File trovato: {size:,} bytes")
                         
                         if size > 5000:
                             cart_ok = True
-                            st_status.success(f"✅ Cartellino OK ({size} bytes)")
+                            st_status.success(f"✅ Cartellino OK ({size:,} bytes)")
+                            debug_log.append("✅ CARTELLINO VALIDO")
                         else:
-                            st.warning(f"⚠️ PDF piccolo ({size} bytes)")
+                            st.warning(f"⚠️ PDF piccolo ({size:,} bytes) - potrebbe essere vuoto")
+                            debug_log.append(f"⚠️ FILE PICCOLO: {size} bytes")
                     else:
                         st.error("❌ File non trovato")
+                        debug_log.append("❌ FILE NON TROVATO")
 
                 except Exception as e:
+                    debug_log.append(f"❌ ERRORE GENERALE: {e}")
                     st.error(f"❌ Errore: {e}")
                     import traceback
-                    st.code(traceback.format_exc())
+                    tb = traceback.format_exc()
+                    debug_log.append(f"Traceback:\n{tb}")
+                    st.code(tb)
+                
+                # MOSTRA DEBUG LOG COMPLETO
+                with st.expander("🔍 LOG DEBUG COMPLETO"):
+                    for log_entry in debug_log:
+                        st.text(log_entry)
+                    
+                    # Salva log su file
+                    log_path = work_dir / f"debug_cartellino_{mese_num}_{anno}.txt"
+                    with open(log_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(debug_log))
+                    st.info(f"📝 Log salvato: {log_path}")
 
             browser.close()
             
