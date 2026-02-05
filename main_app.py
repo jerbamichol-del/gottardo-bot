@@ -35,8 +35,8 @@ def get_credentials():
 # Google API Key
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except Exception as e:
-    st.error(f"❌ Google API Key mancante in secrets")
+except Exception:
+    st.error("❌ Google API Key mancante in secrets")
     st.stop()
 
 # ✅ AUTO-DISCOVERY MODELLI GEMINI
@@ -47,16 +47,11 @@ def inizializza_modelli_gemini():
     """Auto-discovery: Scopre automaticamente tutti i modelli Gemini disponibili"""
     try:
         tutti_modelli = genai.list_models()
-
-        modelli_validi = [
-            m for m in tutti_modelli
-            if 'generateContent' in m.supported_generation_methods
-        ]
+        modelli_validi = [m for m in tutti_modelli if 'generateContent' in m.supported_generation_methods]
 
         modelli_gemini = []
         for m in modelli_validi:
             nome_pulito = m.name.replace('models/', '')
-
             if 'gemini' in nome_pulito.lower() and 'embedding' not in nome_pulito.lower():
                 try:
                     modello = genai.GenerativeModel(nome_pulito)
@@ -68,7 +63,6 @@ def inizializza_modelli_gemini():
             st.error("❌ Nessun modello Gemini disponibile")
             st.stop()
 
-        # Ordina per preferenza
         def priorita(nome):
             if 'flash' in nome.lower() and 'lite' not in nome.lower():
                 return 0
@@ -103,8 +97,11 @@ def clean_json_response(text):
     except:
         return None
 
-def estrai_con_fallback(file_path, prompt, tipo="documento"):
-    """✅ Prova multipli modelli Gemini con fallback automatico"""
+def estrai_con_fallback(file_path, prompt, tipo="documento", validate_fn=None):
+    """
+    ✅ Prova multipli modelli Gemini con fallback automatico.
+    validate_fn(result_dict) -> bool: se False, prova il modello successivo.
+    """
     if not file_path or not os.path.exists(file_path):
         return None
 
@@ -129,19 +126,26 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             result = clean_json_response(response.text)
 
             if result and isinstance(result, dict):
+                if validate_fn is not None:
+                    try:
+                        if not validate_fn(result):
+                            continue
+                    except:
+                        continue
+
                 progress_placeholder.success(f"✅ {tipo.capitalize()} analizzato!")
-                time.sleep(1)
+                time.sleep(0.7)
                 progress_placeholder.empty()
                 return result
 
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "quota" in error_msg.lower() or "resource_exhausted" in error_msg.lower():
+            msg = str(e).lower()
+            if "429" in msg or "quota" in msg or "resource_exhausted" in msg:
                 continue
             else:
                 continue
 
-    progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite)")
+    progress_placeholder.error(f"❌ Analisi {tipo} fallita (quote esaurite o parsing instabile)")
     return None
 
 def estrai_dati_busta_dettagliata(file_path):
@@ -156,40 +160,28 @@ def estrai_dati_busta_dettagliata(file_path):
     - **ORE ORDINARIE:** Cerca "ORE INAIL" oppure calcola: giorni_pagati × 8
 
     **2. COMPETENZE (TABELLA CENTRALE):**
-    - **RETRIBUZIONE ORDINARIA (voce 1000):** Colonna "COMPETENZE" (es. 1.783,75)
-    - **STRAORDINARI:** Somma tutte le voci tipo "STRAORDINARIO", "SUPPLEMENTARI", "NOTTURNI" (es. voce 2050: 111,48)
-    - **FESTIVITA:** Somma voci "MAGG. FESTIVE", "FESTIVITA GODUTA" (es. voce 2250: 37,16)
+    - **RETRIBUZIONE ORDINARIA (voce 1000):** Colonna "COMPETENZE"
+    - **STRAORDINARI:** Somma tutte le voci tipo "STRAORDINARIO", "SUPPLEMENTARI", "NOTTURNI"
+    - **FESTIVITA:** Somma voci "MAGG. FESTIVE", "FESTIVITA GODUTA"
     - **ANZIANITA:** Se vedi voci "SCATTI", "EDR", "ANZ." usale, altrimenti 0
-    - **LORDO TOTALE:** Cerca riga "TOTALE COMPETENZE" o "PROGRESSIVI" → colonna "TOTALE COMPETENZE" (es. 2.011,99)
+    - **LORDO TOTALE:** Cerca riga "TOTALE COMPETENZE" o "PROGRESSIVI" → colonna "TOTALE COMPETENZE"
 
     **3. TRATTENUTE (SEZIONE I.N.P.S. + IRPEF):**
-    - **INPS:** Sezione "IMPONIBILE / TRATTENUTE" → riga sotto "I.N.P.S." (es. 188,50)
-    - **IRPEF NETTA:** Sezione "FISCALI" → riga "TRATTENUTE" sotto "IRPEF CONG." (es. 58,90)
+    - **INPS:** Sezione "IMPONIBILE / TRATTENUTE" → riga sotto "I.N.P.S."
+    - **IRPEF NETTA:** Sezione "FISCALI" → riga "TRATTENUTE" sotto "IRPEF CONG."
     - **ADDIZIONALI:** Cerca voci "ADD.REG." e "ADD.COM." (sono rateizzate, non trattenute subito)
 
-    **4. FERIE (TABELLA IN ALTO A DESTRA):**
-    - Ci sono DUE colonne: FERIE e P.A.R. (Permessi)
-    - **Residue AP:** Riga "RES. PREC." colonna FERIE (es. -10,46)
-    - **Maturate:** Riga "SPETTANTI" colonna FERIE (es. 173,00)
-    - **Godute:** Riga "FRUITE" colonna FERIE (es. 162,67)
-    - **Saldo:** Riga "SALDO" colonna FERIE (es. -0,13)
-
-    **PAR (Permessi):**
-    - **Residue:** Riga "RES. PREC." colonna P.A.R. (es. 5,30)
-    - **Spettanti:** Riga "SPETTANTI" colonna P.A.R. (es. 38,00)
-    - **Fruite:** Riga "FRUITE" colonna P.A.R. (es. 47,33)
-    - **Saldo:** Riga "SALDO" colonna P.A.R. (es. -4,03)
+    **4. FERIE / PAR (TABELLA IN ALTO A DESTRA):**
+    - Compila FERIE e P.A.R. dalle righe RES. PREC., SPETTANTI, FRUITE, SALDO
 
     **5. TREDICESIMA:**
-    - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → è_tredicesima = true
-    - Altrimenti → è_tredicesima = false
+    - Se nel titolo o nella colonna "Mensilità" c'è "TREDICESIMA" o "13MA" → e_tredicesima = true
 
     **IMPORTANTE:**
-    - Usa SEMPRE i valori dalle colonne corrette
     - Se un valore non esiste scrivi 0
     - Usa il punto come separatore decimale
 
-    Restituisci SOLO questo JSON (niente testo aggiuntivo):
+    Restituisci SOLO questo JSON:
     {
         "e_tredicesima": boolean,
         "dati_generali": {
@@ -223,48 +215,72 @@ def estrai_dati_busta_dettagliata(file_path):
         }
     }
     """
-
     return estrai_con_fallback(file_path, prompt, tipo="busta paga")
 
-def estrai_dati_cartellino(file_path):
-    """Estrae dati dal cartellino (senza UI debug per velocità)"""
+def _validate_cartellino(result: dict) -> bool:
+    """
+    Anti-hallucination:
+    accetta solo se debug_prime_righe contiene segnali forti (TIMBRATURE / GG PRESENZA / L01...),
+    oppure se sono presenti totali/chiavi coerenti.
+    """
+    dbg = (result.get("debug_prime_righe") or "")[:4000].upper()
+    note = (result.get("note") or "").upper()
 
-    prompt = """
+    has_timbr = "TIMBRATURE" in dbg
+    has_pres = ("GG PRESENZA" in dbg) or ("0265" in dbg)
+    has_day = re.search(r"\b[LMGVSD]\d{2}\b", dbg) is not None
+    says_empty = "NESSUN DATO" in note or "NESSUN DATO" in dbg
+
+    # Se dice "vuoto" ma nel debug ci sono timbrature/presenza -> comunque accetto (è contraddittorio ma il testo prova che c'è)
+    if says_empty and (has_timbr or has_pres or has_day):
+        return True
+
+    # Se dice "vuoto" e non c'è nessuna evidenza -> scarta
+    if says_empty and not (has_timbr or has_pres or has_day):
+        return False
+
+    # Normale: deve avere almeno un'evidenza
+    return (has_timbr and has_day) or has_pres or has_day
+
+def estrai_dati_cartellino(file_path):
+    """Estrae dati dal cartellino con validazione anti-hallucination"""
+
+    prompt = r"""
     Analizza questo cartellino presenze GOTTARDO S.p.A.
 
-    **CERCA:**
+    REGOLE IMPORTANTI (NO ALLUCINAZIONI):
+    - Se dichiari che è "vuoto" o "Nessun dato", devi riportare nel campo debug_prime_righe
+      la riga/frase ESATTA presente nel PDF che lo dimostra.
+    - Se nel PDF compare "TIMBRATURE" o una tabella con giorni tipo L01/M02/... allora NON è vuoto.
 
-    1. **TABELLA DETTAGLIATA CON TIMBRATURE:**
-    Formato tipo:
-    ```
-    -GG.- ----------- TIMBRATURE ---------- *ORD*  *STR*  *STC*
-    L01 E13,27  U19,31                    7,00
-    M02 E 8,50  U13,02  E16,11  U20,16    7,00          1,00
-    M03 E 8,54  U15,01                    7,00
-    ```
-    → Se vedi righe con "L01", "M02", "G03" (giorni con timbrature E/U), conta TUTTI i giorni con almeno una timbratura
+    OBIETTIVO:
+    1) Estrai "0265 GG PRESENZA" se presente (numero finale, es. 24,00) -> gg_presenza
+    2) Estrai i totali ore se presenti:
+       - Riga che contiene "0251 ORE ORDINARIE" -> ore_ordinarie_0251 (es. 146,00)
+       - Riga che contiene "0253 ORE LAVORATE" -> ore_lavorate_0253 (es. 165,00)
+       - Se trovi una riga separata con totali tipo "160,00 7,00 13,00 15,00 ..." salva il primo numero -> ore_ordinarie_riepilogo
+    3) giorni_reali:
+       - Conta i giorni (L01..M31 ecc.) presenti nella tabella timbrature (conta i token \b[LMGVSD]\d{2}\b unici).
+       - Se non riesci, metti 0 e spiegalo in note.
 
-    2. **TOTALE IN FONDO:**
-    ```
-                                        160,00   7,00  13,00  15,00
-    ```
-    → Il primo numero è il totale ore ordinarie
-    → Dividi per 8 per avere i giorni lavorati
-
-    3. **PDF VUOTO:**
-    Se vedi solo "Parametri di ricerca" e "Risultati della ricerca" ma NESSUNA timbratura
-    → giorni_reali = 0
-
-    **OUTPUT:**
+    OUTPUT (solo JSON):
     {
-        "giorni_reali": <numero giorni con timbrature>,
-        "giorni_senza_badge": <giorni con anomalie/badge mancante>,
-        "note": "<descrizione>",
-        "debug_prime_righe": "<prime 20 righe del PDF>"
+      "giorni_reali": float,
+      "gg_presenza": float,
+      "ore_ordinarie_riepilogo": float,
+      "ore_ordinarie_0251": float,
+      "ore_lavorate_0253": float,
+      "giorni_senza_badge": float,
+      "note": "string",
+      "debug_prime_righe": "prime ~30 righe (testo) copiate dal PDF, senza inventare"
     }
+
+    NOTE:
+    - Usa il punto come separatore decimale.
+    - Se un valore non esiste, metti 0.
     """
 
-    return estrai_con_fallback(file_path, prompt, tipo="cartellino")
+    return estrai_con_fallback(file_path, prompt, tipo="cartellino", validate_fn=_validate_cartellino)
 
 # --- PULIZIA FILE ---
 def pulisci_file(path_busta, path_cart):
@@ -290,7 +306,7 @@ def pulisci_file(path_busta, path_cart):
 
 # --- CORE BOT ---
 def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    """✅ Bot completo (cartellino pulito, veloce e stabile)"""
+    """✅ Bot completo (download cartellino stabile, senza debug UI)"""
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     try:
@@ -407,11 +423,10 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e:
                 st.error(f"Errore: {e}")
 
-            # CARTELLINO (pulito + stabile): popup -> GET PDF raw con EMBED=y
+            # CARTELLINO: popup -> GET PDF raw con EMBED=y (stabile)
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 try:
-                    # Torna alla home
                     page.evaluate("window.scrollTo(0, 0)")
                     time.sleep(1)
                     try:
@@ -429,19 +444,16 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                         time.sleep(3)
 
-                    # Vai su Time
                     page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     time.sleep(3)
 
-                    # Vai su Cartellino presenze
                     page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
 
-                    # Imposta date
+                    # date
                     try:
                         dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                         al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
-
                         if dal.count() > 0 and al.count() > 0:
                             dal.click(force=True)
                             page.keyboard.press("Control+A")
@@ -459,7 +471,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except:
                         pass
 
-                    # Esegui ricerca
+                    # ricerca
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     time.sleep(0.5)
                     try:
@@ -467,14 +479,12 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except:
                         page.keyboard.press("Enter")
 
-                    # Attendi risultati
                     try:
                         page.wait_for_selector("text=Risultati della ricerca", timeout=20000)
                     except:
                         pass
 
-                    # Seleziona lente (6gg non cambia nulla qui): clicca sempre l’icona
-                    target_cart_row = f"{mese_num:02d}/{anno}"  # es. 12/2025
+                    target_cart_row = f"{mese_num:02d}/{anno}"
                     riga_row = page.locator(f"tr:has-text('{target_cart_row}')").first
                     if riga_row.count() > 0 and riga_row.locator("img[src*='search']").count() > 0:
                         icona = riga_row.locator("img[src*='search']").first
@@ -508,7 +518,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         except:
                             pass
 
-                    # Verifica file
                     if os.path.exists(path_cart) and os.path.getsize(path_cart) > 5000:
                         cart_ok = True
                         st_status.success("✅ Cartellino OK")
@@ -529,7 +538,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
 
     final_busta = path_busta if busta_ok else None
     final_cart = path_cart if cart_ok else None
-
     return final_busta, final_cart, None
 
 # --- UI ---
@@ -641,7 +649,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
             k1, k2, k3 = st.columns(3)
             k1.metric("💵 NETTO IN BUSTA", f"€ {dg.get('netto', 0):.2f}", delta="Pagamento")
             k2.metric("📊 Lordo Totale", f"€ {comp.get('lordo_totale', 0):.2f}")
-            k3.metric("📆 Giorni Pagati", int(dg.get('giorni_pagati', 0)))
+            k3.metric("📆 GG INPS (Busta)", int(dg.get('giorni_pagati', 0)))
 
             st.markdown("---")
 
@@ -667,9 +675,9 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 f1, f2, f3, f4 = st.columns(4)
                 f1.metric("Residue AP", f"{ferie.get('residue_ap', 0):.2f}")
                 f2.metric("Maturate", f"{ferie.get('maturate', 0):.2f}")
-                f3.metric("Godute", f"{ferie.get('godute', 0):.2f}")
+                f3.metric("Fruite", f"{ferie.get('godute', 0):.2f}")
                 saldo_f = ferie.get('saldo', 0)
-                f4.metric("✅ SALDO", f"{saldo_f:.2f}", delta="OK" if saldo_f >= 0 else "Negativo")
+                f4.metric("Saldo", f"{saldo_f:.2f}", delta="OK" if saldo_f >= 0 else "Negativo")
 
             with st.expander("⏱️ Situazione Permessi"):
                 p1, p2, p3, p4 = st.columns(4)
@@ -677,7 +685,7 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
                 p2.metric("Spettanti", f"{par.get('spettanti', 0):.2f}")
                 p3.metric("Fruite", f"{par.get('fruite', 0):.2f}")
                 saldo_p = par.get('saldo', 0)
-                p4.metric("✅ SALDO", f"{saldo_p:.2f}", delta="OK" if saldo_p >= 0 else "Negativo")
+                p4.metric("Saldo", f"{saldo_p:.2f}", delta="OK" if saldo_p >= 0 else "Negativo")
         else:
             st.warning("⚠️ Dati busta non disponibili")
 
@@ -685,14 +693,19 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
         if dc:
             c1, c2 = st.columns([1, 2])
             with c1:
-                giorni_reali = dc.get('giorni_reali', 0)
-                if giorni_reali > 0:
-                    st.metric("📅 Giorni Lavorati (timbrature)", giorni_reali)
+                gg_presenza = float(dc.get('gg_presenza', 0) or 0)
+                giorni_reali = float(dc.get('giorni_reali', 0) or 0)
+
+                # Preferisci gg_presenza quando c'è
+                if gg_presenza > 0:
+                    st.metric("📅 GG Presenza (Cartellino)", gg_presenza)
+                elif giorni_reali > 0:
+                    st.metric("📅 Giorni timbrati (stimati)", giorni_reali)
                 else:
-                    st.metric("📅 Giorni Lavorati", "N/D", help="Timbrature non disponibili")
+                    st.metric("📅 Presenze", "N/D")
 
                 anomalie = dc.get('giorni_senza_badge', 0)
-                if anomalie > 0:
+                if anomalie and anomalie > 0:
                     st.metric("⚠️ Anomalie Badge", anomalie, delta="Controlla")
                 else:
                     st.metric("✅ Anomalie Badge", 0, delta="OK")
@@ -708,40 +721,29 @@ if st.session_state.get('busta') or st.session_state.get('cart'):
 
     with tab3:
         if db and dc:
-            pagati = float(db.get('dati_generali', {}).get('giorni_pagati', 0))
-            reali = float(dc.get('giorni_reali', 0))
+            gg_inps = float(db.get('dati_generali', {}).get('giorni_pagati', 0) or 0)
+            gg_presenza = float(dc.get('gg_presenza', 0) or 0)
+            giorni_reali = float(dc.get('giorni_reali', 0) or 0)
 
             st.subheader("🔍 Analisi Discrepanze")
 
-            # Nota importante: GG INPS spesso è un valore convenzionale (spesso 26) e può non coincidere con giorni timbrati
-            if pagati >= 25 and pagati <= 26:
-                st.info(
-                    "ℹ️ Stai confrontando GG. INPS (busta) con giorni timbrati (cartellino): "
-                    "possono differire anche se è tutto corretto."
-                )
-
-            if reali == 0:
-                st.info("ℹ️ **Cartellino senza timbrature dettagliate**")
-                st.write(f"📋 Giorni in busta (GG INPS): **{int(pagati)}**")
-            else:
-                diff = reali - pagati
-
+            # Confronto più sensato: GG INPS vs GG PRESENZA (se disponibile)
+            if gg_presenza > 0:
+                diff = gg_presenza - gg_inps
                 col_a, col_b = st.columns(2)
-                col_a.metric("GG INPS (Busta)", pagati)
-                col_b.metric("Giorni timbrati (Cartellino)", reali, delta=f"{diff:.1f}")
+                col_a.metric("GG INPS (Busta)", gg_inps)
+                col_b.metric("GG Presenza (Cartellino)", gg_presenza, delta=f"{diff:.1f}")
+            else:
+                diff = giorni_reali - gg_inps
+                col_a, col_b = st.columns(2)
+                col_a.metric("GG INPS (Busta)", gg_inps)
+                col_b.metric("Giorni timbrati (stimati)", giorni_reali, delta=f"{diff:.1f}")
 
-                st.markdown("---")
-
-                if abs(diff) < 0.5:
-                    st.success("✅ **Ok**: valori molto vicini")
-                elif diff > 0:
-                    st.info(f"ℹ️ Timbrature maggiori di GG INPS di **{diff:.1f}** (può dipendere da come vengono conteggiati).")
-                else:
-                    st.warning(
-                        f"⚠️ Timbrature minori di GG INPS di **{abs(diff):.1f}**.\n\n"
-                        f"Possibili cause comuni: festività/permessi/ferie/assenze retribuite senza timbratura, "
-                        f"oppure GG INPS convenzionali."
-                    )
+            st.markdown("---")
+            st.info(
+                "ℹ️ GG INPS e presenze/timbrature non sono la stessa cosa: "
+                "GG INPS può includere giornate retribuite non timbrate (es. festività/assenze)."
+            )
         elif tipo == "tredicesima":
             st.info("ℹ️ Analisi non disponibile per Tredicesima")
         else:
