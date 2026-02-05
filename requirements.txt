@@ -2,4 +2,5 @@ streamlit
 playwright
 google-generativeai
 requests
-PyPDF2
+openai
+pymupdf
