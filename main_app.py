@@ -103,7 +103,7 @@ def get_pdf_download_link(file_path, filename):
 
 
 # -------------------------
-# AGENDA (AGGIORNATA: LOGICA POPUP CORRETTA)
+# AGENDA (AGGIORNATA: LOGICA POPUP DOJO)
 # -------------------------
 AGENDA_KEYWORDS = [
     "OMESSA TIMBRATURA",
@@ -117,83 +117,100 @@ AGENDA_KEYWORDS = [
 
 def agenda_set_month_enter(page, mese_num, anno, debug_info):
     """
-    Imposta mese/anno interagendo direttamente con le label nel popup calendario.
+    Imposta mese/anno interagendo con il widget Dojo Calendar.
     """
     nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
     mese_nome_target = nomi_mesi_it[mese_num - 1]
 
-    # 1. Apri popup calendario (icona)
+    # 1. Apri popup calendario
+    # Tenta vari selettori per trovare il pulsante di apertura (icona o freccia)
     try:
-        # Cerca icona calendario generica (più robusto che ID fisso)
-        # Prova classe .calendar16 o .dijitCalendarIcon
-        icon = page.locator(".calendar16, .dijitCalendarIcon").first
-        # Clicca il genitore (bottone) se esiste, altrimenti l'icona
-        btn = icon.locator("xpath=./ancestor::span[@role='button' or contains(@class, 'dijitButton')]").first
-        if btn.count() > 0:
-            btn.click(timeout=6000)
+        # Lista di selettori comuni per il bottone di apertura calendario in Zucchetti/Dojo
+        selectors = [
+            ".dijitDateTextBox .dijitArrowButtonInner", # Freccia standard Dojo
+            ".dijitDateTextBox .dijitArrowButton",      # Bottone freccia intero
+            ".calendar16",                              # Icona classica
+            ".dijitCalendarIcon",                       # Altra classe icona
+            "img[src*='calendar']",                     # Immagine generica
+            "[title*='Calendario']",                    # Tooltip
+            "[title*='Seleziona data']"
+        ]
+        
+        combined_selector = ", ".join(selectors)
+        target = page.locator(combined_selector).first
+        
+        # Clicca l'elemento trovato (o il suo genitore cliccabile)
+        if target.count() > 0:
+            # Prova a cliccare il genitore se è un bottone, altrimenti l'elemento stesso
+            parent_btn = target.locator("xpath=./ancestor::span[@role='button' or contains(@class, 'dijitButton')]")
+            if parent_btn.count() > 0:
+                parent_btn.first.click(timeout=6000)
+            else:
+                target.click(timeout=6000)
+            debug_info.append("Agenda: Click su icona/bottone calendario effettuato")
         else:
-            icon.click(timeout=6000)
-            
-        page.wait_for_selector("div.dijitCalendarMonthLabel", timeout=8000)
+            # Tentativo disperato: clicca sulla casella di testo della data
+            page.locator(".dijitDateTextBox input").first.click(timeout=4000)
+            debug_info.append("Agenda: Click su input testo data (fallback)")
+
+        # Aspetta che appaia il popup (cerchiamo la classe specifica che hai indicato tu)
+        page.wait_for_selector(".dijitCalendarMonthLabel", timeout=8000)
         time.sleep(0.5)
         debug_info.append("Agenda: popup calendario aperto")
+        
     except Exception as e:
-        debug_info.append(f"Agenda: popup non aperto ({e})")
+        debug_info.append(f"Agenda: popup NON aperto. Errore: {str(e)[:50]}...")
         return
 
     # 2. Gestisci Mese e Anno nel popup
-    # Le label cliccabili (Mese e Anno) hanno spesso la classe 'dijitCalendarMonthLabel'
-    labels = page.locator("div.dijitCalendarMonthLabel")
+    # Usiamo esattamente la classe trovata nel tuo HTML: dijitCalendarMonthLabel
+    labels = page.locator(".dijitCalendarMonthLabel")
     
+    # Ci aspettiamo 2 label: una per il Mese, una per l'Anno
     if labels.count() >= 2:
-        # --- MESE (solitamente il primo, index 0) ---
+        # --- MESE (solitamente il primo) ---
         try:
             cur_month_txt = labels.nth(0).inner_text().strip()
-            # Se il mese corrente non è quello target, cambialo
             if cur_month_txt.lower() != mese_nome_target.lower():
-                labels.nth(0).click() # Apre menu a tendina
-                time.sleep(0.3)
-                # Clicca il mese target nel menu
-                page.locator(".dijitMenuItemLabel, .dijitMenuItem").filter(has_text=re.compile(f"^{mese_nome_target}$", re.IGNORECASE)).first.click(timeout=3000)
+                labels.nth(0).click() # Clicca per aprire il menu mesi
+                time.sleep(0.5)
+                # Clicca il mese nel menu a tendina
+                # Cerchiamo nel popup (.dijitPopup o generico body)
+                page.locator("body").get_by_text(mese_nome_target, exact=True).last.click(timeout=3000)
                 time.sleep(0.5)
                 debug_info.append(f"Agenda: cambiato mese a {mese_nome_target}")
         except Exception as e:
             debug_info.append(f"Agenda: errore cambio mese ({e})")
 
-        # --- ANNO (solitamente il secondo, index 1) ---
+        # --- ANNO (solitamente il secondo) ---
         try:
             cur_year_txt = labels.nth(1).inner_text().strip()
-            # Se l'anno corrente non è quello target, cambialo
             if str(anno) not in cur_year_txt:
-                labels.nth(1).click() # Apre menu o input
-                time.sleep(0.3)
-                
-                # Prova a cliccare l'anno nel menu se appare
-                yr_opt = page.locator(".dijitMenuItemLabel, .dijitMenuItem").filter(has_text=str(anno))
-                if yr_opt.count() > 0:
-                    yr_opt.first.click(timeout=3000)
-                    debug_info.append(f"Agenda: cambiato anno a {anno} (menu)")
-                else:
-                    # Se non c'è nel menu (o è un input), prova a scriverlo
-                    page.keyboard.type(str(anno), delay=50)
-                    page.keyboard.press("Enter")
-                    debug_info.append(f"Agenda: cambiato anno a {anno} (typing)")
+                labels.nth(1).click() # Clicca per aprire il menu anni
                 time.sleep(0.5)
+                # Clicca l'anno nel menu a tendina
+                # Nota: se l'anno non è visibile potrebbe servire scroll, ma proviamo il click diretto
+                page.locator("body").get_by_text(str(anno), exact=True).last.click(timeout=3000)
+                time.sleep(0.5)
+                debug_info.append(f"Agenda: cambiato anno a {anno}")
         except Exception as e:
             debug_info.append(f"Agenda: errore cambio anno ({e})")
 
     else:
         debug_info.append("Agenda: labels Mese/Anno non trovate nel popup")
 
-    # 3. Conferma / Chiudi Popup
-    # Clicchiamo sul giorno 1 per essere sicuri che prenda la modifica e chiuda il popup
+    # 3. Conferma (Clicca giorno 1)
+    # Cliccando un giorno il popup si chiude e la data viene impostata
     try:
-        page.locator("span.dijitCalendarDateLabel", has_text=re.compile(r"^1$")).first.click(timeout=2000)
+        # Cerca un giorno "1" che sia visibile e cliccabile nel calendario corrente
+        page.locator(".dijitCalendarDateTemplate", has_text=re.compile(r"^1$")).first.click(timeout=3000)
         time.sleep(1.0)
-        debug_info.append("Agenda: click giorno 1 per conferma")
+        debug_info.append("Agenda: giorno 1 cliccato per conferma")
     except:
-        page.keyboard.press("Escape") # Chiudi se rimasto aperto
+        debug_info.append("Agenda: impossibile cliccare giorno 1")
+        # Chiudi popup se rimasto aperto
+        page.keyboard.press("Escape")
 
 
 def agenda_extract_events_fast(page):
@@ -201,7 +218,8 @@ def agenda_extract_events_fast(page):
     Estrae testo eventi dall'Agenda (best-effort) e conta keyword utili.
     """
     texts = []
-    candidates = page.locator("[class*='event'], [class*='Event'], [class*='appointment'], [class*='Appunt']")
+    # Cerca elementi che sembrano eventi (classi comuni in agende web)
+    candidates = page.locator("[class*='event'], [class*='Event'], [class*='appointment'], [class*='Appunt'], .dijitCalendarEvent")
     try:
         n = candidates.count()
     except:
@@ -213,6 +231,7 @@ def agenda_extract_events_fast(page):
             if t:
                 texts.append(t)
 
+    # Fallback: prende tutto il testo del corpo pagina se non trova classi specifiche
     if not texts:
         texts = [page.inner_text("body") or ""]
 
@@ -561,7 +580,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 
                 # Attesa che la pagina carichi
                 try:
-                    page.wait_for_selector(".dijitCalendar, .fc-view, .agenda-view", timeout=8000)
+                    page.wait_for_selector(".dijitCalendar, .fc-view, .agenda-view, .dijitDateTextBox", timeout=10000)
                 except:
                     pass 
                 
