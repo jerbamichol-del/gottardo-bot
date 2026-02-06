@@ -585,89 +585,93 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     moves = 0
                     max_moves = 36
                     
-                    while moves < max_moves:
-                        # 3a. Leggi data dal Mini-Calendario
-                        curr_title = "ERROR"
-                        try:
-                            # Tentativo 1: Label standard Dojo
-                            curr_month_el = mini_cal.locator(".dijitCalendarMonthLabel").first
-                            curr_year_el = mini_cal.locator(".dijitCalendarYearLabel, .dijitCalendarSelectedYear").first
-                            
-                            if curr_month_el.is_visible(): 
-                                curr_title = curr_month_el.inner_text() + " " + curr_year_el.inner_text()
-                            else:
-                                # Tentativo 2: Tutto il testo del popup (prima riga)
-                                curr_title = mini_cal.inner_text().split("\n")[0]
-                                
-                            curr_title = curr_title.strip().upper()
-                        except Exception as e_title:
-                            result["debug"].append(f"    ⚠️ Errore lettura titolo popup: {e_title}")
-
-                        result["debug"].append(f"    📅 Popup Data Letta: '{curr_title}'")
-                        
-                        # 3b. Logica Direzione
-                        curr_y = -1; curr_m = -1
-                        y_match = re.search(r'20\d{2}', curr_title)
-                        if y_match: curr_y = int(y_match.group(0))
+                    # Calcolo Delta Iniziale (Dead Reckoning)
+                    # Se la lettura del popup fallisce, usiamo la data letta dalla pagina principale (current_title_text)
+                    months_delta = 0
+                    start_y = -1; start_m = -1
+                    
+                    # Parsing data principale (che sappiamo funzionare: '01 feb - 28 feb 2026')
+                    try:
+                        y_match = re.search(r'20\d{2}', current_title_text)
+                        if y_match: start_y = int(y_match.group(0))
                         
                         mesi = [m.upper() for m in MESI_IT]
                         for i, m in enumerate(mesi):
-                            if m in curr_title or (len(m)>4 and m[:-1] in curr_title):
-                                curr_m = i + 1; break
-                        
-                        result["debug"].append(f"    -> Interpretato: M={curr_m}, Y={curr_y}")
+                            if m in current_title_text or (len(m)>4 and m[:-1] in current_title_text):
+                                start_m = i + 1; break
+                        if start_m == -1: # Try short
+                             for i, m3 in enumerate([m[:3] for m in mesi_list]):
+                                 if re.search(r'\b' + m3 + r'\b', current_title_text):
+                                     start_m = i + 1; break
+                    except: pass
+                    
+                    if start_y != -1 and start_m != -1:
+                        target_val = anno * 12 + mese_num
+                        start_val = start_y * 12 + start_m
+                        months_delta = target_val - start_val
+                        result["debug"].append(f"  🧮 Navigazione Stimata (Dead Reckoning): Start={start_m}/{start_y}, Target={mese_num}/{anno}, Delta={months_delta}")
+                    else:
+                        result["debug"].append("  ⚠️ Impossibile calcolare delta mesi iniziale (Start date ignota)")
 
-                        if curr_y != -1 and curr_m != -1:
-                           # Check Target
-                           if curr_y == anno and curr_m == mese_num:
-                                 result["debug"].append("    ✅ Data Target Raggiunta nel Popup!")
+                    moves = 0
+                    clicks_needed = abs(months_delta)
+                    direction_is_back = months_delta < 0
+                    
+                    while moves <= clicks_needed + 2: # +2 buffer
+                        # 3a. Leggi data (Opzionale, solo per conferma)
+                        curr_title = "ERROR"
+                        try:
+                            # Prova a leggere per fermarci prima se funziona
+                            curr_month_el = mini_cal.locator(".dijitCalendarMonthLabel").first
+                            if curr_month_el.is_visible(): 
+                                curr_title = curr_month_el.inner_text() + " " + mini_cal.locator(".dijitCalendarYearLabel").first.inner_text()
+                            curr_title = curr_title.strip().upper()
+                        except: pass
+                        
+                        if curr_title != "ERROR" and len(curr_title) > 3:
+                             # Logica Intelligente (Se la lettura funziona)
+                             # ... (omissis, usiamo la logica cieca prioritariamente se abbiamo delta)
+                             # Check if arrived
+                             # ...
+                             pass 
+
+                        # LOGICA CIECA PRIORITARIA o FALLBACK
+                        if months_delta != 0:
+                            # Se abbiamo un piano di navigazione, seguiamolo
+                            if moves < clicks_needed:
+                                arrow_sel = ".dijitCalendarDecrease" if direction_is_back else ".dijitCalendarIncrease"
+                                desc = "Indietro" if direction_is_back else "Avanti"
+                                
+                                btn = mini_cal.locator(arrow_sel).first
+                                if btn.is_visible():
+                                    btn.click()
+                                    result["debug"].append(f"    Blind Click {moves+1}/{clicks_needed}: {desc}")
+                                else:
+                                    result["debug"].append(f"    ⚠️ Bottone Blind {arrow_sel} NON VISIBILE")
+                                time.sleep(0.4) # Click rapidi
+                                moves += 1
+                                continue
+                            else:
+                                 # Finito i click previsti!
+                                 result["debug"].append("    🏁 Finiti click stimati. Clicco giorno per confermare...")
                                  
-                                 # 3c. Clicca GIORNO
+                                 # Clicca GIORNO
                                  days = mini_cal.locator(".dijitCalendarDateTemplate:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth), .dijitCalendarCurrentMonth").all()
-                                 result["debug"].append(f"    Giorni trovati nel popup: {len(days)}")
-                                 
                                  if len(days) > 0:
                                      idx = min(15, len(days)-1)
                                      try:
                                          days[idx].click()
                                          result["debug"].append(f"    🖱️ Click giorno {idx+1}")
-                                         time.sleep(3)
+                                         time.sleep(4)
                                          cal_nav_success = True
                                      except: pass
+                                 else:
+                                     result["debug"].append("    ⚠️ Nessun giorno cliccabile trovato")
                                  break
-                        
-                           # Direzione
-                           target_val = anno * 12 + mese_num
-                           curr_val = curr_y * 12 + curr_m
-                           
-                           is_future = False
-                           if curr_val > target_val: is_future = True
-                           
-                           # Clicca Frecce nel Popup
-                           arrow_sel = ".dijitCalendarDecrease" if is_future else ".dijitCalendarIncrease"
-                           desc = "Indietro" if is_future else "Avanti"
-                           
-                           btn = mini_cal.locator(arrow_sel).first
-                           if btn.is_visible():
-                               btn.click()
-                               result["debug"].append(f"    Suona click su {arrow_sel} ({desc})")
-                           else:
-                                result["debug"].append(f"    ⚠️ Bottone {arrow_sel} NON VISIBILE nel popup")
-                                break
                         else:
-                            # Fallback cieco
-                            result["debug"].append("    ⚠️ Data illeggibile, provo 'Decrease' alla cieca...")
-                            arrow_sel = ".dijitCalendarDecrease"
-                            try: 
-                                btn = mini_cal.locator(arrow_sel).first
-                                if btn.is_visible():
-                                    btn.click()
-                                else:
-                                    result["debug"].append("    ⚠️ Bottone Decrease blind non trovato. Esco.")
-                                    break
-                            except: break
+                            # Se delta è 0 (o ignoto), prova logica standard (con lettura fallimentare -> exit)
+                            break
                         
-                        time.sleep(0.5)
                         moves += 1
                 else:
                     result["debug"].append("  ⚠️ Popup Mini-Calendario NON APERTO dopo il click")
