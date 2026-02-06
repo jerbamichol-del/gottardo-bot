@@ -479,35 +479,69 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 break
                             except: pass
                 
-                # 2. Leggi Data Corrente dal Titolo Principale
-                # Cerca il titolo grande al centro: es "Gennaio 2026"
-                # ID tipici dojo: calendarTitle, ecc.
-                # Cerchiamo un elemento testo che contiene l'anno corrente
-                found_title = False
-                title_el = None
-                
-                # Possibili selettori titolo
+                # Selettori per il titolo (es. "Gennaio 2026")
+                # Tentativo 1: Selettori specifici Dojo/ZK
                 title_selectors = [
                     ".dijitCalendarTitle", ".dojoxCalendarTitle", 
                     "#calendarTitle", ".calendarTitle",
-                    "span[id*='Title']", "div[id*='Title']"
+                    "span[id*='Title']", "div[id*='Title']",
+                    ".title", ".header-title"
                 ]
+                
+                found_title = False
+                title_el = None
                 
                 for sel in title_selectors:
                     els = calendar_frame.locator(sel)
                     if els.count() > 0:
                         for i in range(els.count()):
-                            t = els.nth(i).inner_text().strip()
-                            # Se contiene un anno (4 cifre), è probabilmente il titolo
-                            if re.search(r'\b20\d{2}\b', t):
-                                title_el = els.nth(i)
-                                found_title = True
-                                break
+                            if els.nth(i).is_visible():
+                                t = els.nth(i).inner_text().strip()
+                                if re.search(r'\b20\d{2}\b', t): # Cerca anno (20xx)
+                                    title_el = els.nth(i)
+                                    found_title = True
+                                    result["debug"].append(f"  ✅ Titolo trovato con sel '{sel}': {t}")
+                                    break
                     if found_title: break
                 
-                # Se non trova titolo specifico, cerca nel body un testo grande? No, rischioso.
-                # Fallback: cerca span con testo Mese Anno corrente approssimativo
-                
+                # Tentativo 2: Ricerca testuale generica per testo che sembra una data (Mese Anno)
+                if not found_title:
+                     result["debug"].append("  ⚠️ Titolo non trovato con selettori, provo ricerca testo generica...")
+                     # Cerca elementi che contengono l'anno corrente o target
+                     # Es: "Gennaio 2026"
+                     text_candidates = calendar_frame.locator("text=202").all() # Prende tutto ciò che ha "202..."
+                     for el in text_candidates:
+                         try:
+                             if el.is_visible():
+                                 txt = el.inner_text().strip() # es "Gennaio 2026" o "01/01/2026"
+                                 # Deve essere breve (< 30 caratteri) per essere un titolo
+                                 if len(txt) < 30 and re.search(r'[A-Za-z]+\s+20\d{2}', txt):
+                                     title_el = el
+                                     found_title = True
+                                     result["debug"].append(f"  ✅ Titolo trovato per euristica testo: '{txt}'")
+                                     break
+                         except: pass
+
+                # DIAGNOSTICA HTML SE FALLISCE ANCORA
+                if not found_title:
+                    result["debug"].append("  ❌ TITOLO ASSENTE. Eseguo DUMP struttura HTML...")
+                    # Salva un riassunto dei div/span visibili per capire cosa c'è
+                    try:
+                        visible_els = calendar_frame.locator("div, span, button").all()
+                        count_vis = 0
+                        for el in visible_els:
+                            if count_vis > 30: break
+                            if el.is_visible():
+                                t = el.inner_text().strip() or "[no text]"
+                                if len(t) > 50: t = t[:50] + "..."
+                                i_d = el.get_attribute("id") or ""
+                                cls = el.get_attribute("class") or ""
+                                if t != "[no text]" or i_d: # Logga solo roba utile
+                                    result["debug"].append(f"    - Tag: {t} | ID: {i_d} | Class: {cls}")
+                                    count_vis += 1
+                    except Exception as dump_e:
+                        result["debug"].append(f"    Errore dump: {dump_e}")
+
                 # 3. Naviga Indietro/Avanti con le Frecce Principali
                 if found_title:
                     moves = 0
