@@ -466,16 +466,33 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
 
                 time.sleep(2) # Attesa cambio vista
 
-                # 1. Attiva il TAB "Calendario" nella sidebar se necessario
-                sidebar_cal_btn = calendar_frame.locator("span[widgetid*='Button']").filter(has_text="Calendario").first
-                if sidebar_cal_btn.count() > 0 and sidebar_cal_btn.is_visible():
-                    result["debug"].append("  Click tab 'Calendario' sidebar...")
-                    sidebar_cal_btn.click()
-                    time.sleep(1)
+                # 1. Attiva il TAB "Calendario" nella sidebar se necessario (CRITICO PER VEDERE DATEPICKER)
+                # Cerca bottone con classe specifica vista nel debug HTML: heatMapCalendarButton
+                # Oppure id dijit_form_Button_0
+                sidebar_cal_btn = calendar_frame.locator(".heatMapCalendarButton, span[widgetid='dijit_form_Button_0']").first
+                
+                # Se non visibile, prova a cercarlo più genericamente
+                if not sidebar_cal_btn.is_visible():
+                     sidebar_cal_btn = calendar_frame.locator("span[role='button']").filter(has_text="Calendario").first
+
+                if sidebar_cal_btn.count() > 0:
+                    result["debug"].append("  Click tab 'Calendario' sidebar (per mostrare mini-cal)...")
+                    try:
+                        sidebar_cal_btn.click()
+                        time.sleep(1) # Attesa animazione
+                    except: pass
                 
                 # 2. Interagisci con il MINI-CALENDAR (DatePicker)
                 result["debug"].append("  Interazione con Mini-Calendar (#datePicker)...")
                 
+                # Assicurati che datePicker sia visibile
+                dp = calendar_frame.locator("#datePicker")
+                if not dp.is_visible():
+                     result["debug"].append("  ⚠️ #datePicker ancora invisibile dopo click tab! Riprovo click...")
+                     try: sidebar_cal_btn.click() 
+                     except: pass
+                     time.sleep(1)
+
                 # Loop navigazione (max 24 tentativi = 2 anni)
                 moves = 0
                 max_moves = 24
@@ -483,11 +500,12 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 
                 while moves < max_moves:
                     # Rileggi mese/anno correnti dal mini-cal
-                    curr_year_el = calendar_frame.locator(".dijitCalendarYearLabel span, #datePicker_yddb_label").first
-                    curr_month_el = calendar_frame.locator(".dijitCalendarCurrentMonthLabel, #datePicker_mddb_label").first
+                    # Selettori ID specifici visti nell'HTML
+                    curr_year_el = calendar_frame.locator("#datePicker_yddb_label, .dijitCalendarYearLabel span").first
+                    curr_month_el = calendar_frame.locator("#datePicker_mddb_label, .dijitCalendarCurrentMonthLabel").first
                     
                     if not curr_year_el.is_visible():
-                        result["debug"].append("  ⚠️ Elementi anno/mese non visibili nel mini-cal")
+                        result["debug"].append("  ⚠️ Elementi anno/mese ancora NON visibili nel mini-cal")
                         break
                         
                     curr_year_text = curr_year_el.inner_text().strip()
@@ -521,20 +539,21 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 go_back = True
                     except: pass
                     
-                    # Esegui Click
+                    # Esegui Click su frecce Mini-Cal (ID specifici visti in HTML)
+                    # #datePicker .dijitCalendarDecrease
                     if go_back:
-                        btn = calendar_frame.locator(".dijitCalendarDecrease, .dijitCalendarArrow[title*='Precedente']").first
+                        btn = calendar_frame.locator("#datePicker .dijitCalendarDecrease").first
                         if btn.is_visible():
                             btn.click()
                         else:
-                            result["debug"].append("  ⚠️ Bottone 'Precedente' non trovato")
+                            result["debug"].append("  ⚠️ Bottone 'Precedente' mini-cal non trovato")
                             break
                     else:
-                        btn = calendar_frame.locator(".dijitCalendarIncrease, .dijitCalendarArrow[title*='Successivo']").first
+                        btn = calendar_frame.locator("#datePicker .dijitCalendarIncrease").first
                         if btn.is_visible():
                             btn.click()
                         else:
-                            result["debug"].append("  ⚠️ Bottone 'Successivo' non trovato")
+                            result["debug"].append("  ⚠️ Bottone 'Successivo' mini-cal non trovato")
                             break
                     
                     time.sleep(0.4) # Breve attesa animazione
@@ -544,13 +563,13 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     # 3. CLICCA UN GIORNO NEL MINI-CAL PER AGGIORNARE VISTA
                     result["debug"].append("  🖱️ Seleziono un giorno per caricare l'Agenda...")
                     # Cerca giorni del mese corrente (non previous/next month days che sono grigi)
-                    current_month_days = calendar_frame.locator(".dijitCalendarCurrentMonth")
+                    current_month_days = calendar_frame.locator("#datePicker .dijitCalendarCurrentMonth")
                     count = current_month_days.count()
                     
                     day_clicked = False
                     if count > 0:
                         # Clicca il 15° giorno (o centrale)
-                        target_day_idx = min(14, count - 1)
+                        target_day_idx = min(15, count - 1)
                         day_el = current_month_days.nth(target_day_idx)
                         day_text = day_el.inner_text().strip()
                         result["debug"].append(f"  Click giorno {day_text}...")
@@ -560,7 +579,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     if day_clicked:
                         # Attesa caricamento vista principale
                         result["debug"].append("  ⏳ Attesa caricamento vista principale...")
-                        time.sleep(4) 
+                        time.sleep(5) # Aumentato per sicurezza
                         cal_nav_success = True
                     else:
                         result["debug"].append("  ⚠️ Nessun giorno cliccabile trovato")
@@ -568,66 +587,65 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
             except Exception as e:
                 result["debug"].append(f"  ❌ Errore navigazione sidebar: {e}")
         
-        # === CATTURA EVENTI DAL DOM (SOLO GRIGLIA CALENDARIO) ===
-        result["debug"].append("� Avvio scraping eventi DOJO (modalità rigida)...")
-        
-        # Attendiamo caricamento griglia ed eventi
-        if calendar_frame:
-            try:
-                # Aspetta che appaiano gli eventi (max 3 sec)
-                # Nota: se non ci sono eventi nel mese, andrà in timeout (normale)
-                calendar_frame.wait_for_selector(".dojoxCalendarEvent", timeout=3000)
-            except: pass
-
-        # Selettori RIGIDAMENTE limitati agli eventi reali nella griglia
-        # Ignoriamo label, titoli e sidebar
-        event_classes = [
-            ".dojoxCalendarEvent", 
-            ".dijitCalendarEvent",
-            ".z-calendar-event"
-        ]
+        # === CATTURA EVENTI DAL DOM (SOLO GRIGLIA CALENDARIO - METODO TESTUALE) ===
+        result["debug"].append("🔍 Avvio scraping eventi (Metodo Testuale su #calendarContainer)...")
         
         dom_events = []
         
-        # Cerca solo dentro il frame corretto
         if calendar_frame:
-            for sel in event_classes:
-                try:
-                    # Cerca tutti gli elementi evento
-                    elements = calendar_frame.locator(sel)
-                    count = elements.count()
+            try:
+                # 1. Isola il contenitore della griglia (ignora sidebar)
+                # Dagli ID visti nel debug: calendarUI_ExtendedCalendar_0 EVIDENTE NEL LOG
+                grid_container = calendar_frame.locator("#calendarUI_ExtendedCalendar_0, #calendarContainer").first
+                
+                if grid_container.is_visible():
+                    # Aspetta un attimo per sicurezza rendering
+                    time.sleep(1)
                     
-                    if count > 0:
-                        result["debug"].append(f"📌 Trovati {count} elementi con selettore {sel}")
-                        for i in range(count):
-                            try:
-                                el = elements.nth(i)
-                                
-                                # Verifica visibilità per evitare elementi nascosti
-                                if not el.is_visible():
-                                    continue
-                                
-                                # Estrai testo e attributi
-                                text = (el.inner_text() or "").strip()
-                                title = (el.get_attribute("title") or "").strip()
-                                aria = (el.get_attribute("aria-label") or "").strip()
-                                
-                                # Combina tutto
-                                content = f"{text} {title} {aria}".upper()
-                                
-                                # Mappa Keyword -> Tipo Evento
-                                # Priorità alle keyword specifiche che identificano eventi REALI
-                                if "OMESSA" in content or "OMT" in content:
-                                    dom_events.append("OMESSA TIMBRATURA")
-                                elif "FERIE" in content or "FEP" in content:
-                                    dom_events.append("FERIE")
-                                elif "MALATTIA" in content or "MAL" in content:
-                                    dom_events.append("MALATTIA")
-                                elif "RIPOSO" in content or "RCS" in content or "RIC" in content or "RPS" in content:
-                                    dom_events.append("RIPOSO")
-                                
-                            except: continue
-                except: continue
+                    # 2. Estrai TUTTO il testo visibile nel calendario
+                    # Usiamo locator SOLO dentro grid_container per ignorare la sidebar
+                    
+                    keywords = ["OMESSA", "OMT", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS"]
+                    
+                    found_count = 0
+                    
+                    # Strategia: Cerca elementi CONTESTUALI nel container
+                    for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO"]:
+                        # Cerca elementi che contengono la parola DENTRO la griglia
+                        matches = grid_container.locator(f"text={kw}")
+                        count = matches.count()
+                        
+                        if count > 0:
+                            result["debug"].append(f"  📝 Trovati {count} elementi per '{kw}' in griglia")
+                            for i in range(count):
+                                # Verifica che sia visibile
+                                if matches.nth(i).is_visible():
+                                    if kw == "OMESSA": dom_events.append("OMESSA TIMBRATURA")
+                                    elif kw == "FERIE": dom_events.append("FERIE")
+                                    elif kw == "MALATTIA": dom_events.append("MALATTIA")
+                                    elif kw == "RIPOSO": dom_events.append("RIPOSO")
+                                    found_count += 1
+                    
+                    if found_count == 0:
+                        # Fallback: prova a leggere tutto il testo e contare le occorrenze
+                        # IMPORTANTE: Leggiamo solo il testo del #calendarContainer!
+                        full_text = grid_container.inner_text().upper()
+                        # result["debug"].append(f"  TEXT DUMP: {full_text[:100]}...") # Debug opzionale
+                        
+                        if "OMESSA" in full_text: 
+                            c = full_text.count("OMESSA")
+                            current_omesse = dom_events.count("OMESSA TIMBRATURA")
+                            if c > current_omesse:
+                                for _ in range(c - current_omesse): dom_events.append("OMESSA TIMBRATURA")
+                                result["debug"].append(f"  📝 Recuperati {c - current_omesse} eventi OMESSA da testo full")
+
+                else:
+                    result["debug"].append("  ⚠️ #calendarUI_ExtendedCalendar_0 non trovato o non visibile")
+
+            except Exception as e:
+                 result["debug"].append(f"  ❌ Errore scraping container: {e}")
+
+
         
         result["debug"].append(f"📋 Totale eventi validi estratti: {len(dom_events)}")
 
