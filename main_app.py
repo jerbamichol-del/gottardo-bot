@@ -542,140 +542,179 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     except Exception as dump_e:
                         result["debug"].append(f"    Errore dump: {dump_e}")
 
-                # 3. Naviga Indietro/Avanti con le Frecce Principali
+                # 3. Naviga Indietro/Avanti (LOGICA RELATIVA AL TITOLO)
                 if found_title:
                     moves = 0
                     max_moves = 24
                     
+                    # Identifica container toolbar
+                    # Risaliamo al parent del titolo
+                    toolbar = title_el.locator("..")
+                    
                     while moves < max_moves:
-                        current_title = title_el.inner_text().strip().upper() # es "GENNAIO 2026"
-                        result["debug"].append(f"  📅 Titolo Calendario: {current_title}")
+                        # Rileggi data corrente
+                        try:
+                            current_title = title_el.inner_text().strip().upper()
+                        except:
+                            # Se titolo perso (re-render), cercalo di nuovo
+                             # ...simil logica o break
+                             current_title = "PERSO"
                         
-                        if target_month_name in current_title and str(anno) in current_title:
+                        result["debug"].append(f"  📅 Titolo Attuale: {current_title}")
+                        
+                        target_reached = False
+                        if "PERSO" not in current_title and target_month_name in current_title and str(anno) in current_title:
                             result["debug"].append("  ✅ Mese target raggiunto!")
                             cal_nav_success = True
+                            target_reached = True
                             break
                         
                         # Decide direzione
-                        # Cerca anno nel titolo
-                        curr_year_match = re.search(r'20\d{2}', current_title)
-                        is_future = False
-                        if curr_year_match:
-                            curr_y = int(curr_year_match.group(0))
-                            if curr_y > anno:
-                                is_future = True
-                            elif curr_y == anno:
-                                # Mese
-                                mesi_list = [m.upper() for m in MESI_IT]
-                                curr_m_idx = -1
-                                for i, m in enumerate(mesi_list):
-                                    if m in current_title:
-                                        curr_m_idx = i
-                                        break
-                                if curr_m_idx > (mese_num - 1):
-                                    is_future = True
+                        is_future = True # Default indietro
+                        # ... logica data ...
+                        found_year_match = re.search(r'20\d{2}', current_title)
+                        if found_year_match:
+                             y = int(found_year_match.group(0))
+                             if y < anno: is_future = False
+                             elif y == anno:
+                                 # check mese
+                                 mesi_list = [m.upper() for m in MESI_IT]
+                                 curr_idx = -1
+                                 for i,m in enumerate(mesi_list): 
+                                     if m in current_title: 
+                                         curr_idx = i; break
+                                 if curr_idx < (mese_num - 1): is_future = False
                         
-                        # Clicca Freccia
-                        arrow_sel = ""
-                        if is_future:
-                             # Freccia Sinistra / Precedente
-                             # Spesso hanno title="Precedente" o classe Previous
-                             arrow_btns = calendar_frame.locator("[title='Precedente'], [aria-label='Previous'], .dijitCalendarPreviousMonth, .prev, .previous")
-                             desc = "Precedente"
-                        else:
-                             # Freccia Destra / Successivo
-                             arrow_btns = calendar_frame.locator("[title='Successivo'], [aria-label='Next'], .dijitCalendarNextMonth, .next")
-                             desc = "Successivo"
+                        # Trova bottoni nel toolbar
+                        # Cerchiamo tutti i figli cliccabili
+                        buttons = toolbar.locator("span.dijitButton, span[role='button'], div[role='button']").all()
                         
-                        if arrow_btns.count() > 0:
-                            # Clicca la prima visibile
-                            clicked = False
-                            for k in range(arrow_btns.count()):
-                                if arrow_btns.nth(k).is_visible():
-                                    arrow_btns.nth(k).click()
-                                    clicked = True
-                                    result["debug"].append(f"  ⬅️ Click {desc}...")
-                                    break
-                            if not clicked:
-                                result["debug"].append(f"  ⚠️ Nessun bottone {desc} visibile")
-                                break
+                        # Ordiniamoli o identifichiamoli
+                        # Tipicamente: [Icona] [Prev] [Next] [Titolo] oppure [Prev] [Next] [Titolo]
+                        # Strategia: Cerca il bottone IMMEDIATAMENTE a sx o dx del titolo?
+                        # O cerca classi "Prev"/"Next" / "Decrease"/"Increase"
+                        
+                        btn_prev = None
+                        btn_next = None
+                        
+                        # Logga candidati
+                        if moves == 0:
+                            result["debug"].append(f"  🔎 Analisi Toolbar ({len(buttons)} btns):")
+                            for b in buttons:
+                                try:
+                                    bid = b.get_attribute("id") or ""
+                                    bcls = b.get_attribute("class") or ""
+                                    btit = b.get_attribute("title") or ""
+                                    result["debug"].append(f"    - Btn: id={bid} cls={bcls} tit={btit}")
+                                    
+                                    # Heuristiche
+                                    combined = (bid + bcls + btit).lower()
+                                    if "prev" in combined or "decrease" in combined or "back" in combined or "sinistra" in combined:
+                                        btn_prev = b
+                                    elif "next" in combined or "increase" in combined or "forward" in combined or "destra" in combined:
+                                        btn_next = b
+                                except: pass
                         else:
-                             # Fallback: cerca bottoni con icone freccia? Risolviamo col selector sopra
-                             result["debug"].append(f"  ⚠️ Bottoni navigazione non trovati")
+                            # Re-find veloce
+                            for b in buttons:
+                                try:
+                                    combined = (b.get_attribute("id") or "" + b.get_attribute("class") or "" + b.get_attribute("title") or "").lower()
+                                    if "prev" in combined or "decrease" in combined: btn_prev = b
+                                    elif "next" in combined or "increase" in combined: btn_next = b
+                                except: pass
+                        
+                        # Se euristiche falliscono, usa posizione (brutale ma efficace)
+                        # Assumiamo che titolo sia l'elemento N. I bottoni sono N-1 (Prev) e N-2 (Next) o viceversa
+                        # Troppo rischioso senza vedere il DOM.
+                        
+                        # Se non trovati, prova selettore generico "arrow"
+                        if not btn_prev: 
+                            btn_prev = toolbar.locator(".dijitCalendarDecrease, [class*='Prev'], [class*='prev']").first
+                        if not btn_next:
+                            btn_next = toolbar.locator(".dijitCalendarIncrease, [class*='Next'], [class*='next']").first
+                        
+                        # Esegui click
+                        btn_to_click = btn_prev if is_future else btn_next
+                        desc_click = "Precedente" if is_future else "Successivo"
+                        
+                        if btn_to_click and btn_to_click.is_visible():
+                            btn_to_click.click()
+                            result["debug"].append(f"  🖱️ Click {desc_click}")
+                        else:
+                             result["debug"].append(f"  ⚠️ Bottone {desc_click} non identificato!")
+                             # Ultimo tentativo: clicca coordinate? No.
                              break
                         
-                        time.sleep(1.5) # Attesa ricaricamento eventi
+                        time.sleep(1.5)
                         moves += 1
+                        
                 else:
                     result["debug"].append("  ⚠️ Titolo calendario non identificato, impossibile navigare")
 
             except Exception as e:
                 result["debug"].append(f"  ❌ Errore navigazione toolbar: {e}")
         
-        # === CATTURA EVENTI DAL DOM (SOLO GRIGLIA CALENDARIO - METODO TESTUALE) ===
-        result["debug"].append("🔍 Avvio scraping eventi (Metodo Testuale su #calendarContainer)...")
+        # === CATTURA EVENTI DAL DOM (FALLBACK TOTALE) ===
+        # Se la griglia non si trova, cerca OVUNQUE nel frame
+        result["debug"].append("🔍 Avvio scraping eventi (Ricerca Globale nel Frame)...")
         
         dom_events = []
         
         if calendar_frame:
             try:
-                # 1. Isola il contenitore della griglia (ignora sidebar)
-                # Dagli ID visti nel debug: calendarUI_ExtendedCalendar_0 EVIDENTE NEL LOG
-                # Proviamo anche selettore più ampio se l'ID specifico fallisce
-                # Cerca un div grande che contiene "Lun", "Mar", etc. (header giorni)
-                grid_container = calendar_frame.locator("#calendarUI_ExtendedCalendar_0, #calendarContainer, .dijitCalendarContainer").first
+                # Url check: siamo ancora sull'agenda?
+                # Aspetta body visible
+                calendar_frame.locator("body").wait_for(timeout=2000)
+                time.sleep(2) # Rendering finale
                 
-                # Se non lo trova per ID, cerchiamo per struttura
-                if not grid_container.is_visible():
-                     # Cerca la griglia principale tramite classi dojo
-                     grid_container = calendar_frame.locator(".dojoxCalendarGrid, .dijitCalendarContainer").first
+                # 1. Prova prima griglia specifica (più accurata)
+                grid = calendar_frame.locator("#calendarContainer, #calendarUI_ExtendedCalendar_0").first
+                
+                search_area = grid if grid.is_visible() else calendar_frame.locator("body")
+                src_name = "Griglia" if grid.is_visible() else "BODY (Fallback)"
+                result["debug"].append(f"  Target scraping: {src_name}")
 
-                if grid_container.is_visible():
-                    # Aspetta un attimo per sicurezza rendering
-                    time.sleep(1)
+                # 2. Cerca Keyword
+                keywords = ["OMESSA", "OMT", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS"]
+                
+                # Dizionario per evitare duplicati (stesso evento letto più volte)
+                # Chiave = testo + posizione approx? No, conteggio semplice per ora.
+                
+                found_any = False
+                for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO"]:
+                    # Cerca elementi visibili contenenti il testo
+                    # text=KW è case-insensitive e smart
+                    matches = search_area.locator(f"text={kw}")
+                    count = matches.count()
                     
-                    # 2. Estrai TUTTO il testo visibile nel calendario
-                    # Usiamo locator SOLO dentro grid_container per ignorare la sidebar
+                    real_matches = 0
+                    for i in range(count):
+                        if matches.nth(i).is_visible():
+                            # Controllo extra: assicuriamoci non sia nella sidebar (se stiamo usando BODY)
+                            # Se usiamo GRID siamo salvi.
+                            # Se BODY, scartiamo se parent ha classe "LeftColumn" o simile?
+                            # Per ora accettiamo il rischio se la griglia fallisce.
+                            real_matches += 1
+                            if kw == "OMESSA": dom_events.append("OMESSA TIMBRATURA")
+                            elif kw == "FERIE": dom_events.append("FERIE")
+                            elif kw == "MALATTIA": dom_events.append("MALATTIA")
+                            elif kw == "RIPOSO": dom_events.append("RIPOSO")
                     
-                    keywords = ["OMESSA", "OMT", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS"]
-                    
-                    found_count = 0
-                    
-                    # Strategia: Cerca elementi CONTESTUALI nel container
-                    for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO"]:
-                        # Cerca elementi che contengono la parola DENTRO la griglia
-                        matches = grid_container.locator(f"text={kw}")
-                        count = matches.count()
-                        
-                        if count > 0:
-                            result["debug"].append(f"  📝 Trovati {count} elementi per '{kw}' in griglia")
-                            for i in range(count):
-                                # Verifica che sia visibile
-                                if matches.nth(i).is_visible():
-                                    if kw == "OMESSA": dom_events.append("OMESSA TIMBRATURA")
-                                    elif kw == "FERIE": dom_events.append("FERIE")
-                                    elif kw == "MALATTIA": dom_events.append("MALATTIA")
-                                    elif kw == "RIPOSO": dom_events.append("RIPOSO")
-                                    found_count += 1
-                    
-                    if found_count == 0:
-                        # Fallback: prova a leggere tutto il testo e contare le occorrenze
-                        # IMPORTANTE: Leggiamo solo il testo del #calendarContainer!
-                        full_text = grid_container.inner_text().upper()
-                        # result["debug"].append(f"  TEXT DUMP: {full_text[:100]}...") # Debug opzionale
-                        
-                        if "OMESSA" in full_text: 
-                            c = full_text.count("OMESSA")
-                            current_omesse = dom_events.count("OMESSA TIMBRATURA")
-                            if c > current_omesse:
-                                for _ in range(c - current_omesse): dom_events.append("OMESSA TIMBRATURA")
-                                result["debug"].append(f"  📝 Recuperati {c - current_omesse} eventi OMESSA da testo full")
-
-                else:
-                    result["debug"].append("  ⚠️ #calendarUI_ExtendedCalendar_0 non trovato o non visibile")
+                    if real_matches > 0:
+                        result["debug"].append(f"  📝 Trovati {real_matches} x '{kw}'")
+                        found_any = True
+                
+                if not found_any:
+                     # Check testo grezzo se locator fallisce
+                     full = search_area.inner_text().upper()
+                     if "OMESSA" in full:
+                         cnt = full.count("OMESSA")
+                         result["debug"].append(f"  📝 Trovati {cnt} 'OMESSA' nel testo grezzo")
+                         for _ in range(cnt): dom_events.append("OMESSA TIMBRATURA")
 
             except Exception as e:
-                 result["debug"].append(f"  ❌ Errore scraping container: {e}")
+                 result["debug"].append(f"  ❌ Errore scraping globale: {e}")
+
 
 
         
