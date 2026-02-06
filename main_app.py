@@ -117,8 +117,18 @@ if "modelli_mostrati" not in st.session_state:
 
 
 # ==============================================================================
-# AGENDA
+# AGENDA - VERSIONE CORRETTA CON API INTERCEPT
 # ==============================================================================
+
+# Codici evento del calendario Gottardo (scoperti via scraping)
+CALENDAR_CODES = {
+    "FEP": "FERIE PIANIFICATE",
+    "OMT": "OMESSA TIMBRATURA",
+    "RCS": "RIPOSO COMPENSATIVO SUCCESSIVO",
+    "RIC": "RIPOSO COMPENSATIVO FORZATO",
+    "MAL": "MALATTIA"
+}
+
 AGENDA_KEYWORDS = [
     "OMESSA TIMBRATURA",
     "MALATTIA",
@@ -132,297 +142,277 @@ AGENDA_KEYWORDS = [
 ]
 
 MONTH_ABBR_IT = {
-    1: "gen",
-    2: "feb",
-    3: "mar",
-    4: "apr",
-    5: "mag",
-    6: "giu",
-    7: "lug",
-    8: "ago",
-    9: "set",
-    10: "ott",
-    11: "nov",
-    12: "dic",
+    1: "gen", 2: "feb", 3: "mar", 4: "apr", 5: "mag", 6: "giu",
+    7: "lug", 8: "ago", 9: "set", 10: "ott", 11: "nov", 12: "dic",
 }
 MONTH_FULL_IT = {
-    1: "Gennaio",
-    2: "Febbraio",
-    3: "Marzo",
-    4: "Aprile",
-    5: "Maggio",
-    6: "Giugno",
-    7: "Luglio",
-    8: "Agosto",
-    9: "Settembre",
-    10: "Ottobre",
-    11: "Novembre",
-    12: "Dicembre",
+    1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
+    5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
+    9: "Settembre", 10: "Ottobre", 11: "Novembre", 12: "Dicembre",
 }
 
 
-def _find_ctx_with_selector(page, selector, min_count=1):
-    try:
-        if page.locator(selector).count() >= min_count:
-            return page
-    except Exception:
-        pass
-    for fr in list(page.frames):
-        try:
-            if fr.locator(selector).count() >= min_count:
-                return fr
-        except Exception:
-            continue
+def _get_calendar_frame(page):
+    """
+    Trova il frame che contiene il calendario (CalUIFrame.jsp).
+    IMPORTANTE: Il calendario NON è nel contesto principale della pagina!
+    """
+    for frame in page.frames:
+        url = frame.url or ""
+        if "CalUIFrame" in url or "CalUI" in url or "calendar" in url.lower():
+            return frame
     return None
 
 
-def _safe_click(page, selector, debug_log, label=None, timeout=8000):
-    try:
-        loc = page.locator(selector).first
-        if loc.count() == 0:
-            return False
-        loc.click(force=True, timeout=timeout)
-        if label:
-            debug_log.append(f"Agenda: click_ok {label} ({selector})")
-        return True
-    except Exception as e:
-        if label:
-            debug_log.append(f"Agenda: click_fail {label} ({selector}) {type(e).__name__}")
-        return False
+def _iter_contexts_with_calendar(page):
+    """Itera su tutti i contesti, dando priorità al frame del calendario."""
+    cal_frame = _get_calendar_frame(page)
+    if cal_frame:
+        yield cal_frame
+    for frame in page.frames:
+        if frame != cal_frame:
+            yield frame
+    yield page
 
 
-def agenda_open_time_and_agenda_view(page, debug_log):
-    # vai su Time
-    try:
-        page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-        debug_log.append("Agenda: Time click")
-        time.sleep(2.5)
-    except Exception as e:
-        debug_log.append(f"Agenda: Time click fail {type(e).__name__}")
-
-    # prova bottone "Agenda"
-    ok = False
-    for sel in ["#dijit_form_Button_13", "span[aria-label='Agenda']", "button[aria-label='Agenda']"]:
-        if _safe_click(page, sel, debug_log, label="agenda_view"):
-            ok = True
-            time.sleep(1.5)
-            break
-    if not ok:
-        debug_log.append("Agenda: agenda_view_button_not_found_or_not_clickable")
-
-    # conferma presenza DOM calendario
-    t0 = time.time()
-    while time.time() - t0 < 10:
-        if (
-            page.locator(".dojoxCalendar").count() > 0
-            or page.locator("#calendarContainer").count() > 0
-            or page.locator("#dijit_form_Button_10").count() > 0
-        ):
-            debug_log.append("Agenda: calendar_dom_present")
-            return True
-        time.sleep(0.2)
-
-    debug_log.append("Agenda: calendar_dom_not_found")
-    return False
-
-
-def agenda_try_click_month_view(page, debug_log):
-    for sel in ["#dijit_form_Button_10", "span[aria-label='Mese']", "button[aria-label='Mese']"]:
-        if _safe_click(page, sel, debug_log, label="month_view"):
-            time.sleep(1.0)
-            return True
-    debug_log.append("Agenda: month_view_not_set")
-    return False
-
-
-def agenda_get_ref_label(page):
-    for sel in ["label.teamToolbarRefPeriod", "label[data-dojo-attach-point='referencePeriod']"]:
+def agenda_read_via_api(page, context, mese_num, anno, debug_log):
+    """
+    METODO PRINCIPALE: Legge l'agenda tramite chiamate API dirette.
+    
+    Le API del portale Gottardo sono:
+    - /api/time/v2/events?$filter_api=calendarCode=XXX,startTime=...,endTime=...
+    - /api/time/v2/timeoffbalances?$filter_api=year=XXXX
+    """
+    debug_log.append("📡 Metodo API: chiamate dirette...")
+    
+    api_responses = {
+        "events": {},
+        "balances": None,
+    }
+    
+    base_url = "https://selfservice.gottardospa.it/js_rev/JSipert2"
+    
+    # Chiamate API per ogni tipo di evento
+    for code, name in CALENDAR_CODES.items():
         try:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                t = (loc.inner_text() or "").strip().lower()
-                if t:
-                    return t
-        except Exception:
-            pass
-    return ""
-
-
-def agenda_navigate_to_month(page, mese_num, anno, debug_log):
-    target_month_abbr = MONTH_ABBR_IT[mese_num]
-    target_year = str(anno)
-
-    prev_candidates = ["#revit_form_Button_1", "#revit_form_Button_7"]
-    next_candidates = ["#revit_form_Button_2", "#revit_form_Button_8"]
-
-    def click_first(selectors, tag):
-        for sel in selectors:
-            if _safe_click(page, sel, debug_log, label=tag):
-                return sel
-        return None
-
-    # se già ok
-    t = agenda_get_ref_label(page)
-    if target_year in t and target_month_abbr in t:
-        debug_log.append(f"Agenda: ref_ok ({t})")
-        return True
-
-    for i in range(36):
-        t = agenda_get_ref_label(page)
-        if target_year in t and target_month_abbr in t:
-            debug_log.append(f"Agenda: ref_ok step={i} ({t})")
-            return True
-
-        direction = "next"
-        m_year = re.search(r"\b(20\d{2})\b", t)
-        if m_year:
-            cur_y = int(m_year.group(1))
-            if cur_y > anno:
-                direction = "prev"
-            elif cur_y < anno:
-                direction = "next"
-            else:
-                cur_m = None
-                for k, ab in MONTH_ABBR_IT.items():
-                    if ab in t:
-                        cur_m = k
-                        break
-                if cur_m is not None:
-                    direction = "prev" if cur_m > mese_num else "next"
-
-        sel = click_first(prev_candidates if direction == "prev" else next_candidates, tag=f"nav_{direction}")
-        if not sel:
-            debug_log.append("Agenda: nav_buttons_not_found")
-            return False
-
-        time.sleep(0.8)
-
-    debug_log.append("Agenda: nav_giveup")
-    return False
-
-
-def agenda_set_month_via_datepicker(page, mese_num, anno, debug_log):
-    opener = None
-    for sel in ["#revit_form_Button_0", "#revit_form_Button_6", "span.popup-trigger:has(.calendar16)"]:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                opener = loc
-                break
-        except Exception:
-            continue
-
-    if opener is None:
-        debug_log.append("Agenda: datepicker_opener_not_found")
-        return False
-
+            url = f"{base_url}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
+            resp = context.request.get(url, timeout=15000)
+            
+            if resp.ok:
+                try:
+                    data = resp.json()
+                    if data:
+                        api_responses["events"][code] = data
+                        count = len(data) if isinstance(data, list) else 1
+                        debug_log.append(f"  ✅ {code} ({name}): {count} eventi")
+                except Exception:
+                    pass
+        except Exception as e:
+            debug_log.append(f"  ⚠️ {code}: {type(e).__name__}")
+    
+    # Saldo ferie/permessi
     try:
-        opener.click(force=True, timeout=8000)
-        debug_log.append("Agenda: datepicker_click_ok")
+        url = f"{base_url}/api/time/v2/timeoffbalances?$filter_api=year={anno}"
+        resp = context.request.get(url, timeout=10000)
+        if resp.ok:
+            api_responses["balances"] = resp.json()
+            debug_log.append("  ✅ Saldo ferie/permessi OK")
     except Exception:
-        try:
-            opener.evaluate("el => el.click()")
-            debug_log.append("Agenda: datepicker_click_ok_js")
-        except Exception:
-            debug_log.append("Agenda: datepicker_click_fail")
-            return False
-
-    popup_ctx = None
-    t0 = time.time()
-    while time.time() - t0 < 8:
-        popup_ctx = _find_ctx_with_selector(page, ".dijitCalendarMonthLabel", min_count=2)
-        if popup_ctx:
-            break
-        time.sleep(0.2)
-
-    if not popup_ctx:
-        debug_log.append("Agenda: datepicker_popup_not_found")
-        return False
-
-    labels = popup_ctx.locator(".dijitCalendarMonthLabel")
-    if labels.count() < 2:
-        debug_log.append("Agenda: datepicker_labels_missing")
-        return False
-
-    # mese
-    try:
-        labels.nth(0).click()
-        time.sleep(0.2)
-        popup_ctx.locator("body").get_by_text(MONTH_FULL_IT[mese_num], exact=True).last.click(timeout=8000)
-        debug_log.append("Agenda: datepicker_month_ok")
-    except Exception as e:
-        debug_log.append(f"Agenda: datepicker_month_fail {type(e).__name__}")
-
-    # anno
-    try:
-        labels.nth(1).click()
-        time.sleep(0.2)
-        popup_ctx.locator("body").get_by_text(str(anno), exact=True).last.click(timeout=8000)
-        debug_log.append("Agenda: datepicker_year_ok")
-    except Exception as e:
-        debug_log.append(f"Agenda: datepicker_year_fail {type(e).__name__}")
-
-    # giorno 1 (best effort)
-    try:
-        popup_ctx.locator(".dijitCalendarDateTemplate", has_text=re.compile(r"^1$")).first.click(timeout=8000)
-        debug_log.append("Agenda: datepicker_day1_ok")
-        time.sleep(1.0)
-        return True
-    except Exception as e:
-        debug_log.append(f"Agenda: datepicker_day1_fail {type(e).__name__}")
-        return False
+        pass
+    
+    # Processa risultati
+    return _process_api_responses(api_responses, mese_num, anno, debug_log)
 
 
-def agenda_extract_events(page):
-    texts = []
+def _process_api_responses(api_responses, mese_num, anno, debug_log):
+    """Elabora le risposte API e costruisce il risultato finale."""
+    result = {
+        "counts": {k: 0 for k in AGENDA_KEYWORDS},
+        "lines": [],
+        "raw_len": 0,
+        "items_found": 0,
+        "api_data": api_responses,
+        "events_by_type": {}
+    }
+    
+    all_events = []
+    
+    for code, events in api_responses.get("events", {}).items():
+        if not isinstance(events, list):
+            events = [events] if events else []
+        
+        code_name = CALENDAR_CODES.get(code, code)
+        events_this_month = []
+        
+        for event in events:
+            try:
+                # Filtra per mese
+                start_time = event.get("startTime", "") or event.get("start", "") or ""
+                if start_time and len(start_time) >= 7:
+                    try:
+                        event_month = int(start_time[5:7])
+                        if event_month != mese_num:
+                            continue
+                    except ValueError:
+                        pass
+                
+                summary = event.get("summary", "") or event.get("description", "") or code_name
+                event_str = f"{code}: {summary}"
+                all_events.append(event_str)
+                events_this_month.append(event)
+                
+                # Conta keywords
+                summary_upper = (summary + " " + code_name).upper()
+                for kw in AGENDA_KEYWORDS:
+                    if kw in summary_upper:
+                        result["counts"][kw] += 1
+                        
+            except Exception:
+                continue
+        
+        if events_this_month:
+            result["events_by_type"][code_name] = len(events_this_month)
+    
+    result["items_found"] = len(all_events)
+    result["lines"] = list(set(all_events))[:200]
+    result["raw_len"] = sum(len(e) for e in all_events)
+    
+    debug_log.append(f"  📊 Totale: {result['items_found']} eventi nel mese {mese_num}")
+    
+    return result
+
+
+def agenda_read_via_dom(page, mese_num, anno, debug_log):
+    """
+    Metodo DOM (fallback): cerca gli eventi nel frame del calendario.
+    """
+    debug_log.append("🔍 Metodo DOM (fallback)...")
+    
+    result = {
+        "counts": {k: 0 for k in AGENDA_KEYWORDS},
+        "lines": [],
+        "raw_len": 0,
+        "items_found": 0
+    }
+    
+    # Trova il frame del calendario
+    cal_frame = _get_calendar_frame(page)
+    if cal_frame:
+        debug_log.append(f"  Frame calendario: {cal_frame.url[:60]}...")
+        result = _extract_events_from_context(cal_frame, debug_log)
+    else:
+        debug_log.append("  ⚠️ Frame calendario non trovato, cerco ovunque...")
+        for ctx in _iter_contexts_with_calendar(page):
+            temp_result = _extract_events_from_context(ctx, debug_log)
+            if temp_result["items_found"] > result["items_found"]:
+                result = temp_result
+    
+    return result
+
+
+def _extract_events_from_context(ctx, debug_log):
+    """Estrae eventi da un contesto (frame o page)."""
+    result = {
+        "counts": {k: 0 for k in AGENDA_KEYWORDS},
+        "lines": [],
+        "raw_len": 0,
+        "items_found": 0
+    }
+    
     selectors = [
         ".dojoxCalendarEvent",
         ".dijitCalendarEvent",
         "[class*='CalendarEvent']",
-        "[class*='event']",
     ]
-
+    
+    texts = []
+    
     for sel in selectors:
         try:
-            loc = page.locator(sel)
-            n = min(loc.count(), 500)
-            for i in range(n):
-                el = loc.nth(i)
-                t = ""
-                title = ""
-                try:
-                    t = (el.inner_text() or "").strip()
-                except Exception:
-                    t = ""
-                try:
-                    title = (el.get_attribute("title") or "").strip()
-                except Exception:
-                    title = ""
-                combo = " ".join([x for x in [t, title] if x]).strip()
-                if combo:
-                    texts.append(combo)
+            loc = ctx.locator(sel)
+            count = loc.count()
+            
+            if count > 0:
+                debug_log.append(f"  📌 {sel}: {count} elementi")
+                
+                for i in range(min(count, 500)):
+                    try:
+                        el = loc.nth(i)
+                        text = ""
+                        try:
+                            text = (el.inner_text() or "").strip()
+                        except Exception:
+                            pass
+                        
+                        title = ""
+                        try:
+                            title = (el.get_attribute("title") or "").strip()
+                        except Exception:
+                            pass
+                        
+                        combo = " ".join([x for x in [text, title] if x]).strip()
+                        if combo:
+                            texts.append(combo)
+                    except Exception:
+                        continue
         except Exception:
             continue
+    
+    for text in texts:
+        text_upper = text.upper()
+        for kw in AGENDA_KEYWORDS:
+            if kw in text_upper:
+                result["counts"][kw] += 1
+                if text not in result["lines"]:
+                    result["lines"].append(text)
+    
+    result["items_found"] = len(texts)
+    result["raw_len"] = sum(len(t) for t in texts)
+    result["lines"] = result["lines"][:200]
+    
+    return result
 
-    blob = "\n".join(texts)
-    up = blob.upper()
-    counts = {k: up.count(k) for k in AGENDA_KEYWORDS}
-    lines = sorted(list(set([t for t in texts if any(k in t.upper() for k in AGENDA_KEYWORDS)])))
-    return {"counts": counts, "lines": lines[:200], "raw_len": len(blob), "items_found": len(texts)}
 
-
-def agenda_read_month(page, mese_num, anno, debug_log):
-    agenda_open_time_and_agenda_view(page, debug_log)
-    agenda_try_click_month_view(page, debug_log)
-
-    ok = agenda_navigate_to_month(page, mese_num, anno, debug_log)
-    if not ok:
-        debug_log.append("Agenda: nav_failed_try_datepicker")
-        agenda_set_month_via_datepicker(page, mese_num, anno, debug_log)
-
-    data = agenda_extract_events(page)
-    debug_log.append(f"Agenda: extracted items={data.get('items_found', 0)} raw_len={data.get('raw_len', 0)}")
-    return data
+def agenda_read_month(page, mese_num, anno, debug_log, context=None):
+    """
+    Funzione principale per leggere l'agenda.
+    
+    Strategia:
+    1. Prova prima con le API dirette (più affidabile)
+    2. Fallback sul DOM nel frame calendario
+    """
+    debug_log.append(f"=== AGENDA: Lettura {MONTH_FULL_IT.get(mese_num, mese_num)} {anno} ===")
+    
+    # Ottieni context se non passato
+    if context is None:
+        context = page.context if hasattr(page, 'context') else None
+    
+    # Metodo 1: API (preferito)
+    if context:
+        try:
+            result = agenda_read_via_api(page, context, mese_num, anno, debug_log)
+            if result["items_found"] > 0 or result.get("api_data", {}).get("events"):
+                debug_log.append("✅ Dati ottenuti via API")
+                return result
+        except Exception as e:
+            debug_log.append(f"⚠️ API fallita: {type(e).__name__}: {str(e)[:100]}")
+    
+    # Metodo 2: DOM (fallback)
+    try:
+        result = agenda_read_via_dom(page, mese_num, anno, debug_log)
+        if result["items_found"] > 0:
+            debug_log.append("✅ Dati ottenuti via DOM")
+            return result
+    except Exception as e:
+        debug_log.append(f"⚠️ DOM fallito: {type(e).__name__}")
+    
+    debug_log.append("❌ Nessun dato agenda trovato")
+    return {
+        "counts": {k: 0 for k in AGENDA_KEYWORDS},
+        "lines": [],
+        "raw_len": 0,
+        "items_found": 0
+    }
 
 
 # ==============================================================================
@@ -484,7 +474,6 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
     progress = st.empty()
     last_err = None
 
-    # Gemini first (PDF bytes)
     for idx, (nome, model) in enumerate(MODELLI_DISPONIBILI, 1):
         try:
             progress.info(f"🔄 Analisi {tipo}: modello {idx}/{len(MODELLI_DISPONIBILI)} ({nome})...")
@@ -492,7 +481,7 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             out = clean_json_response(getattr(resp, "text", ""))
             if out and isinstance(out, dict):
                 progress.success(f"✅ {tipo.capitalize()} analizzato!")
-                time.sleep(0.6)
+                time.sleep(0.5)
                 progress.empty()
                 return out
         except Exception as e:
@@ -502,14 +491,13 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
                 continue
             continue
 
-    # DeepSeek fallback (needs extracted text)
     if DEEPSEEK_API_KEY and OpenAI is not None:
         try:
             progress.warning(f"⚠️ Quote Gemini esaurite. Fallback DeepSeek per {tipo}...")
             txt = extract_text_from_pdf_any(file_path)
             if not txt or len(txt.strip()) < 50:
                 progress.error("❌ DeepSeek: testo PDF non estraibile (probabile PDF a immagini).")
-                time.sleep(0.6)
+                time.sleep(0.5)
                 progress.empty()
                 return None
 
@@ -526,7 +514,7 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
             out = clean_json_response(r.choices[0].message.content)
             if out and isinstance(out, dict):
                 progress.success(f"✅ {tipo.capitalize()} analizzato (DeepSeek)!")
-                time.sleep(0.6)
+                time.sleep(0.5)
                 progress.empty()
                 return out
         except Exception:
@@ -623,7 +611,7 @@ def pulisci_file(path_busta, path_cart):
 
 
 # ==============================================================================
-# Navigation helpers (fix overlay/hidden tab)
+# Navigation helpers
 # ==============================================================================
 def safe_click_mydata(page, debug_log=None):
     try:
@@ -632,7 +620,6 @@ def safe_click_mydata(page, debug_log=None):
     except Exception:
         pass
 
-    # spegne tooltip/popup che intercetta click (best effort)
     try:
         page.evaluate(
             """
@@ -647,7 +634,6 @@ def safe_click_mydata(page, debug_log=None):
     except Exception:
         pass
 
-    # click JS sul label nav
     try:
         page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
         if debug_log is not None:
@@ -657,7 +643,6 @@ def safe_click_mydata(page, debug_log=None):
     except Exception:
         pass
 
-    # fallback: force click testo
     try:
         page.locator("text=I miei dati").first.click(force=True, timeout=8000)
         if debug_log is not None:
@@ -671,24 +656,20 @@ def safe_click_mydata(page, debug_log=None):
 
 
 def open_documenti(page, debug_log=None):
-    # chiudi overlay
     try:
         page.keyboard.press("Escape")
         time.sleep(0.2)
     except Exception:
         pass
 
-    # assicurati che "I miei dati" sia selezionabile
     if not safe_click_mydata(page, debug_log or []):
         return False
 
-    # aspetta i tab (anche hidden)
     try:
         page.wait_for_selector("span[id^='lnktab_']", timeout=15000)
     except Exception:
         pass
 
-    # 1) click JS su id specifico (dal tuo errore)
     for js_id in ["lnktab_2_label", "lnktab_2"]:
         try:
             page.evaluate(f"document.getElementById('{js_id}')?.click()")
@@ -699,7 +680,6 @@ def open_documenti(page, debug_log=None):
         except Exception:
             continue
 
-    # 2) fallback: force click regex sul testo
     try:
         page.locator("span", has_text=re.compile(r"\bDocumenti\b", re.I)).first.click(force=True, timeout=8000)
         if debug_log is not None:
@@ -709,15 +689,14 @@ def open_documenti(page, debug_log=None):
         if debug_log is not None:
             debug_log.append(f"Documenti: click force fail ({type(e).__name__})")
 
-    # conferma ingresso sezione: cerca "Cedolino"
     try:
         page.wait_for_selector("text=Cedolino", timeout=15000)
         if debug_log is not None:
-            debug_log.append("Documenti: Cedolino visible/present")
+            debug_log.append("Documenti: Cedolino found")
         return True
     except Exception:
         if debug_log is not None:
-            debug_log.append("Documenti: Cedolino not found")
+            debug_log.append("Documenti: Cedolino NOT found")
         return False
 
 
@@ -795,17 +774,28 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 browser.close()
                 return None, None, "LOGIN_FALLITO"
 
-            # AGENDA (best effort)
+            # AGENDA (METODO CORRETTO - API)
             try:
-                st_status.info("🗓️ Lettura agenda...")
+                st_status.info("🗓️ Lettura agenda (API)...")
                 agenda_debug = []
-                agenda_data = agenda_read_month(page, mese_num, anno, agenda_debug)
+                
+                # Attendi che la pagina carichi completamente
+                time.sleep(3)
+                
+                # Usa il nuovo metodo che passa il context per le chiamate API
+                agenda_data = agenda_read_month(page, mese_num, anno, agenda_debug, context=context)
+                
                 st.session_state["agenda_data"] = agenda_data
                 st.session_state["agenda_debug"] = agenda_debug
-                st_status.success("✅ Agenda letta")
+                
+                if agenda_data.get("items_found", 0) > 0:
+                    st_status.success(f"✅ Agenda: {agenda_data['items_found']} eventi trovati")
+                else:
+                    st_status.info("ℹ️ Agenda: nessun evento nel mese selezionato")
+                    
             except Exception as e:
                 st.session_state["agenda_data"] = None
-                st.session_state["agenda_debug"] = [f"Agenda error: {type(e).__name__}"]
+                st.session_state["agenda_debug"] = [f"Agenda error: {type(e).__name__}: {str(e)}"]
                 st_status.warning("⚠️ Agenda non disponibile")
 
             # BUSTA PAGA
@@ -821,7 +811,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
 
                 time.sleep(1.5)
 
-                # entra in "Cedolino"
                 try:
                     page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=8000)
                 except Exception:
@@ -868,7 +857,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             except Exception as e:
                 st.error(f"❌ Errore busta: {e}")
 
-            # CARTELLINO (popup + GET PDF bytes) — sempre EMBED=y
+            # CARTELLINO
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Download cartellino...")
                 debug_log = []
@@ -879,28 +868,25 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 def _save_pdf_via_request(url: str) -> bool:
                     try:
                         url = _normalize_url(url)
-                        url = _ensure_query(url, "EMBED", "y")  # ✅ SOLO questa variante
+                        url = _ensure_query(url, "EMBED", "y")
 
                         resp = context.request.get(url, timeout=60000)
                         ct = (resp.headers.get("content-type") or "").lower()
                         body = resp.body()
 
                         debug_log.append(f"🌐 HTTP GET -> status={resp.status}, content-type={ct}, bytes={len(body)}")
-                        debug_log.append(f"🔎 First bytes: {body[:8]!r}")
 
                         if body[:4] == b"%PDF":
                             Path(path_cart).write_bytes(body)
-                            debug_log.append("✅ Salvato PDF raw da HTTP (firma %PDF ok)")
+                            debug_log.append("✅ Salvato PDF raw da HTTP")
                             return True
 
-                        debug_log.append("⚠️ Response non sembra un PDF (%PDF mancante)")
                         return False
                     except Exception as e:
                         debug_log.append(f"❌ Errore GET PDF: {str(e)[:220]}")
                         return False
 
                 try:
-                    # torna a home + Time + Cartellino
                     page.evaluate("window.scrollTo(0, 0)")
                     time.sleep(1.0)
                     try:
@@ -922,14 +908,11 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     debug_log.append("⏰ Navigazione a Time...")
                     page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     time.sleep(3)
-                    debug_log.append("✅ Time aperto")
 
                     debug_log.append("📋 Apertura Cartellino presenze...")
                     page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
-                    debug_log.append("✅ Cartellino presenze aperto")
 
-                    # imposta date
                     debug_log.append(f"📅 Impostazione date: {d_from_vis} - {d_to_vis}")
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
@@ -948,70 +931,52 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         al.type(d_to_vis, delay=80)
                         al.press("Tab")
                         time.sleep(0.6)
-                        debug_log.append("✅ Date impostate")
 
-                    # ricerca
                     debug_log.append("🔍 Esecuzione ricerca...")
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    time.sleep(0.6)
                     page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
-                    debug_log.append("✅ Click 'Esegui ricerca' OK")
                     time.sleep(8)
 
                     try:
                         page.wait_for_selector("text=Risultati della ricerca", timeout=20000)
-                        debug_log.append("✅ Risultati caricati")
                     except Exception:
-                        debug_log.append("⚠️ Timeout risultati")
+                        pass
 
-                    # trova riga + lente
-                    debug_log.append("🔍 Ricerca riga cartellino...")
                     pattern_da_provare = [
                         f"{mese_num:02d}/{anno}",
                         f"{mese_num}/{anno}",
-                        f"{mese_num}/{str(anno)[-2:]}",
                     ]
 
                     riga_target = None
                     for pattern in pattern_da_provare:
-                        debug_log.append(f"🔍 Cerco pattern: '{pattern}'")
                         riga_test = page.locator(f"tr:has-text('{pattern}')").first
                         if riga_test.count() > 0 and riga_test.locator("img[src*='search']").count() > 0:
                             riga_target = riga_test
-                            debug_log.append(f"✅ Riga trovata con pattern: '{pattern}'")
                             break
 
                     if not riga_target:
-                        debug_log.append("⚠️ Riga non trovata, fallback: prima icona search")
                         icona = page.locator("img[src*='search']").first
                     else:
                         icona = riga_target.locator("img[src*='search']").first
 
-                    if icona.count() == 0:
-                        debug_log.append("❌ Icona lente non trovata")
-                    else:
-                        debug_log.append("📥 Click lente: attendo popup...")
+                    if icona.count() > 0:
                         with context.expect_page(timeout=20000) as popup_info:
                             icona.click()
                         popup = popup_info.value
 
-                        # polling url
                         t0 = time.time()
                         last_url = popup.url
                         while time.time() - t0 < 20:
                             u = popup.url
                             if u and u != "about:blank":
                                 last_url = u
-                                if ("SERVIZIO=JPSC" in u) and ("ATTIVITA=visualizza" in u) and ("DOPDF=y" in u):
+                                if ("SERVIZIO=JPSC" in u) and ("ATTIVITA=visualizza" in u):
                                     break
                             time.sleep(0.25)
 
                         popup_url = _normalize_url(last_url)
-                        debug_log.append(f"✅ Popup catturato: {popup_url}")
-
                         ok = _save_pdf_via_request(popup_url)
+                        
                         if not ok:
-                            debug_log.append("↩️ Fallback: popup.pdf()")
                             try:
                                 popup.pdf(path=path_cart, format="A4")
                             except Exception:
@@ -1022,34 +987,19 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         except Exception:
                             pass
 
-                    # verifica file
                     if os.path.exists(path_cart):
                         size = os.path.getsize(path_cart)
-                        debug_log.append(f"📊 File trovato: {size:,} bytes")
                         if size > 5000:
                             cart_ok = True
                             st_status.success(f"✅ Cartellino OK ({size:,} bytes)")
-                            debug_log.append("✅ CARTELLINO VALIDO")
-                        else:
-                            st.warning(f"⚠️ PDF piccolo ({size:,} bytes) - potrebbe essere vuoto")
-                            debug_log.append("⚠️ FILE PICCOLO")
-                    else:
-                        st.error("❌ File non trovato")
-                        debug_log.append("❌ FILE NON TROVATO")
 
                 except Exception as e:
-                    debug_log.append(f"❌ ERRORE GENERALE CARTELLINO: {str(e)[:240]}")
+                    debug_log.append(f"❌ ERRORE: {str(e)[:240]}")
                     st.error(f"❌ Errore cartellino: {e}")
 
-                with st.expander("🔍 LOG DEBUG COMPLETO (cartellino)"):
+                with st.expander("🔍 LOG DEBUG (cartellino)"):
                     for x in debug_log:
                         st.text(x)
-                    log_path = work_dir / f"debug_cartellino_{mese_num}_{anno}.txt"
-                    try:
-                        log_path.write_text("\n".join(debug_log), encoding="utf-8")
-                        st.info(f"📝 Log salvato: {log_path}")
-                    except Exception:
-                        pass
 
             browser.close()
 
@@ -1101,9 +1051,11 @@ with st.sidebar:
         sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
         sel_mese = st.selectbox(
             "Mese",
-            ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-             "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"],
-            index=11
+            [
+                "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre",
+            ],
+            index=11,
         )
 
         tipo_doc = st.radio("Tipo documento", ["📄 Cedolino Mensile", "🎄 Tredicesima"], index=0)
@@ -1114,8 +1066,11 @@ with st.sidebar:
 
             tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
             busta, cart, errore = scarica_documenti_automatici(
-                sel_mese, sel_anno, st.session_state.get("username"), st.session_state.get("password"),
-                tipo_documento=tipo
+                sel_mese,
+                sel_anno,
+                st.session_state.get("username"),
+                st.session_state.get("password"),
+                tipo_documento=tipo,
             )
 
             if errore == "LOGIN_FALLITO":
@@ -1155,12 +1110,9 @@ if st.session_state.get("busta") or st.session_state.get("cart"):
         st.success("🎄 **Cedolino TREDICESIMA**")
 
     st.divider()
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "💰 Dettaglio Stipendio",
-        "📅 Cartellino & Presenze",
-        "📊 Analisi & Confronto",
-        "🗓️ Agenda",
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["💰 Dettaglio Stipendio", "📅 Cartellino & Presenze", "📊 Analisi & Confronto", "🗓️ Agenda"]
+    )
 
     with tab1:
         if db:
@@ -1171,7 +1123,7 @@ if st.session_state.get("busta") or st.session_state.get("cart"):
             par = db.get("par", {})
 
             k1, k2, k3 = st.columns(3)
-            k1.metric("💵 NETTO IN BUSTA", f"€ {dg.get('netto', 0):.2f}", delta="Pagamento")
+            k1.metric("💵 NETTO IN BUSTA", f"€ {dg.get('netto', 0):.2f}")
             k2.metric("📊 Lordo Totale", f"€ {comp.get('lordo_totale', 0):.2f}")
             k3.metric("📆 Giorni Pagati", int(dg.get("giorni_pagati", 0)))
 
@@ -1230,20 +1182,12 @@ if st.session_state.get("busta") or st.session_state.get("cart"):
 
             st.subheader("🔍 Analisi Discrepanze")
             if reali == 0:
-                st.info("ℹ️ Cartellino senza timbrature dettagliate: usa i giorni pagati in busta come riferimento.")
-                st.write(f"📋 Giorni pagati in busta: **{int(pagati)}**")
+                st.info("ℹ️ Cartellino senza timbrature: usa i giorni pagati.")
             else:
                 diff = reali - pagati
                 col_a, col_b = st.columns(2)
                 col_a.metric("Giorni Pagati (Busta)", pagati)
                 col_b.metric("Giorni Lavorati (Cartellino)", reali, delta=f"{diff:.1f}")
-
-                if abs(diff) < 0.5:
-                    st.success("✅ Giorni lavorati = giorni pagati")
-                elif diff > 0:
-                    st.info(f"ℹ️ Hai lavorato **{diff:.1f}** giorni in più")
-                else:
-                    st.warning(f"⚠️ **{abs(diff):.1f}** giorni pagati in più")
         elif tipo == "tredicesima":
             st.info("ℹ️ Analisi non disponibile per Tredicesima")
         else:
@@ -1252,15 +1196,42 @@ if st.session_state.get("busta") or st.session_state.get("cart"):
     with tab4:
         st.subheader("🗓️ Agenda - Eventi/Anomalie")
         ad = st.session_state.get("agenda_data")
-        if isinstance(ad, dict):
+        
+        if isinstance(ad, dict) and (ad.get("items_found", 0) > 0 or ad.get("api_data")):
+            # Mostra conteggi per keyword
+            st.markdown("### Conteggi per tipo")
             cols = st.columns(4)
-            for i, k in enumerate(AGENDA_KEYWORDS):
-                cols[i % 4].metric(k, int(ad.get("counts", {}).get(k, 0)))
-            st.caption(f"Eventi trovati: {ad.get('items_found', 0)} | raw_len: {ad.get('raw_len', 0)}")
-            with st.expander("Righe trovate (match keyword)"):
-                st.write(ad.get("lines", []))
+            for i, kw in enumerate(AGENDA_KEYWORDS):
+                count = ad.get("counts", {}).get(kw, 0)
+                if count > 0:
+                    cols[i % 4].metric(kw, count)
+            
+            # Mostra eventi per tipo (dal nuovo formato API)
+            events_by_type = ad.get("events_by_type", {})
+            if events_by_type:
+                st.markdown("### Eventi per categoria")
+                for tipo_ev, count in events_by_type.items():
+                    st.write(f"**{tipo_ev}:** {count} eventi")
+            
+            st.caption(f"📊 Totale eventi: {ad.get('items_found', 0)} | raw_len: {ad.get('raw_len', 0)}")
+            
+            with st.expander("📋 Dettaglio eventi"):
+                lines = ad.get("lines", [])
+                if lines:
+                    for line in lines[:50]:
+                        st.text(f"• {line}")
+                else:
+                    st.info("Nessun evento con keyword rilevanti")
+            
+            # Mostra dati API raw per debug
+            api_data = ad.get("api_data", {})
+            if api_data.get("balances"):
+                with st.expander("🏖️ Saldo Ferie/Permessi (API)"):
+                    st.json(api_data["balances"])
         else:
-            st.info("Agenda non disponibile per questo mese (o selettori non agganciati).")
+            st.info("ℹ️ Nessun evento agenda per questo mese.")
 
-        with st.expander("Debug agenda"):
-            st.write(st.session_state.get("agenda_debug", []))
+        with st.expander("🔍 Debug agenda"):
+            debug = st.session_state.get("agenda_debug", [])
+            for line in debug:
+                st.text(line)
