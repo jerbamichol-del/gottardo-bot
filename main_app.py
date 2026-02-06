@@ -430,6 +430,52 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         # Se non trova il frame specifico, usa il main frame ma cerca anche negli altri
         target_frames = [calendar_frame] if calendar_frame else page.frames
         
+        # === NAVIGAZIONE AL MESE CORRETTO ===
+        result["debug"].append(f"🗓️ Verifico mese target: {mese_num}/{anno}")
+        for frame in target_frames:
+            try:
+                # Cerca l'elemento che mostra il mese corrente (es: "Ottobre 2025")
+                # Selettori tipici Dojo/ZK per titolo calendario
+                date_selectors = [".dojoxCalendarTitle", ".dijitCalendarTitle", ".z-calendar-title", ".title", "span[id*='title']"]
+                
+                current_date_text = ""
+                for ds in date_selectors:
+                    if frame.locator(ds).first.is_visible():
+                        current_date_text = frame.locator(ds).first.inner_text()
+                        break
+                
+                if current_date_text:
+                    result["debug"].append(f"  📅 Mese visualizzato: {current_date_text}")
+                    
+                    # Logica semplice: se il mese/anno non c'è nel titolo, naviga
+                    # Cerchiamo pulsanti prev/next
+                    max_moves = 12
+                    moves = 0
+                    
+                    # Mappa mesi
+                    target_month_name = MESI_IT[mese_num - 1].upper() # es: OTTOBRE
+                    
+                    while moves < max_moves:
+                        current_text_upper = frame.locator("body").inner_text().upper() # Testo grezzo del body
+                        if target_month_name in current_text_upper and str(anno) in current_text_upper:
+                            result["debug"].append("  ✅ Mese corretto raggiunto!")
+                            break
+                        
+                        # Cerca bottoni prev/next
+                        # Tipici bottoni: < > o frecce
+                        prev_btns = frame.locator("[class*='Prev'], [class*='Previous'], [title*='Precedente'], [aria-label*='Previous']")
+                        
+                        if prev_btns.count() > 0:
+                            prev_btns.first.click()
+                            time.sleep(1.5) # Aspetta reload
+                            moves += 1
+                            result["debug"].append(f"  ⬅️ Click Precedente ({moves})")
+                        else:
+                            result["debug"].append("  ⚠️ Bottone Precedente non trovato")
+                            break
+            except Exception as e:
+                result["debug"].append(f"  ⚠️ Errore navigazione mese: {e}")
+        
         # Selettori specifici per calendari Dojo/Dijit/ZK
         event_selectors = [
             ".dojoxCalendarEvent", ".dijitCalendarEvent", 
