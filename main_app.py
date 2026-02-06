@@ -348,43 +348,57 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
-            context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36")
+            # User agent reale per evitare blocchi
+            context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
-            # LOGIN MIGLIORATO
+            # LOGIN ROBUSTO
             st_status.info("🔐 Login...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-            
-            # Verifica se siamo sulla pagina di login
-            if page.locator('input[type="text"]').count() > 0:
-                page.fill('input[type="text"]', username)
-                page.fill('input[type="password"]', password)
-                page.press('input[type="password"]', 'Enter')
-            
-            # Attesa intelligente
             try:
-                # Aspetta o il successo O l'errore
-                page.wait_for_load_state("networkidle")
-                time.sleep(2)
-
-                # Controllo errori comuni Zucchetti
-                if page.locator("text=Login non valido").count() > 0 or page.locator("text=Utente o password errati").count() > 0:
-                     browser.close()
-                     return None, None, "❌ PASSWORD ERRATA (Il sito dice: Login non valido)"
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", timeout=60000, wait_until="commit")
+                page.wait_for_load_state("domcontentloaded")
                 
-                if page.locator("text=Utente già collegato").count() > 0:
-                    # Se utente già collegato, prova a forzare o proseguire
-                    try: page.click("text=Continua", timeout=2000); time.sleep(2)
-                    except: pass
+                # Se c'è form login, compila
+                if page.locator('input[type="text"]').count() > 0:
+                    page.fill('input[type="text"]', username)
+                    page.fill('input[type="password"]', password)
+                    page.click("input[type='image'], button[type='submit']", timeout=5000) # Click esplicito a volte meglio di Enter
+                    # O fallback Enter se non trova bottone
+                    # page.press('input[type="password"]', 'Enter')
+                
+                # Attesa post-login (loop di controllo)
+                logged_in = False
+                for _ in range(10): # Prova per 20-30 secondi
+                    time.sleep(2)
+                    # 1. Caso Successo
+                    if page.locator("text=I miei dati").count() > 0 or page.locator(".revitMainLayout").count() > 0:
+                        logged_in = True
+                        break
+                    
+                    # 2. Caso "Utente già collegato"
+                    if page.locator("text=Utente già collegato").count() > 0 or page.locator("text=Sessione attiva").count() > 0:
+                        st_status.warning("⚠️ Rilevato utente già collegato, forzo accesso...")
+                        # Cerca bottoni comuni di conferma
+                        btns = page.locator("button, input[type='button'], span[role='button']")
+                        for i in range(btns.count()):
+                            txt = btns.nth(i).inner_text().lower()
+                            if "continua" in txt or "si" in txt or "yes" in txt or "chiudi" in txt:
+                                btns.nth(i).click(force=True)
+                                break
+                
+                if not logged_in:
+                    # Ultimo controllo selettore
+                    page.wait_for_selector("text=I miei dati", timeout=10000)
 
-                page.wait_for_selector("text=I miei dati", timeout=20000)
                 debug_info.append("Login: OK")
+                st_status.success("✅ Login OK")
+
             except Exception as e:
-                # Screenshot di debug se fallisce
-                page.screenshot(path="login_debug.png")
+                # Screenshot errore vitale
+                page.screenshot(path="login_error.png")
                 browser.close()
-                return None, None, "❌ TIMEOUT LOGIN (Controlla login_debug.png o riprova)"
+                return None, None, "LOGIN_TIMEOUT_SCREENSHOT"
 
             # AGENDA
             st_status.info("🗓️ Agenda...")
@@ -399,11 +413,11 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             # BUSTA PAGA
             st_status.info("💰 Busta Paga...")
             try:
-                # Navigazione sicura
-                if page.locator("text=I miei dati").is_visible():
-                    page.click("text=I miei dati")
+                # Assicurati di essere in Home
+                if page.locator("text=I miei dati").count() > 0:
+                    page.click("text=I miei dati", force=True)
                 
-                page.wait_for_selector("text=Documenti", timeout=10000).click()
+                page.wait_for_selector("text=Documenti", timeout=15000).click()
                 time.sleep(3)
                 try: page.click("text=Cedolino", force=True)
                 except: pass
@@ -417,7 +431,7 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                         found = links.nth(i); break
                 
                 if found:
-                    with page.expect_download(timeout=30000) as dl_info:
+                    with page.expect_download(timeout=60000) as dl_info:
                         found.click()
                     dl_info.value.save_as(path_busta)
                     if os.path.exists(path_busta): 
@@ -426,25 +440,19 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                 else: debug_info.append("Busta: Non trovata")
             except Exception as e: debug_info.append(f"Busta Error: {e}")
 
-            # CARTELLINO
+            # CARTELLINO (Versione EMBED=y ottimizzata)
             if tipo_documento != "tredicesima":
                 st_status.info("📅 Cartellino...")
                 try:
-                    # Reset Home
-                    page.evaluate("window.scrollTo(0, 0)")
-                    time.sleep(1)
-                    try: page.keyboard.press("Escape")
-                    except: pass
+                    # Reset totale navigazione
+                    page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+                    page.wait_for_load_state("domcontentloaded")
                     
                     # Navigazione Menu
-                    try:
-                        page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                        time.sleep(3)
-                        page.evaluate("document.getElementById('lnktab_5_label')?.click()")
-                        time.sleep(5)
-                    except:
-                        debug_info.append("Cartellino: Menu non cliccabile")
-                        raise Exception("Menu fail")
+                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+                    time.sleep(2)
+                    page.evaluate("document.getElementById('lnktab_5_label')?.click()")
+                    time.sleep(4)
 
                     # Date
                     try:
@@ -460,21 +468,23 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     try: page.locator("//span[contains(text(),'Esegui ricerca')]").last.click(force=True)
                     except: page.keyboard.press("Enter")
-                    time.sleep(4)
+                    time.sleep(5)
 
-                    # Download Popup EMBED=y
+                    # Download Popup
                     row_txt = f"{mese_num:02d}/{anno}"
                     row = page.locator(f"tr:has-text('{row_txt}')").first
                     icon = row.locator("img[src*='search']").first if row.count()>0 else page.locator("img[src*='search']").first
                     
                     if icon.count()>0:
-                        with context.expect_page(timeout=20000) as pi:
+                        with context.expect_page(timeout=30000) as pi:
                             icon.click()
                         popup = pi.value
+                        
+                        # Trick URL
                         url = (popup.url or "").replace("/js_rev//", "/js_rev/")
                         if "EMBED=y" not in url: url += ("&" if "?" in url else "?") + "EMBED=y"
                         
-                        resp = context.request.get(url, timeout=60000)
+                        resp = context.request.get(url, timeout=90000)
                         if resp.body()[:4] == b"%PDF":
                             Path(path_cart).write_bytes(resp.body())
                             c_ok = True
@@ -498,6 +508,21 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
     
     st.session_state['debug_info'] = debug_info
     return (path_busta if b_ok else None), (path_cart if c_ok else None), None
+
+# AGGIORNA ANCHE LA PARTE SOTTO NELLA UI PER MOSTRARE LO SCREENSHOT
+# ... (nella sidebar, sotto il bottone AVVIA) ...
+        if st.button("🚀 AVVIA ANALISI", type="primary"):
+            # ... reset vari ...
+            pb, pc, err = scarica_documenti_automatici(...)
+            
+            if err == "LOGIN_TIMEOUT_SCREENSHOT":
+                st.error("❌ Errore Login! Ecco cosa vede il bot:")
+                if os.path.exists("login_error.png"):
+                    st.image("login_error.png", caption="Schermata di errore")
+            elif err:
+                st.error(err)
+            else:
+                # ... successo ...
 
 
 # ==============================================================================
@@ -594,4 +619,5 @@ if st.session_state.get('done'):
         
         st.write("LOG:")
         st.write(st.session_state.get('debug_info', []))
+
 
