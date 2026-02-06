@@ -416,72 +416,72 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         
         time.sleep(4)
         
-        # === CATTURA EVENTI DAL DOM ===
-        result["debug"].append("🔍 Ricerca eventi nel DOM del calendario...")
+        # === CATTURA EVENTI DAL DOM (DENTRO IFRAME) ===
+        result["debug"].append("🔍 Ricerca eventi nell'IFRAME del calendario...")
         
-        # Selettori specifici per calendari Dojo/Dijit/ZK (usati da portali HR italiani)
+        # Cerca il frame del calendario
+        calendar_frame = None
+        for frame in page.frames:
+            if "CalUI" in frame.name or "calendar" in frame.url:
+                calendar_frame = frame
+                result["debug"].append(f"  ✅ Frame calendario trovato: {frame.name}")
+                break
+        
+        # Se non trova il frame specifico, usa il main frame ma cerca anche negli altri
+        target_frames = [calendar_frame] if calendar_frame else page.frames
+        
+        # Selettori specifici per calendari Dojo/Dijit/ZK
         event_selectors = [
-            # Calendari Dojo
-            ".dojoxCalendarEvent",
-            ".dijitCalendarEvent", 
-            "[class*='calendarEvent']",
-            "[class*='CalendarEvent']",
-            # Eventi con background colorato (barre)
-            "[style*='background'][style*='rgb']",
-            # ZK Framework (usato da Zucchetti)
-            ".z-calendar-event",
-            "[class*='z-event']",
-            # Generici
-            "div[class*='event']",
-            "[role='button'][class*='event']",
-            # Celle con eventi per titolo/testo
-            "*:has-text('OMESSA')",
-            "*:has-text('FERIE')",
-            "*:has-text('MALATTIA')",
-            "*:has-text('RIPOSO')"
+            ".dojoxCalendarEvent", ".dijitCalendarEvent", 
+            "[class*='calendarEvent']", "[class*='CalendarEvent']",
+            "[style*='background'][style*='rgb']", # Barre colorate
+            ".z-calendar-event", "[class*='z-event']",
+            "div[class*='event']", "[role='button'][class*='event']",
+            "*:has-text('OMESSA')", "*:has-text('FERIE')", 
+            "*:has-text('MALATTIA')", "*:has-text('RIPOSO')"
         ]
         
         dom_events = []
         
-        # Prima: cerca con selettori CSS
-        for sel in event_selectors:
+        for frame in target_frames:
             try:
-                elements = page.locator(sel)
-                count = elements.count()
-                if count > 0 and count < 200:  # Evita troppi elementi
-                    result["debug"].append(f"📌 {sel}: {count} elementi")
-                    for i in range(min(count, 30)):
-                        try:
-                            el = elements.nth(i)
-                            text = (el.inner_text() or "").strip()
-                            title = (el.get_attribute("title") or "").strip()
-                            aria = (el.get_attribute("aria-label") or "").strip()
-                            content = text or title or aria
-                            
-                            # Filtra solo eventi rilevanti
-                            if content and len(content) > 2:
-                                content_upper = content.upper()
-                                if any(kw in content_upper for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO", "OMT", "FEP", "MAL", "RCS", "RIC"]):
-                                    dom_events.append(content)
-                                    result["debug"].append(f"  → Trovato: {content[:40]}")
-                        except:
-                            continue
-            except:
-                continue
-        
-        # Seconda strategia: cerca direttamente il testo nella pagina
-        if len(dom_events) == 0:
-            result["debug"].append("🔎 Ricerca testo diretto nella pagina...")
+                # Aspetta che il frame carichi
+                frame.wait_for_load_state("domcontentloaded", timeout=2000)
+            except: pass
             
-            for keyword in ["OMESSA TIMBRATURA", "FERIE PIANIFICATE", "RIPOSO COMPENSATIVO", "MALATTIA"]:
+            for sel in event_selectors:
                 try:
-                    matches = page.locator(f"text={keyword}").count()
-                    if matches > 0:
-                        result["debug"].append(f"  📝 '{keyword}': {matches} occorrenze")
-                        for i in range(matches):
-                            dom_events.append(keyword)
-                except:
-                    pass
+                    elements = frame.locator(sel)
+                    count = elements.count()
+                    if count > 0 and count < 200:
+                        result["debug"].append(f"📌 Frame '{frame.name}' - {sel}: {count}")
+                        for i in range(min(count, 30)):
+                            try:
+                                el = elements.nth(i)
+                                text = (el.inner_text() or "").strip()
+                                title = (el.get_attribute("title") or "").strip()
+                                aria = (el.get_attribute("aria-label") or "").strip()
+                                content = text or title or aria
+                                
+                                if content and len(content) > 2:
+                                    content_upper = content.upper()
+                                    if any(kw in content_upper for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO", "OMT", "FEP", "MAL", "RCS", "RIC"]):
+                                        dom_events.append(content)
+                            except: continue
+                except: continue
+        
+        # Seconda strategia: ricerca testo diretto (nei frame)
+        if len(dom_events) == 0:
+            result["debug"].append("🔎 Ricerca testo diretto nei frame...")
+            for frame in target_frames:
+                for keyword in ["OMESSA TIMBRATURA", "FERIE PIANIFICATE", "RIPOSO COMPENSATIVO", "MALATTIA"]:
+                    try:
+                        matches = frame.locator(f"text={keyword}").count()
+                        if matches > 0:
+                            result["debug"].append(f"  📝 Frame '{frame.name}' - '{keyword}': {matches}")
+                            for i in range(matches):
+                                dom_events.append(keyword)
+                    except: pass
         
         result["debug"].append(f"📋 Totale eventi DOM: {len(dom_events)}")
         
