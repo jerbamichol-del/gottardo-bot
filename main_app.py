@@ -132,14 +132,46 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
             # BUSTA
             st.toast("Scarico Busta...", icon="💰")
             try:
-                # Navigazione robusta Documenti
-                try: page.locator("text=Documenti").first.click()
-                except: page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
+                # NAVIGAZIONE CORRETTA: 1) I miei dati -> 2) Tab Documenti -> 3) Espandi Cedolino
+                
+                # 1) Clicca su "I miei dati" (menu principale)
+                try:
+                    page.keyboard.press("Escape")  # Chiudi eventuali popup
+                    time.sleep(0.3)
+                except: pass
+                
+                try:
+                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
+                except:
+                    page.locator("text=I miei dati").first.click(force=True)
                 time.sleep(2)
                 
-                try: page.locator("text=Cedolino").first.click()
+                # 2) Attendi che i tabs siano visibili e clicca su "Documenti"
+                try:
+                    page.wait_for_selector("span[id^='lnktab_']", timeout=10000)
                 except: pass
-                time.sleep(3)
+                
+                for js_id in ["lnktab_2_label", "lnktab_2"]:
+                    try:
+                        page.evaluate(f"document.getElementById('{js_id}')?.click()")
+                        break
+                    except: continue
+                
+                try:
+                    page.locator("span", has_text=re.compile(r"\bDocumenti\b", re.I)).first.click(force=True)
+                except: pass
+                time.sleep(2)
+                
+                # 3) Aspetta che appaia "Cedolino" e clicca per espandere
+                try:
+                    page.wait_for_selector("text=Cedolino", timeout=10000)
+                except: pass
+                
+                try:
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except:
+                    page.locator("text=Cedolino").first.click(force=True)
+                time.sleep(4)  # Attendi che i link si carichino
                 
                 # Cerca link (Strategia Multi-Pattern)
                 with page.expect_download(timeout=20000) as dl_info:
@@ -147,7 +179,10 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                         page.get_by_text(re.compile(f"Tredicesima.*{anno}", re.I)).first.click()
                     else:
                         links = page.locator("a")
+                        total = links.count()
                         found = False
+                        link_texts = []  # Per debug
+                        
                         # Patterns da cercare
                         patterns = [
                             f"{mese_nome} {anno}",      # Ottobre 2025
@@ -157,30 +192,46 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                         ]
                         
                         # Itera sui link
-                        for i in range(links.count()):
-                            txt = (links.nth(i).inner_text() or "").strip()
-                            # Salta link troppo corti o Tredicesima se non richiesta
-                            if len(txt) < 5 or "Tredicesima" in txt: continue
-                            
-                            # Cerca match
-                            for pat in patterns:
-                                if pat.lower() in txt.lower():
-                                    links.nth(i).click()
-                                    found = True
-                                    break
-                            if found: break
+                        for i in range(total):
+                            try:
+                                txt = (links.nth(i).inner_text() or "").strip()
+                                if not txt or len(txt) < 3: continue
+                                
+                                # Raccogli per debug
+                                if any(m.lower() in txt.lower() for m in MESI_IT) or str(anno) in txt:
+                                    link_texts.append(txt)
+                                
+                                # Salta link troppo corti o Tredicesima se non richiesta
+                                if len(txt) < 5 or "Tredicesima" in txt or "13" in txt or "XIII" in txt: 
+                                    continue
+                                
+                                # Cerca match
+                                for pat in patterns:
+                                    if pat.lower() in txt.lower():
+                                        links.nth(i).click()
+                                        found = True
+                                        break
+                                if found: break
+                            except Exception:
+                                continue
                         
                         if not found:
                             # Fallback estremo: cerca solo Mese e Anno separati
-                            for i in range(links.count()):
-                                txt = links.nth(i).inner_text() or ""
-                                if mese_nome.lower() in txt.lower() and str(anno) in txt:
-                                    links.nth(i).click()
-                                    found = True
-                                    break
+                            for i in range(total):
+                                try:
+                                    txt = links.nth(i).inner_text() or ""
+                                    if mese_nome.lower() in txt.lower() and str(anno) in txt:
+                                        if "Tredicesima" not in txt and "13" not in txt:
+                                            links.nth(i).click()
+                                            found = True
+                                            break
+                                except Exception:
+                                    continue
                                     
                         if not found: 
                             st.error(f"Link non trovato per i pattern: {patterns}")
+                            if link_texts:
+                                st.warning(f"Link disponibili trovati: {link_texts[:10]}")
                             raise Exception("Link Busta introvabile")
                 
                 dl_info.value.save_as(local_busta)
