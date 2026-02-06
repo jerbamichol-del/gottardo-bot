@@ -39,8 +39,8 @@ if sys.platform == "win32":
 # ==============================================================================
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide", initial_sidebar_state="collapsed")
 
-TIMEOUT_API = 30000
-TIMEOUT_NAV = 45000
+TIMEOUT_API = 40000 
+TIMEOUT_NAV = 60000 # Aumentato per siti lenti
 
 CALENDAR_DEFAULT = {
     "FEP": "Ferie", "OMT": "Omessa Timbratura", "RCS": "Riposo Compensativo",
@@ -61,6 +61,21 @@ def setup_genai():
         genai.configure(api_key=api_key)
         return True
     return False
+
+def get_best_model():
+    """Trova dinamicamente un modello funzionante."""
+    try:
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Priorità: Flash > Pro > Altri
+        for m in models:
+            if "flash" in m.lower() and "1.5" in m: return m
+        for m in models:
+            if "pro" in m.lower() and "1.5" in m: return m
+        for m in models:
+            if "gemini" in m.lower(): return m
+        return 'gemini-pro' # Fallback estremo
+    except:
+        return 'gemini-pro'
 
 def clean_json_response(text):
     try:
@@ -86,14 +101,16 @@ class AIParser:
         if not setup_genai(): return None
         
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model_name = get_best_model() # Dinamico
+            model = genai.GenerativeModel(model_name)
+            
             with open(pdf_path, "rb") as f:
                 blob = {"mime_type": "application/pdf", "data": f.read()}
             
             resp = model.generate_content([prompt, blob])
             return clean_json_response(resp.text)
         except Exception as e:
-            st.error(f"Errore AI: {e}")
+            st.warning(f"AI Warning: {e}") # Non error bloccante
             return None
 
 class BustaParser:
@@ -112,7 +129,6 @@ class BustaParser:
         """
         data = AIParser.analyze(pdf_path, prompt)
         if not data:
-             # Fallback 0 se AI fallisce
             return {"netto": 0.0, "giorni_pagati": 0, "lordo_totale": 0.0}
         return data
 
@@ -138,7 +154,6 @@ def calcola_coerenza(pagati, lavorati_cartellino, eventi_agenda, giorni_teorici)
     report = {"status": "ok", "warnings": [], "errors": [], "details_calcolo": ""}
     
     counts = eventi_agenda.get("counts", {})
-    # Giustificativi che contano ai fini del pagamento/copertura
     giustificati = counts.get("FEP",0) + counts.get("MAL",0) + counts.get("RCS",0) + counts.get("RIC",0) + counts.get("OMT",0) + counts.get("PER",0) + counts.get("ROL",0)
     
     giorni_coperti = lavorati_cartellino + giustificati
@@ -178,10 +193,18 @@ class GottardoClient:
         self.context = None
 
     def login_and_scrape(self, mese_num, anno):
-        data = {"agenda": {"events": [], "counts": {}}, "files_downloaded": False}
+        data = {"agenda": {"events": [], "counts": {}}, "files": False}
         p = sync_playwright().start()
-        self.browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        self.context = self.browser.new_context(accept_downloads=True)
+        
+        # Opzioni anti-detection basiche
+        self.browser = p.chromium.launch(
+            headless=True, 
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+        )
+        self.context = self.browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            accept_downloads=True
+        )
         self.context.set_default_timeout(TIMEOUT_NAV)
         page = self.context.new_page()
         
@@ -191,8 +214,14 @@ class GottardoClient:
             page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
             page.fill('input[type="text"]', self.u)
             page.fill('input[type="password"]', self.p)
+            time.sleep(0.5)
             page.press('input[type="password"]', "Enter")
-            page.wait_for_selector("text=I miei dati", timeout=15000)
+            
+            # Attesa intelligente
+            try:
+                page.wait_for_selector("text=I miei dati", timeout=20000)
+            except:
+                st.warning("Login lento o popup imprevisto, procedo comunque...")
             
             # API Agenda
             st.toast("Recupero Agenda...", icon="📅")
@@ -217,21 +246,6 @@ class GottardoClient:
                                     })
                                     data["agenda"]["counts"][code] = data["agenda"]["counts"].get(code, 0) + 1
                 except: pass
-            
-            # Download Dummy / Real Logic
-            # Qui dovremmo implementare il download reale dei PDF per passarli all'AI.
-            # Per ora, SIMULO il download o uso file presenti se l'utente li ha.
-            # IN ARCHITETTURA CLOUD: Streamlit non salva file persistenti.
-            # Bisogna scaricarli in /tmp/ durante la sessione.
-            
-            # --- INTEGRAZIONE DOWNLOAD V2 --- (Semplificata)
-            # ... (Codice di navigazione omesso per brevità: INTEGRARIO QUI SE NECESSARIO)
-            # Per ora il codice assume che:
-            # 1. O l'utente carica i file manualmente (da aggiungere upload opzionale)
-            # 2. O implementiamo il download completo qui.
-            
-            # Attenzione: Senza download reale, l'AI non ha input.
-            # Riattivo la parte di download semplice se possibile.
             
         except Exception as e:
             st.error(f"Errore Scraper: {e}")
@@ -266,10 +280,10 @@ pwd = st.session_state.get("password", "") or st.secrets.get("ZK_PASS", "")
 is_logged = st.session_state.get("is_logged", False)
 
 if not is_logged and not (user and pwd):
-    c1, c2, c3 = st.columns([2, 2, 1])
-    with c1: u = st.text_input("User", placeholder="Username", label_visibility="collapsed")
-    with c2: p = st.text_input("Pass", type="password", placeholder="Password", label_visibility="collapsed")
-    with c3:
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1: u = st.text_input("User", placeholder="Username", label_visibility="collapsed")
+    with col2: p = st.text_input("Pass", type="password", placeholder="Password", label_visibility="collapsed")
+    with col3:
         if st.button("🔓 Accedi", use_container_width=True):
             if u and p:
                 st.session_state["username"] = u
@@ -303,7 +317,7 @@ else:
 
     if do_run:
         if not st.secrets.get("GOOGLE_API_KEY"):
-            st.error("❌ Manca GOOGLE_API_KEY nei secrets per usare l'AI.")
+            st.error("❌ GOOGLE_API_KEY mancante!")
             st.stop()
             
         mese_num = MESI_IT.index(sel_mese) + 1
@@ -314,28 +328,25 @@ else:
             raw_data = client.login_and_scrape(mese_num, sel_anno)
             
             # --- FILE HANDLING ---
-            # QUI: Il client dovrebbe aver scaricato i file.
-            # Poiché ho rimosso la logica di download complessa per brevità, 
-            # assumiamo che i file siano presenti o che l'utente debba caricarli se lo scraper fallisce.
-            # Per far funzionare "subito" il codice con i file che (forse) hai già localmente:
+            # Assume file locali per fallback se scraper non scarica
             suffix = "_13ma" if is_13ma else ""
             b_path = f"busta_{mese_num}_{sel_anno}{suffix}.pdf"
             c_path = f"cartellino_{mese_num}_{sel_anno}.pdf"
             
             # --- PARSING AI ---
-            st.write("🧠 Analisi AI in corso...")
+            st.write("🧠 Avvio AI (Auto-Select)...")
+            
             if os.path.exists(b_path):
                 busta_res = BustaParser.parse(b_path, is_13ma)
             else:
-                st.warning("⚠️ Busta paga non trovata (download fallito?)")
+                st.warning("⚠️ PDF Busta non trovato (Scraper download dummy attivo)")
                 busta_res = {"giorni_pagati": 0, "netto": 0}
 
             if not is_13ma:
                 if os.path.exists(c_path):
                     cart_res = CartellinoParser.parse(c_path)
                 else:
-                    # Stima fallback se Cartellino manca
-                    st.info("ℹ️ Stima presenze da Agenda (Cartellino PDF assente)")
+                    st.info("ℹ️ Stima presenze da Agenda (PDF Cartellino assente)")
                     _, last = calendar.monthrange(sel_anno, mese_num)
                     teorici = sum(1 for d in range(1, last+1) if datetime(sel_anno, mese_num, d).weekday() < 5)
                     ass = sum(raw_data["agenda"]["counts"].values())
