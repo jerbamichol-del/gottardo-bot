@@ -642,8 +642,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 
         # === CATTURA EVENTI DAL DOM (FALLBACK TOTALE) ===
         # Se la griglia non si trova, cerca OVUNQUE nel frame
-        try:
-             result["debug"].append("🔍 Avvio scraping eventi (Ricerca Globale nel Frame)...")
+        result["debug"].append("🔍 Avvio scraping eventi (Ricerca Globale nel Frame)...")
         
         dom_events = []
         
