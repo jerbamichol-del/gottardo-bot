@@ -546,26 +546,33 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # Il "Mini Calendar" si apre cliccando un DropDownButton
                 
                 # Cerca l'icona/bottone dropdown
-                # Basato su HTML utente: .popup-trigger, .calendar16, widgetid=revit_form_Button_x
-                dropdown_btn = calendar_frame.locator(".popup-trigger, .calendar16, [widgetid^='revit_form_Button'], .dijitCalendarIcon").first
+                # Strategia: Trova TUTTI i candidati e clicca il primo VISIBILE
+                dropdown_candidates = calendar_frame.locator(".popup-trigger, .calendar16, [widgetid^='revit_form_Button'], .dijitCalendarIcon").all()
                 
                 opened_popup = False
+                result["debug"].append(f"  🔍 Trovati {len(dropdown_candidates)} candidati per il Dropdown. Cerco quello visibile...")
                 
-                if dropdown_btn.is_visible():
-                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario (Revit/Zucchetti)...")
+                for btn in dropdown_candidates:
                     try:
-                        dropdown_btn.click()
-                        time.sleep(2.0)
-                        opened_popup = True
+                        if btn.is_visible():
+                            result["debug"].append(f"  🖱️ Clicco candidato visibile: {btn.get_attribute('class')}...")
+                            btn.click()
+                            time.sleep(2.0)
+                            
+                            # Verifica se si è aperto
+                            if calendar_frame.locator(".dijitCalendar, .dijitCalendarPopup").last.is_visible():
+                                opened_popup = True
+                                break
                     except: pass
                 
                 if not opened_popup:
                     # Fallback: Clicca il TITOLO STESSO (spesso apre il picker)
-                    result["debug"].append("  ⚠️ Dropdown non visibile. Provo click su Titolo...")
+                    result["debug"].append("  ⚠️ Nessun Dropdown visibile funzionante. Provo click su Titolo...")
                     try:
                         calendar_frame.locator(f"text={current_title_text}").first.click()
                         time.sleep(2.0)
-                        opened_popup = True
+                        if calendar_frame.locator(".dijitCalendar, .dijitCalendarPopup").last.is_visible():
+                            opened_popup = True
                     except: pass
                 
                 # Ora cerchiamo il POPUP del calendario (spesso è un dijitPopup o dijitCalendarMenu)
