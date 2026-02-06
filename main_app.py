@@ -235,7 +235,15 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                             raise Exception("Link Busta introvabile")
                 
                 dl_info.value.save_as(local_busta)
-                if os.path.exists(local_busta): paths["busta"] = local_busta
+                if os.path.exists(local_busta):
+                    size = os.path.getsize(local_busta)
+                    st.toast(f"✅ Busta salvata: {size:,} bytes", icon="📄")
+                    if size > 1000:
+                        paths["busta"] = local_busta
+                    else:
+                        st.warning(f"⚠️ File busta troppo piccolo ({size} bytes)")
+                else:
+                    st.warning("⚠️ File busta non salvato")
                 
             except Exception as e:
                 st.warning(f"Busta non scaricata: {e}")
@@ -244,43 +252,118 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
             if not is_13ma:
                 st.toast("Scarico Cartellino...", icon="📅")
                 try:
-                    # Navigazione Presenze
-                    try: page.locator("text=Presenze").first.click()
-                    except: page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                    time.sleep(2)
-                    
-                    try: page.locator("text=Cartellino").first.click()
+                    # Torna alla home prima
+                    try:
+                        page.keyboard.press("Escape")
+                        time.sleep(0.3)
                     except: pass
-                    time.sleep(2)
                     
-                    # Date
+                    try:
+                        logo = page.locator("img[src*='logo'], .logo").first
+                        if logo.is_visible(timeout=2000):
+                            logo.click()
+                            time.sleep(2)
+                    except:
+                        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+                        time.sleep(3)
+                    
+                    # Navigazione: Time -> Cartellino presenze
+                    try:
+                        page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+                    except:
+                        page.locator("text=Time").first.click(force=True)
+                    time.sleep(3)
+                    
+                    # Tab Cartellino presenze (lnktab_5)
+                    try:
+                        page.evaluate("document.getElementById('lnktab_5_label')?.click()")
+                    except:
+                        page.locator("text=Cartellino").first.click(force=True)
+                    time.sleep(5)
+                    
+                    # Date - USA I SELETTORI CORRETTI
                     last = calendar.monthrange(anno, idx)[1]
                     d1, d2 = f"01/{idx:02d}/{anno}", f"{last}/{idx:02d}/{anno}"
                     
-                    ins = page.locator(".dijitInputInner")
-                    if ins.count() >= 2:
-                        ins.nth(0).fill(d1); ins.nth(0).press("Tab")
-                        time.sleep(0.5)
-                        ins.nth(1).fill(d2); ins.nth(1).press("Tab")
+                    # Selettori specifici per i campi data (ID contiene CLRICHIE e CLRICHI2)
+                    dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
+                    al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                     
-                    # Search
-                    page.get_by_role("button", name=re.compile("ricerca|esegui", re.I)).last.click()
-                    time.sleep(5)
-                    
-                    # PDF Icon
-                    icon = page.locator("img[src*='search'], .z-icon-search").first
-                    if icon.count() > 0:
-                        with ctx.expect_page() as pop:
-                            icon.click()
-                        popup = pop.value
-                        popup.wait_for_load_state()
+                    if dal.count() > 0 and al.count() > 0:
+                        dal.click(force=True)
+                        page.keyboard.press("Control+A")
+                        dal.fill("")
+                        dal.type(d1, delay=80)
+                        dal.press("Tab")
+                        time.sleep(0.6)
                         
-                        # Save
-                        url = popup.url + ("&EMBED=y" if "EMBED" not in popup.url else "")
-                        resp = ctx.request.get(url)
-                        if resp.body()[:4] == b"%PDF":
-                            with open(local_cart, "wb") as f: f.write(resp.body())
+                        al.click(force=True)
+                        page.keyboard.press("Control+A")
+                        al.fill("")
+                        al.type(d2, delay=80)
+                        al.press("Tab")
+                        time.sleep(0.6)
+                    
+                    # Esegui ricerca
+                    try:
+                        page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
+                    except:
+                        page.get_by_role("button", name=re.compile("ricerca|esegui", re.I)).last.click()
+                    time.sleep(8)
+                    
+                    # Attendi risultati
+                    try:
+                        page.wait_for_selector("text=Risultati della ricerca", timeout=15000)
+                    except: pass
+                    
+                    # Trova icona search per il mese corretto
+                    pattern_cart = f"{idx:02d}/{anno}"
+                    riga_target = page.locator(f"tr:has-text('{pattern_cart}')").first
+                    
+                    if riga_target.count() > 0 and riga_target.locator("img[src*='search']").count() > 0:
+                        icona = riga_target.locator("img[src*='search']").first
+                    else:
+                        icona = page.locator("img[src*='search']").first
+                    
+                    if icona.count() > 0:
+                        with ctx.expect_page(timeout=20000) as popup_info:
+                            icona.click()
+                        popup = popup_info.value
+                        
+                        # Attendi URL del PDF
+                        t0 = time.time()
+                        last_url = popup.url
+                        while time.time() - t0 < 20:
+                            u = popup.url
+                            if u and u != "about:blank":
+                                last_url = u
+                                if ("SERVIZIO=JPSC" in u) and ("ATTIVITA=visualizza" in u):
+                                    break
+                            time.sleep(0.25)
+                        
+                        # Scarica PDF via HTTP
+                        popup_url = last_url.replace("/js_rev//", "/js_rev/")
+                        if "EMBED" not in popup_url:
+                            popup_url += "&EMBED=y"
+                        
+                        resp = ctx.request.get(popup_url, timeout=60000)
+                        body = resp.body()
+                        
+                        if body[:4] == b"%PDF":
+                            with open(local_cart, "wb") as f:
+                                f.write(body)
                             paths["cart"] = local_cart
+                        else:
+                            # Fallback: prova a stampare come PDF
+                            try:
+                                popup.pdf(path=local_cart, format="A4")
+                                if os.path.exists(local_cart) and os.path.getsize(local_cart) > 5000:
+                                    paths["cart"] = local_cart
+                            except: pass
+                        
+                        try:
+                            popup.close()
+                        except: pass
                             
                 except Exception as e:
                     st.warning(f"Cartellino non scaricato: {e}")
