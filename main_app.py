@@ -547,12 +547,26 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 
                 # Cerca l'icona/bottone dropdown
                 # Dal debug precedente: id=dijit_form_DropDownButton_2
-                dropdown_btn = calendar_frame.locator("[widgetid*='DropDownButton'], .dijitDropDownButton, .dijitDownArrowButton").first
+                dropdown_btn = calendar_frame.locator("[widgetid*='DropDownButton'], .dijitDropDownButton, .dijitDownArrowButton, .dijitCalendarIcon").first
+                
+                opened_popup = False
                 
                 if dropdown_btn.is_visible():
-                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario per aprire il Mini-CAL...")
-                    dropdown_btn.click()
-                    time.sleep(1.5) # Attesa apertura popup
+                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario (standard)...")
+                    try:
+                        dropdown_btn.click()
+                        time.sleep(2.0)
+                        opened_popup = True
+                    except: pass
+                
+                if not opened_popup:
+                    # Fallback: Clicca il TITOLO STESSO (spesso apre il picker)
+                    result["debug"].append("  ⚠️ Dropdown non visibile. Provo click su Titolo...")
+                    try:
+                        calendar_frame.locator(f"text={current_title_text}").first.click()
+                        time.sleep(2.0)
+                        opened_popup = True
+                    except: pass
                 
                 # Ora cerchiamo il POPUP del calendario (spesso è un dijitPopup o dijitCalendarMenu)
                 # Potrebbe essere dentro il frame o nel root. Proviamo nel frame.
