@@ -637,11 +637,13 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                         moves += 1
                 else:
                     result["debug"].append("  ⚠️ Popup Mini-Calendario NON APERTO dopo il click")
-                # (Codice navigazione vecchio rimosso)
-        
+            except Exception as nav_err:
+                result["debug"].append(f"  ❌ Errore generale navigazione: {nav_err}")
+                
         # === CATTURA EVENTI DAL DOM (FALLBACK TOTALE) ===
         # Se la griglia non si trova, cerca OVUNQUE nel frame
-        result["debug"].append("🔍 Avvio scraping eventi (Ricerca Globale nel Frame)...")
+        try:
+             result["debug"].append("🔍 Avvio scraping eventi (Ricerca Globale nel Frame)...")
         
         dom_events = []
         
