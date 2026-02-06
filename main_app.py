@@ -430,12 +430,116 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         # Se non trova il frame specifico, usa il main frame ma cerca anche negli altri
         target_frames = [calendar_frame] if calendar_frame else page.frames
         
-        # === NAVIGAZIONE AL MESE CORRETTO ===
-        result["debug"].append(f"🗓️ Verifico mese target: {mese_num}/{anno}")
-        for frame in target_frames:
+        # === NAVIGAZIONE AL MESE CORRETTO (LOGICA SIDEBAR) ===
+        target_month_name = MESI_IT[mese_num - 1].upper() # es: OTTOBRE
+        result["debug"].append(f"🗓️ Navigazione al mese target: {target_month_name} {anno}")
+        
+        cal_nav_success = False
+        if calendar_frame:
             try:
-                # Cerca l'elemento che mostra il mese corrente (es: "Ottobre 2025")
-                # Selettori tipici Dojo/ZK per titolo calendario
+                # 1. Attiva il TAB "Calendario" nella sidebar se necessario
+                sidebar_cal_btn = calendar_frame.locator("span[widgetid*='Button']").filter(has_text="Calendario").first
+                if sidebar_cal_btn.count() > 0 and sidebar_cal_btn.is_visible():
+                    result["debug"].append("  Click tab 'Calendario' sidebar...")
+                    sidebar_cal_btn.click()
+                    time.sleep(1)
+                
+                # 2. Interagisci con il MINI-CALENDAR (DatePicker)
+                result["debug"].append("  Interazione con Mini-Calendar (#datePicker)...")
+                
+                # Loop navigazione (max 24 tentativi = 2 anni)
+                moves = 0
+                max_moves = 24
+                reached = False
+                
+                while moves < max_moves:
+                    # Rileggi mese/anno correnti dal mini-cal
+                    curr_year_el = calendar_frame.locator(".dijitCalendarYearLabel span, #datePicker_yddb_label").first
+                    curr_month_el = calendar_frame.locator(".dijitCalendarCurrentMonthLabel, #datePicker_mddb_label").first
+                    
+                    if not curr_year_el.is_visible():
+                        result["debug"].append("  ⚠️ Elementi anno/mese non visibili nel mini-cal")
+                        break
+                        
+                    curr_year_text = curr_year_el.inner_text().strip()
+                    curr_month_text = curr_month_el.inner_text().strip().upper()
+                    
+                    # Debug stato corrente
+                    if moves == 0 or moves % 5 == 0:
+                         result["debug"].append(f"  📅 Mini-Cal è su: {curr_month_text} {curr_year_text}")
+                    
+                    # Controllo Target
+                    if str(anno) in curr_year_text and target_month_name in curr_month_text:
+                        result["debug"].append("  ✅ Mese target raggiunto nel Mini-Cal!")
+                        reached = True
+                        break
+                    
+                    # Logica Direzione
+                    go_back = False
+                    try:
+                        curr_y_int = int(curr_year_text)
+                        if curr_y_int > anno:
+                            go_back = True
+                        elif curr_y_int == anno:
+                            # Confronto mesi
+                            mesi_list = [m.upper() for m in MESI_IT]
+                            curr_m_idx = -1
+                            for i, m in enumerate(mesi_list):
+                                if m in curr_month_text:
+                                    curr_m_idx = i
+                                    break
+                            if curr_m_idx > (mese_num - 1):
+                                go_back = True
+                    except: pass
+                    
+                    # Esegui Click
+                    if go_back:
+                        btn = calendar_frame.locator(".dijitCalendarDecrease, .dijitCalendarArrow[title*='Precedente']").first
+                        if btn.is_visible():
+                            btn.click()
+                        else:
+                            result["debug"].append("  ⚠️ Bottone 'Precedente' non trovato")
+                            break
+                    else:
+                        btn = calendar_frame.locator(".dijitCalendarIncrease, .dijitCalendarArrow[title*='Successivo']").first
+                        if btn.is_visible():
+                            btn.click()
+                        else:
+                            result["debug"].append("  ⚠️ Bottone 'Successivo' non trovato")
+                            break
+                    
+                    time.sleep(0.4) # Breve attesa animazione
+                    moves += 1
+                
+                if reached:
+                    # 3. CLICCA UN GIORNO NEL MINI-CAL PER AGGIORNARE VISTA
+                    result["debug"].append("  🖱️ Seleziono un giorno per caricare l'Agenda...")
+                    # Cerca giorni del mese corrente (non previous/next month days che sono grigi)
+                    current_month_days = calendar_frame.locator(".dijitCalendarCurrentMonth")
+                    count = current_month_days.count()
+                    
+                    day_clicked = False
+                    if count > 0:
+                        # Clicca il 15° giorno (o centrale)
+                        target_day_idx = min(14, count - 1)
+                        day_el = current_month_days.nth(target_day_idx)
+                        day_text = day_el.inner_text().strip()
+                        result["debug"].append(f"  Click giorno {day_text}...")
+                        day_el.click()
+                        day_clicked = True
+                    
+                    if day_clicked:
+                        # Attesa caricamento vista principale
+                        result["debug"].append("  ⏳ Attesa caricamento vista principale...")
+                        time.sleep(4) 
+                        cal_nav_success = True
+                    else:
+                        result["debug"].append("  ⚠️ Nessun giorno cliccabile trovato")
+
+            except Exception as e:
+                result["debug"].append(f"  ❌ Errore navigazione sidebar: {e}")
+        
+        # Selettori specifici per calendari Dojo/Dijit/ZK
                 date_selectors = [".dojoxCalendarTitle", ".dijitCalendarTitle", ".z-calendar-title", ".title", "span[id*='title']"]
                 
                 current_date_text = ""
