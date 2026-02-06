@@ -49,29 +49,18 @@ try:
 except:
     HAS_GEMINI = False
 
-try:
-    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-    HAS_DEEPSEEK = True
-except:
-    DEEPSEEK_API_KEY = None
-    HAS_DEEPSEEK = False
-
 
 # ==============================================================================
 # 1. HELPERS & PARSING
 # ==============================================================================
 
 def parse_it_number(s: str) -> float:
-    if s is None:
-        return 0.0
+    if s is None: return 0.0
     s = str(s).strip()
-    if not s:
-        return 0.0
+    if not s: return 0.0
     s = s.replace(".", "").replace(",", ".")
-    try:
-        return float(s)
-    except:
-        return 0.0
+    try: return float(s)
+    except: return 0.0
 
 def clean_json_response(text):
     try:
@@ -83,214 +72,26 @@ def clean_json_response(text):
         return None
 
 def extract_text_from_pdf(file_path):
-    if not fitz:
-        return None
+    if not fitz: return None
     try:
         doc = fitz.open(file_path)
-        chunks = []
-        for page in doc:
-            chunks.append(page.get_text())
-        return "\n".join(chunks)
-    except:
-        return None
+        return "\n".join([page.get_text() for page in doc])
+    except: return None
 
 def get_pdf_download_link(file_path, filename):
-    if not os.path.exists(file_path):
-        return None
+    if not os.path.exists(file_path): return None
     with open(file_path, "rb") as f:
         data = base64.b64encode(f.read()).decode()
     return f'<a href="data:application/pdf;base64,{data}" download="{filename}">📥 Scarica {filename}</a>'
 
-# --- LOGICA AGENDA (FRAME RICORSIVI) ---
-
-AGENDA_KEYWORDS = [
-    "OMESSA TIMBRATURA", "MALATTIA", "RIPOSO", "FERIE", "PERMESS", "CHIUSURA", "INFORTUN"
-]
-
-def find_element_recursive(ctx, selector):
-    """Cerca un elemento ricorsivamente in tutti i frame."""
-    # 1. Cerca nel contesto corrente
-    try:
-        if ctx.locator(selector).count() > 0:
-            return ctx, ctx.locator(selector).first
-    except:
-        pass
-        
-    # 2. Cerca nei figli (frames)
-    frames_to_check = []
-    if hasattr(ctx, 'frames'): # Oggetto Page
-        frames_to_check = ctx.frames
-    elif hasattr(ctx, 'child_frames'): # Oggetto Frame
-        frames_to_check = ctx.child_frames
-
-    for frame in frames_to_check:
-        if frame == ctx: continue # Evita loop
-        try:
-            found_ctx, found_el = find_element_recursive(frame, selector)
-            if found_el:
-                return found_ctx, found_el
-        except:
-            continue
-                
-    return None, None
-
-def agenda_set_month_enter(page, mese_num, anno, debug_info):
-    nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-                    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
-    mese_nome_target = nomi_mesi_it[mese_num - 1]
-
-    # A. ATTESA CARICAMENTO PAGINA/TOOLBAR
-    # Aspettiamo che appaia la toolbar Dojo, segno che l'agenda è carica
-    debug_info.append("Agenda: Ricerca toolbar...")
-    _, toolbar = find_element_recursive(page, ".dijitToolbar")
-    if not toolbar:
-        # Fallback: aspetta network idle se toolbar non trovata subito
-        try: page.wait_for_load_state("networkidle", timeout=6000)
-        except: pass
-
-    # B. CERCA L'ICONA DEL CALENDARIO (.calendar16)
-    # Usiamo la ricerca ricorsiva perché spesso è dentro un iframe
-    target_frame, target_element = find_element_recursive(page, ".calendar16")
-
-    if not target_frame or not target_element:
-        debug_info.append("Agenda: ERRORE - Icona .calendar16 non trovata in nessun frame.")
-        return
-
-    debug_info.append(f"Agenda: Icona trovata nel frame '{getattr(target_frame, 'name', 'N/A')}'")
-
-    # C. APRI POPUP
-    try:
-        # Clicca l'icona
-        target_element.click(force=True, timeout=8000)
-        time.sleep(2.0) # Attesa animazione Dojo
-        debug_info.append("Agenda: Click icona effettuato")
-    except Exception as e:
-        debug_info.append(f"Agenda: Errore click icona ({e})")
-        return
-
-    # D. IMPOSTA DATA NEL POPUP
-    # Le label potrebbero essere nel frame o nella pagina principale
-    popup_context = None
-    if page.locator(".dijitCalendarMonthLabel").count() >= 2:
-        popup_context = page
-    elif target_frame.locator(".dijitCalendarMonthLabel").count() >= 2:
-        popup_context = target_frame
-    
-    if popup_context:
-        labels = popup_context.locator(".dijitCalendarMonthLabel")
-        
-        # Mese
-        try:
-            cur_month = labels.nth(0).inner_text().strip()
-            if cur_month.lower() != mese_nome_target.lower():
-                labels.nth(0).click()
-                time.sleep(0.5)
-                popup_context.locator("body").get_by_text(mese_nome_target, exact=True).last.click(timeout=4000)
-                time.sleep(0.5)
-        except: pass
-
-        # Anno
-        try:
-            cur_year = labels.nth(1).inner_text().strip()
-            if str(anno) not in cur_year:
-                labels.nth(1).click()
-                time.sleep(0.5)
-                popup_context.locator("body").get_by_text(str(anno), exact=True).last.click(timeout=4000)
-                time.sleep(0.5)
-        except: pass
-
-        # Conferma (Click giorno 1)
-        try:
-            popup_context.locator(".dijitCalendarDateTemplate", has_text=re.compile(r"^1$")).first.click(timeout=4000)
-            time.sleep(1.5)
-            debug_info.append("Agenda: Data impostata")
-        except:
-            debug_info.append("Agenda: Errore click giorno 1")
-            page.keyboard.press("Escape")
-    else:
-        debug_info.append("Agenda: Popup aperto ma labels non trovate")
-        page.keyboard.press("Escape")
-
-    # E. CLICCA IL TASTO "MESE" (Fondamentale per la vista)
-    time.sleep(1.0)
-    try:
-        # 1. Cerca per aria-label="Mese" (il metodo più sicuro dal tuo screenshot)
-        btn_mese = target_frame.locator("[aria-label='Mese']").first
-        
-        # 2. Fallback per testo
-        if btn_mese.count() == 0:
-            btn_mese = target_frame.locator(".dijitButtonText", has_text=re.compile(r"^\s*Mese\s*$", re.IGNORECASE)).first
-
-        if btn_mese.count() > 0:
-            btn_mese.click(force=True, timeout=5000)
-            debug_info.append("Agenda: Cliccato bottone 'Mese'")
-            time.sleep(3.0) # Attesa caricamento dati griglia
-        else:
-            debug_info.append("Agenda: Bottone 'Mese' NON trovato")
-            
-    except Exception as e:
-        debug_info.append(f"Agenda: Errore click tasto Mese ({e})")
-
-
-def agenda_extract_events_fast(page):
-    texts = []
-    
-    # Helper per estrarre testo ricorsivamente da tutti i frame
-    def extract_recursive(ctx):
-        local = []
-        candidates = ctx.locator("[class*='event'], [class*='Event'], [class*='appointment'], [class*='Appunt'], .dijitCalendarEvent")
-        try:
-            n = candidates.count()
-            if n > 0:
-                for i in range(min(n, 200)):
-                    t = (candidates.nth(i).inner_text() or "").strip()
-                    if t: local.append(t)
-        except: pass
-        
-        # Scendi nei frame
-        if hasattr(ctx, 'frames'):
-            for f in ctx.frames:
-                if f != ctx: local.extend(extract_recursive(f))
-        elif hasattr(ctx, 'child_frames'):
-            for f in ctx.child_frames:
-                local.extend(extract_recursive(f))
-        return local
-
-    texts = extract_recursive(page)
-    # Fallback se non trova nulla di strutturato
-    if not texts:
-        texts = [page.inner_text("body") or ""]
-
-    blob = "\n".join(texts)
-    up = blob.upper()
-    counts = {k: up.count(k) for k in AGENDA_KEYWORDS}
-    
-    # Estrai righe rilevanti
-    lines = []
-    for ln in blob.splitlines():
-        s = (ln or "").strip()
-        if not s: continue
-        su = s.upper()
-        if any(k in su for k in AGENDA_KEYWORDS):
-            lines.append(s)
-
-    # Dedup
-    seen, uniq = set(), []
-    for s in lines:
-        if s in seen: continue
-        seen.add(s); uniq.append(s)
-
-    return {"counts": counts, "lines": uniq[:200], "raw_len": len(blob)}
-
-# --- LOGICA PARSING CARTACEI ---
+# --- PARSING PDF (DETERMINISTICO + AI) ---
 
 def get_busta_prompt():
     return """Analizza CEDOLINO PAGA. JSON valido:
 {
-    "e_tredicesima": boolean,
     "dati_generali": {"netto": float, "giorni_pagati": float},
-    "competenze": {"base": float, "straordinari": float, "festivita": float, "anzianita": float, "lordo_totale": float},
-    "trattenute": {"inps": float, "irpef_netta": float, "addizionali_totali": float},
+    "competenze": {"lordo_totale": float, "base": float, "straordinari": float, "festivita": float},
+    "trattenute": {"inps": float, "irpef_netta": float},
     "ferie": {"residue_ap": float, "maturate": float, "godute": float, "saldo": float},
     "par": {"residue_ap": float, "spettanti": float, "fruite": float, "saldo": float}
 }"""
@@ -298,202 +99,390 @@ def get_busta_prompt():
 def get_cartellino_prompt():
     return """Analizza CARTELLINO PRESENZE. JSON valido:
 {
-    "giorni_reali": float, "gg_presenza": float, 
+    "gg_presenza": float, "giorni_reali": float,
     "ore_ordinarie_0251": float, "ore_lavorate_0253": float, 
     "ore_ordinarie_riepilogo": float, "giorni_senza_badge": float,
-    "note": "string", "debug_prime_righe": "string"
+    "note": "string"
 }"""
-
-@st.cache_resource
-def get_gemini_models():
-    if not HAS_GEMINI: return []
-    try:
-        models = genai.list_models()
-        return [(m.name, genai.GenerativeModel(m.name)) for m in models if 'generateContent' in m.supported_generation_methods]
-    except: return []
 
 def estrai_con_ai(file_path, prompt, tipo):
     if not file_path or not os.path.exists(file_path): return None
+    if not HAS_GEMINI: return None
+    
+    models = [m for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    if not models: return None
+
+    try:
+        with open(file_path, "rb") as f: pdf_bytes = f.read()
+    except: return None
+    
     status = st.empty()
-    models = get_gemini_models()
-    if models:
+    status.info(f"🤖 Analisi AI {tipo}...")
+    
+    for m in models:
         try:
-            with open(file_path, "rb") as f: pdf_bytes = f.read()
-        except: pdf_bytes = None
-        
-        if pdf_bytes:
-            for name, model in models:
-                try:
-                    status.info(f"🤖 Analisi {tipo} con AI...")
-                    resp = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-                    res = clean_json_response(resp.text)
-                    if res and isinstance(res, dict):
-                        status.empty()
-                        return res
-                except: continue
+            model = genai.GenerativeModel(m.name)
+            resp = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
+            res = clean_json_response(resp.text)
+            if res: 
+                status.empty()
+                return res
+        except: continue
+    
     status.empty()
     return None
 
-def cartellino_parse_deterministico(file_path: str):
+def cartellino_parse_deterministico(file_path):
+    # Regex rapida per evitare costo AI se il PDF è semplice
     text = extract_text_from_pdf(file_path)
     if not text: return None
     upper = text.upper()
     
-    # Logica base regex
     m_gg = re.search(r"0265\s+GG\s+PRESENZA.*?(\d{1,3}[.,]\d{2})", upper)
-    gg_presenza = parse_it_number(m_gg.group(1)) if m_gg else 0.0
+    gg = parse_it_number(m_gg.group(1)) if m_gg else 0.0
     
     m_ore = re.search(r"0253\s+ORE\s+LAVORATE.*?(\d{1,3}[.,]\d{2})", upper)
-    ore_lav = parse_it_number(m_ore.group(1)) if m_ore else 0.0
+    ore = parse_it_number(m_ore.group(1)) if m_ore else 0.0
+    
+    # Conta giorni (es. L01, M02...)
+    days = len(set(re.findall(r"\b[LMGVSD]\d{2}\b", upper)))
     
     return {
-        "gg_presenza": gg_presenza,
-        "ore_lavorate_0253": ore_lav,
-        "debug_prime_righe": text[:200]
+        "gg_presenza": gg,
+        "giorni_reali": float(days),
+        "ore_lavorate_0253": ore,
+        "note": "Analisi Regex rapida",
+        "debug_prime_righe": text[:300]
     }
 
 
 # ==============================================================================
-# 2. BOT PRINCIPALE (ORCHESTRATORE)
+# 2. AGENDA ENGINE (PATCHATA)
 # ==============================================================================
 
-def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento="cedolino"):
-    nomi_mesi_it = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-                    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+AGENDA_KEYWORDS = ["OMESSA TIMBRATURA", "MALATTIA", "RIPOSO", "FERIE", "PERMESS", "CHIUSURA", "INFORTUN"]
+
+def find_element_recursive(ctx, selector):
+    """Cerca elemento in tutti i frame ricorsivamente."""
     try:
-        mese_num = nomi_mesi_it.index(mese_nome) + 1
-    except:
-        return None, None, "Mese invalido"
+        if ctx.locator(selector).count() > 0:
+            return ctx, ctx.locator(selector).first
+    except: pass
+    
+    frames = getattr(ctx, 'frames', []) or getattr(ctx, 'child_frames', [])
+    for f in frames:
+        if f == ctx: continue
+        try:
+            c, e = find_element_recursive(f, selector)
+            if e: return c, e
+        except: continue
+    return None, None
+
+def agenda_set_month_enter(page, mese_num, anno, debug_info):
+    nomi_mesi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                 "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+    target_mese = nomi_mesi[mese_num - 1]
+
+    # 1. Attesa Toolbar
+    debug_info.append("Agenda: Ricerca Toolbar...")
+    try: page.wait_for_selector(".dijitToolbar", timeout=15000)
+    except: pass
+
+    # 2. Trova calendario (ricorsivo)
+    # Cerchiamo #revit_form_Button_6 (id preciso) o .calendar16 (classe icona)
+    frame, btn = find_element_recursive(page, "#revit_form_Button_6")
+    if not btn:
+        frame, btn = find_element_recursive(page, ".calendar16")
+    
+    if not btn:
+        debug_info.append("Agenda: Bottone calendario NON trovato")
+        return
+
+    # 3. Click Calendario
+    try:
+        # Se abbiamo trovato l'icona, clicchiamo il genitore bottone se esiste
+        if "calendar16" in (btn.get_attribute("class") or ""):
+            parent = btn.locator("xpath=..")
+            if parent.count()>0: btn = parent
+        
+        btn.click(force=True, timeout=8000)
+        time.sleep(1.5)
+        debug_info.append("Agenda: Click Calendario OK")
+    except Exception as e:
+        debug_info.append(f"Agenda: Errore click ({e})")
+        return
+
+    # 4. Imposta Mese/Anno (Popup)
+    ctx = page if page.locator(".dijitCalendarMonthLabel").count() >= 2 else frame
+    if ctx and ctx.locator(".dijitCalendarMonthLabel").count() >= 2:
+        labels = ctx.locator(".dijitCalendarMonthLabel")
+        try:
+            # Mese
+            if labels.nth(0).inner_text().strip().lower() != target_mese.lower():
+                labels.nth(0).click()
+                time.sleep(0.5)
+                ctx.locator("body").get_by_text(target_mese, exact=True).last.click()
+                time.sleep(0.5)
+            # Anno
+            if str(anno) not in labels.nth(1).inner_text():
+                labels.nth(1).click()
+                time.sleep(0.5)
+                ctx.locator("body").get_by_text(str(anno), exact=True).last.click()
+                time.sleep(0.5)
+            
+            # Conferma (Giorno 1)
+            ctx.locator(".dijitCalendarDateTemplate", has_text=re.compile(r"^1$")).first.click()
+            debug_info.append("Agenda: Data impostata")
+            time.sleep(1)
+        except Exception as e:
+            debug_info.append(f"Agenda: Errore impostazione data ({e})")
+            page.keyboard.press("Escape")
+    else:
+        debug_info.append("Agenda: Labels popup non trovate")
+        page.keyboard.press("Escape")
+
+    # 5. CLICK TASTO "MESE" (Fondamentale)
+    time.sleep(1)
+    try:
+        # Cerca bottone con aria-label='Mese' nel frame dove abbiamo lavorato
+        btn_view = frame.locator("[aria-label='Mese']").first
+        if btn_view.count() == 0:
+             btn_view = frame.locator(".dijitButtonText", has_text="Mese").first
+        
+        if btn_view.count() > 0:
+            btn_view.click(force=True)
+            debug_info.append("Agenda: Click tasto 'Mese' OK")
+            time.sleep(3) # Attesa refresh dati
+        else:
+            debug_info.append("Agenda: Tasto 'Mese' NON trovato")
+    except Exception as e:
+        debug_info.append(f"Agenda: Errore click Mese ({e})")
+
+def agenda_extract_events(page):
+    # Estrazione ricorsiva testo eventi
+    texts = []
+    def rec_extract(ctx):
+        loc = []
+        cands = ctx.locator("[class*='event'], [class*='appointment'], .dijitCalendarEvent")
+        try:
+            for i in range(cands.count()):
+                t = cands.nth(i).inner_text().strip()
+                if t: loc.append(t)
+        except: pass
+        
+        frames = getattr(ctx, 'frames', []) or getattr(ctx, 'child_frames', [])
+        for f in frames:
+            if f != ctx: loc.extend(rec_extract(f))
+        return loc
+
+    texts = rec_extract(page)
+    blob = "\n".join(texts).upper()
+    counts = {k: blob.count(k) for k in AGENDA_KEYWORDS}
+    lines = sorted(list(set([t for t in texts if any(k in t.upper() for k in AGENDA_KEYWORDS)])))
+    
+    return {"counts": counts, "lines": lines, "raw_len": len(blob)}
+
+
+# ==============================================================================
+# 3. DOWNLOADER AUTOMATICO
+# ==============================================================================
+
+def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_documento):
+    nomi_mesi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                 "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+    try: mese_num = nomi_mesi.index(mese_nome) + 1
+    except: return None, None, "Mese invalido"
 
     wd = Path.cwd()
     suffix = "_13" if tipo_documento == "tredicesima" else ""
     path_busta = str(wd / f"busta_{mese_num}_{anno}{suffix}.pdf")
     path_cart = str(wd / f"cartellino_{mese_num}_{anno}.pdf")
     target_busta = f"Tredicesima {anno}" if tipo_documento == "tredicesima" else f"{mese_nome} {anno}"
-
+    
     last_day = calendar.monthrange(anno, mese_num)[1]
     d_from_vis = f"01/{mese_num:02d}/{anno}"
     d_to_vis = f"{last_day}/{mese_num:02d}/{anno}"
 
     st_status = st.empty()
-    st_status.info(f"🤖 Bot avviato per {mese_nome} {anno}")
+    st_status.info("🤖 Avvio Bot...")
     debug_info = []
     b_ok, c_ok = False, False
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                slow_mo=300,
-                args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
-            )
-            context = browser.new_context(
-                accept_downloads=True,
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"
-            )
-            context.set_default_timeout(45000)
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
+            context = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36")
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
-            # --- LOGIN ---
-            st_status.info("🔐 Login in corso...")
-            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
+            # LOGIN
+            st_status.info("🔐 Login...")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
             page.fill('input[type="text"]', username)
             page.fill('input[type="password"]', password)
             page.press('input[type="password"]', 'Enter')
-            
             try:
                 page.wait_for_selector("text=I miei dati", timeout=20000)
-                st_status.success("✅ Login effettuato")
                 debug_info.append("Login: OK")
             except:
-                browser.close()
-                return None, None, "LOGIN_FALLITO"
+                browser.close(); return None, None, "LOGIN FALLITO"
 
-            # --- AGENDA ---
+            # AGENDA
+            st_status.info("🗓️ Agenda...")
             try:
-                st_status.info("🗓️ Lettura Agenda...")
                 agenda_set_month_enter(page, mese_num, anno, debug_info)
-                agenda_data = agenda_extract_events_fast(page)
+                agenda_data = agenda_extract_events(page)
                 st.session_state["agenda_data"] = agenda_data
-                debug_info.append(f"Agenda: OK (len={agenda_data.get('raw_len')})")
+                debug_info.append(f"Agenda: Letta ({agenda_data['raw_len']} chars)")
             except Exception as e:
                 debug_info.append(f"Agenda Error: {e}")
 
-            # --- BUSTA PAGA ---
-            st_status.info("💰 Scarico Busta Paga...")
+            # BUSTA PAGA
+            st_status.info("💰 Busta Paga...")
             try:
                 page.click("text=I miei dati", force=True)
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
                 time.sleep(3)
                 try: page.click("text=Cedolino", force=True)
                 except: pass
-                time.sleep(4)
+                time.sleep(3)
 
                 links = page.locator("a")
-                found_link = None
+                found = None
                 for i in range(links.count()):
-                    try:
-                        txt = links.nth(i).inner_text().strip().lower()
-                        if target_busta.lower() in txt:
-                            found_link = links.nth(i)
-                            break
-                    except: continue
-
-                if found_link:
+                    txt = links.nth(i).inner_text().strip().lower()
+                    if target_busta.lower() in txt:
+                        found = links.nth(i); break
+                
+                if found:
                     with page.expect_download(timeout=30000) as dl_info:
-                        found_link.click()
+                        found.click()
                     dl_info.value.save_as(path_busta)
                     if os.path.exists(path_busta): 
                         b_ok = True
-                        debug_info.append("Busta: Scaricata")
-                else:
-                    debug_info.append("Busta: Link non trovato")
-            except Exception as e:
-                debug_info.append(f"Busta Error: {e}")
+                        debug_info.append("Busta: OK")
+                else: debug_info.append("Busta: Non trovata")
+            except Exception as e: debug_info.append(f"Busta Error: {e}")
 
-            # --- CARTELLINO ---
+            # CARTELLINO (TUO CODICE ORIGINALE INTEGRATO)
             if tipo_documento != "tredicesima":
-                st_status.info("📅 Scarico Cartellino...")
+                st_status.info("📅 Cartellino...")
                 try:
-                    page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-                    time.sleep(3)
-                    # Navigazione Menu
-                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                    time.sleep(2)
-                    page.evaluate("document.getElementById('lnktab_5_label')?.click()")
-                    time.sleep(4)
-
-                    # Imposta date (opzionale se resetta)
+                    # Torna alla home
+                    page.evaluate("window.scrollTo(0, 0)")
+                    time.sleep(1)
                     try:
-                        dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
-                        if dal.count()>0:
-                            dal.click(); page.keyboard.press("Control+A"); dal.type(d_from_vis); dal.press("Tab")
-                            time.sleep(0.5)
-                            al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
-                            al.click(); page.keyboard.press("Control+A"); al.type(d_to_vis); al.press("Tab")
-                    except: pass
+                        page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                    except:
+                        pass
 
-                    # Ricerca
-                    try: page.locator("//span[contains(text(),'Esegui ricerca')]").first.click(force=True)
-                    except: page.keyboard.press("Enter")
+                    try:
+                        logo = page.locator("img[src*='logo'], .logo").first
+                        if logo.is_visible(timeout=2000):
+                            logo.click()
+                            time.sleep(2)
+                    except:
+                        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+                        time.sleep(3)
+
+                    # Vai su Time
+                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+                    time.sleep(3)
+
+                    # Vai su Cartellino presenze
+                    page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     time.sleep(5)
 
-                    target_row = f"{mese_num:02d}/{anno}"
-                    row = page.locator(f"tr:has-text('{target_row}')").first
-                    if row.count() > 0:
-                        icon = row.locator("img[src*='search']").first
-                        if icon.count() > 0:
-                            with context.expect_page() as p_info:
-                                icon.click()
-                            popup = p_info.value
-                            try: popup.wait_for_load_state("networkidle")
-                            except: pass
-                            popup.pdf(path=path_cart)
-                            c_ok = True
-                            debug_info.append("Cartellino: Scaricato")
+                    # Imposta date
+                    try:
+                        dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
+                        al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
+
+                        if dal.count() > 0 and al.count() > 0:
+                            dal.click(force=True)
+                            page.keyboard.press("Control+A")
+                            dal.fill("")
+                            dal.type(d_from_vis, delay=80)
+                            dal.press("Tab")
+                            time.sleep(0.5)
+
+                            al.click(force=True)
+                            page.keyboard.press("Control+A")
+                            al.fill("")
+                            al.type(d_to_vis, delay=80)
+                            al.press("Tab")
+                            time.sleep(0.5)
+                    except:
+                        pass
+
+                    # Esegui ricerca
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(0.5)
+                    try:
+                        page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
+                    except:
+                        page.keyboard.press("Enter")
+
+                    # Attendi risultati
+                    try:
+                        page.wait_for_selector("text=Risultati della ricerca", timeout=20000)
+                    except:
+                        pass
+
+                    # Trova riga e lente (micro-refactor: clicca sempre l’icona, niente branch su str(locator))
+                    target_cart_row = f"{mese_num:02d}/{anno}"  # es. 12/2025
+                    riga_row = page.locator(f"tr:has-text('{target_cart_row}')").first
+                    if riga_row.count() > 0 and riga_row.locator("img[src*='search']").count() > 0:
+                        icona = riga_row.locator("img[src*='search']").first
+                    else:
+                        icona = page.locator("img[src*='search']").first
+
+                    if icona.count() == 0:
+                        # Fallback estremo: salva la pagina corrente
+                        page.pdf(path=path_cart)
+                    else:
+                        # Click -> popup
+                        with context.expect_page(timeout=20000) as popup_info:
+                            icona.click()
+                        popup = popup_info.value
+
+                        # Prendi URL del popup (normalizza eventuale doppio slash)
+                        popup_url = (popup.url or "").replace("/js_rev//", "/js_rev/")
+
+                        # FORZA EMBED=y (nel tuo log, senza EMBED risponde HTML)
+                        if "EMBED=y" not in popup_url:
+                            popup_url = popup_url + ("&" if "?" in popup_url else "?") + "EMBED=y"
+
+                        # Scarica bytes PDF via API request del context (stessa sessione/cookie)
+                        resp = context.request.get(popup_url, timeout=60000)
+                        body = resp.body()
+
+                        if body[:4] == b"%PDF":
+                            Path(path_cart).write_bytes(body)
+                        else:
+                            # Fallback: stampa del popup (meno fedele ma produce file)
+                            try:
+                                popup.pdf(path=path_cart, format="A4")
+                            except:
+                                page.pdf(path=path_cart)
+
+                        try:
+                            popup.close()
+                        except:
+                            pass
+
+                    # Verifica file
+                    if os.path.exists(path_cart) and os.path.getsize(path_cart) > 5000:
+                        c_ok = True
+                        debug_info.append("Cartellino: OK")
+                    else:
+                        debug_info.append("Cartellino: Vuoto/Piccolo")
+
                 except Exception as e:
                     debug_info.append(f"Cartellino Error: {e}")
+                    try: page.pdf(path=path_cart)
+                    except: pass
 
             browser.close()
             st_status.empty()
@@ -506,109 +495,117 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
 
 
 # ==============================================================================
-# 3. INTERFACCIA UTENTE (STREAMLIT)
+# 4. INTERFACCIA UTENTE (UI CORRETTA)
 # ==============================================================================
 
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 st.title("💶 Analisi Stipendio & Presenze")
 
-# --- SIDEBAR ---
+# Sidebar
 with st.sidebar:
     st.header("🔐 Credenziali")
-    username, password = get_credentials()
-
+    u, p = get_credentials()
     if not st.session_state.get('credentials_set'):
-        u = st.text_input("Username", value=username if username else "")
-        p = st.text_input("Password", type="password")
-        if st.button("💾 Salva"):
-            st.session_state.update({'username': u, 'password': p, 'credentials_set': True})
+        ui = st.text_input("User", value=u if u else "")
+        pi = st.text_input("Pass", type="password")
+        if st.button("Salva"):
+            st.session_state.update({'username': ui, 'password': pi, 'credentials_set': True})
             st.rerun()
     else:
-        st.success(f"Utente: {st.session_state.get('username', '')}")
-        if st.button("🔄 Disconnetti"):
+        st.success(f"Loggato: {st.session_state.get('username')}")
+        if st.button("Esci"):
             st.session_state.update({'credentials_set': False})
             st.rerun()
-
+    
     st.divider()
-
     if st.session_state.get('credentials_set'):
         sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
-        sel_mese = st.selectbox("Mese", ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-             "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"], index=0)
-        tipo_doc = st.radio("Tipo", ["📄 Cedolino Mensile", "🎄 Tredicesima"])
-
-        if st.button("🚀 AVVIA ANALISI COMPLETA", type="primary"):
-            # Reset stati
+        sel_mese = st.selectbox("Mese", ["Gennaio","Febbraio","Marzo","Aprile","Maggio","Giugno","Luglio","Agosto","Settembre","Ottobre","Novembre","Dicembre"], index=0)
+        tipo = st.radio("Tipo", ["📄 Cedolino", "🎄 Tredicesima"])
+        
+        if st.button("🚀 AVVIA ANALISI", type="primary"):
+            # Reset
             for k in ['agenda_data', 'debug_info', 'busta', 'cart', 'db', 'dc', 'done']:
                 st.session_state.pop(k, None)
             
-            tipo = "tredicesima" if "Tredicesima" in tipo_doc else "cedolino"
-            pb, pc, err = scarica_documenti_automatici(sel_mese, sel_anno, st.session_state['username'], st.session_state['password'], tipo)
-
+            t_doc = "tredicesima" if "Tredicesima" in tipo else "cedolino"
+            pb, pc, err = scarica_documenti_automatici(sel_mese, sel_anno, st.session_state['username'], st.session_state['password'], t_doc)
+            
             if err: st.error(err)
-            else:
-                st.session_state.update({'busta': pb, 'cart': pc, 'done': False})
+            else: st.session_state.update({'busta': pb, 'cart': pc, 'tipo': t_doc})
 
-# --- ELABORAZIONE DATI (AI) ---
+# Logica Analisi (Post-Download)
 if (st.session_state.get('busta') or st.session_state.get('cart')) and not st.session_state.get('done'):
     with st.spinner("🧠 Analisi AI in corso..."):
-        db = estrai_con_ai(st.session_state.get('busta'), get_busta_prompt(), "Busta Paga")
+        # Busta (AI)
+        db = estrai_con_ai(st.session_state.get('busta'), get_busta_prompt(), "Busta")
         
-        # Tentativo misto per cartellino
+        # Cartellino (Regex -> AI)
         path_c = st.session_state.get('cart')
-        dc = cartellino_parse_deterministico(path_c) # Prova regex
-        # Se regex fallisce o dà 0, usa AI
-        if not dc or (dc.get('gg_presenza', 0) == 0):
+        dc = cartellino_parse_deterministico(path_c)
+        if not dc or dc.get('gg_presenza', 0) == 0:
+             # Fallback AI se regex fallisce
              dc_ai = estrai_con_ai(path_c, get_cartellino_prompt(), "Cartellino")
              if dc_ai: dc = dc_ai
         
         st.session_state.update({'db': db, 'dc': dc, 'done': True})
 
-# --- VISUALIZZAZIONE TABS ---
-db = st.session_state.get('db')
-dc = st.session_state.get('dc')
-
+# Visualizzazione (Tabs)
 if st.session_state.get('done'):
-    tab1, tab2, tab3, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "📊 Confronto", "🔧 Debug"])
-
-    with tab1:
+    db = st.session_state.get('db')
+    dc = st.session_state.get('dc')
+    
+    t1, t2, t3, t4 = st.tabs(["💰 Dettaglio Stipendio", "📅 Cartellino", "📊 Confronto", "🔧 Debug"])
+    
+    with t1:
         if db:
             dg = db.get('dati_generali', {})
-            comp = db.get('competenze', {})
-            tratt = db.get('trattenute', {})
+            cmp = db.get('competenze', {})
+            trt = db.get('trattenute', {})
             c1, c2 = st.columns(2)
             c1.metric("Netto", f"€ {dg.get('netto', 0)}")
-            c2.metric("Lordo", f"€ {comp.get('lordo_totale', 0)}")
-            st.json(db)
-        else: st.warning("Dati busta non disponibili")
-
-    with tab2:
+            c2.metric("Lordo", f"€ {cmp.get('lordo_totale', 0)}")
+            
+            c3, c4 = st.columns(2)
+            with c3:
+                st.write("**Competenze**")
+                st.write(f"Base: € {cmp.get('base', 0)}")
+                st.write(f"Straordinari: € {cmp.get('straordinari', 0)}")
+            with c4:
+                st.write("**Trattenute**")
+                st.write(f"INPS: € {trt.get('inps', 0)}")
+                st.write(f"IRPEF: € {trt.get('irpef_netta', 0)}")
+        else: st.warning("Busta non disponibile")
+        
+    with t2:
         if dc:
-            st.metric("GG Presenza", dc.get('gg_presenza', 0))
-            st.write(f"Note: {dc.get('note', '')}")
-            st.json(dc)
-        else: st.warning("Dati cartellino non disponibili")
-
-    with tab3:
+            c1, c2 = st.columns(2)
+            c1.metric("GG Presenza", dc.get('gg_presenza', 0))
+            c2.metric("Ore Lavorate", dc.get('ore_lavorate_0253', 0))
+            st.info(f"Note: {dc.get('note', '')}")
+        else: st.warning("Cartellino non disponibile")
+        
+    with t3:
         if db and dc:
             gg_busta = db.get('dati_generali', {}).get('giorni_pagati', 0)
             gg_cart = dc.get('gg_presenza', 0)
-            st.metric("Discrepanza GG", f"{gg_cart - gg_busta:.2f}")
-        else: st.info("Necessari entrambi i documenti")
-
-    with tab4:
-        st.subheader("Agenda & Log")
+            st.metric("Discrepanza Giorni", f"{gg_cart - gg_busta:.2f}", delta_color="inverse")
+        else: st.info("Dati insufficienti per confronto")
+        
+    with t4:
+        st.subheader("Agenda Stats")
         if st.session_state.get('agenda_data'):
             ad = st.session_state['agenda_data']
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Omesse", ad['counts'].get("OMESSA TIMBRATURA", 0))
-            c2.metric("Malattia", ad['counts'].get("MALATTIA", 0))
-            st.write(ad.get('lines', []))
+            cols = st.columns(len(AGENDA_KEYWORDS))
+            for i, k in enumerate(AGENDA_KEYWORDS):
+                if ad['counts'].get(k, 0) > 0:
+                    cols[i % 3].metric(k, ad['counts'][k])
+            with st.expander("Righe grezze"):
+                st.write(ad['lines'])
         
-        st.write("LOG OPERAZIONI:")
+        st.write("LOG:")
         st.write(st.session_state.get('debug_info', []))
         
-        # Link download
         if st.session_state.get('busta'):
             st.markdown(get_pdf_download_link(st.session_state['busta'], "busta.pdf"), unsafe_allow_html=True)
         if st.session_state.get('cart'):
