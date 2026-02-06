@@ -290,9 +290,13 @@ Conta:
 2. ferie: FE, FERIE
 3. malattia: MAL, MALATTIA
 4. permessi: PERMESSO, PAR, ROL
-5. riposi: RIPOSO, RIP, RECUPERO
-6. omesse_timbrature: ANOMALIA, OMESSA, OMT
+5. riposi: RIPOSO, RIP, RECUPERO, riposo compensativo (NON sono giorni retribuiti INPS)
+6. omesse_timbrature: ANOMALIA, OMESSA, OMT (NOTA: sono comunque giorni LAVORATI, solo senza timbratura registrata)
 7. festivita: FESTIVO, FES
+
+IMPORTANTE: 
+- Le "omesse timbrature" sono giorni in cui si è lavorato ma manca la timbratura (badge dimenticato)
+- I "riposi compensativi" NON contano come giorni INPS pagati
 
 Output JSON:
 {
@@ -318,15 +322,168 @@ Output JSON:
 
 
 # ==============================================================================
-# AGENDA VIA API
+# AGENDA - METODO MIGLIORATO CON INTERCETTAZIONE RETE
 # ==============================================================================
-def read_agenda_api(context, mese_num, anno):
-    """Legge l'agenda tramite chiamate API dirette al portale Gottardo."""
+def read_agenda_with_navigation(page, context, mese_num, anno):
+    """
+    Legge l'agenda navigando effettivamente al calendario e intercettando le richieste.
+    Questo è più affidabile delle chiamate API dirette.
+    """
     result = {
         "events_by_type": {},
         "total_events": 0,
         "items": [],
         "debug": []
+    }
+    
+    captured_events = []
+    
+    # Handler per catturare risposte di rete
+    def capture_calendar_response(response):
+        try:
+            url = response.url
+            if "events" in url.lower() or "calendar" in url.lower() or "time" in url.lower():
+                if response.status == 200:
+                    try:
+                        data = response.json()
+                        if data:
+                            result["debug"].append(f"📡 Catturato: {url[:80]}...")
+                            if isinstance(data, list):
+                                captured_events.extend(data)
+                            elif isinstance(data, dict) and "items" in data:
+                                captured_events.extend(data["items"])
+                            elif isinstance(data, dict):
+                                captured_events.append(data)
+                    except:
+                        pass
+        except:
+            pass
+    
+    # Registra listener
+    page.on("response", capture_calendar_response)
+    
+    try:
+        # Naviga al calendario (Time -> Calendario)
+        result["debug"].append("🗓️ Navigazione al calendario...")
+        
+        try:
+            page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+        except:
+            try:
+                page.locator("text=Time").first.click(force=True)
+            except:
+                pass
+        time.sleep(2)
+        
+        # Prova a cliccare su "Calendario" o "Agenda"
+        for tab_name in ["Calendario", "Agenda", "Calendar"]:
+            try:
+                page.locator(f"text={tab_name}").first.click(force=True, timeout=3000)
+                result["debug"].append(f"✅ Cliccato tab: {tab_name}")
+                break
+            except:
+                continue
+        
+        time.sleep(3)
+        
+        # Prova anche con gli ID dei tab
+        for tab_id in ["lnktab_0_label", "lnktab_1_label"]:
+            try:
+                page.evaluate(f"document.getElementById('{tab_id}')?.click()")
+                time.sleep(1)
+            except:
+                pass
+        
+        time.sleep(3)
+        
+        # Se siamo nella vista calendario, cerchiamo gli eventi nel DOM
+        result["debug"].append("🔍 Ricerca eventi nel DOM...")
+        
+        # Selettori per eventi calendario
+        event_selectors = [
+            ".calendarEvent",
+            "[class*='Event']",
+            ".dojoxCalendarEvent",
+            "[title*='OMESSA']",
+            "[title*='FERIE']",
+            "[title*='MALATTIA']",
+            "[title*='RIPOSO']"
+        ]
+        
+        dom_events = []
+        for sel in event_selectors:
+            try:
+                elements = page.locator(sel)
+                count = elements.count()
+                if count > 0:
+                    result["debug"].append(f"📌 {sel}: {count} elementi")
+                    for i in range(min(count, 50)):
+                        try:
+                            el = elements.nth(i)
+                            text = (el.inner_text() or "").strip()
+                            title = (el.get_attribute("title") or "").strip()
+                            content = text or title
+                            if content and len(content) > 2:
+                                dom_events.append(content)
+                        except:
+                            continue
+            except:
+                continue
+        
+        result["debug"].append(f"📋 Trovati {len(dom_events)} eventi nel DOM")
+        
+    except Exception as e:
+        result["debug"].append(f"❌ Errore navigazione: {type(e).__name__}")
+    finally:
+        # Rimuovi listener
+        try:
+            page.remove_listener("response", capture_calendar_response)
+        except:
+            pass
+    
+    # Processa eventi catturati
+    all_events = captured_events + [{"summary": e} for e in dom_events]
+    
+    for ev in all_events:
+        summary = str(ev.get("summary", "") or ev.get("title", "") or ev.get("description", "")).upper()
+        
+        # Filtra per mese (se c'è data)
+        start = ev.get("startTime", "") or ev.get("start", "") or ev.get("date", "")
+        if start and len(str(start)) >= 7:
+            try:
+                ev_month = int(str(start)[5:7])
+                if ev_month != mese_num:
+                    continue
+            except:
+                pass
+        
+        # Categorizza
+        if "OMESSA" in summary or "OMT" in summary:
+            result["events_by_type"]["OMESSA TIMBRATURA"] = result["events_by_type"].get("OMESSA TIMBRATURA", 0) + 1
+            result["items"].append(f"⚠️ OMESSA: {summary[:50]}")
+        elif "FERIE" in summary or "FEP" in summary:
+            result["events_by_type"]["FERIE"] = result["events_by_type"].get("FERIE", 0) + 1
+            result["items"].append(f"🏖️ FERIE: {summary[:50]}")
+        elif "MALATTIA" in summary or "MAL" in summary:
+            result["events_by_type"]["MALATTIA"] = result["events_by_type"].get("MALATTIA", 0) + 1
+            result["items"].append(f"🤒 MALATTIA: {summary[:50]}")
+        elif "RIPOSO" in summary or "RCS" in summary or "RIC" in summary:
+            result["events_by_type"]["RIPOSO"] = result["events_by_type"].get("RIPOSO", 0) + 1
+            result["items"].append(f"💤 RIPOSO: {summary[:50]}")
+    
+    result["total_events"] = sum(result["events_by_type"].values())
+    result["debug"].append(f"📊 Totale categorizzati: {result['total_events']}")
+    
+    return result
+
+
+def read_agenda_api(context, mese_num, anno):
+    """Fallback: Legge l'agenda tramite chiamate API dirette."""
+    result = {
+        "events_by_type": {},
+        "total_events": 0,
+        "items": [],
+        "debug": ["📡 Tentativo API dirette..."]
     }
     
     base_url = "https://selfservice.gottardospa.it/js_rev/JSipert2"
@@ -336,13 +493,14 @@ def read_agenda_api(context, mese_num, anno):
             url = f"{base_url}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
             resp = context.request.get(url, timeout=10000)
             
+            result["debug"].append(f"  {code}: status={resp.status}")
+            
             if resp.ok:
                 try:
                     data = resp.json()
                     if data:
                         events = data if isinstance(data, list) else [data]
                         
-                        # Filtra per mese
                         month_events = []
                         for ev in events:
                             start = ev.get("startTime", "") or ev.get("start", "")
@@ -358,11 +516,11 @@ def read_agenda_api(context, mese_num, anno):
                         if month_events:
                             result["events_by_type"][name] = len(month_events)
                             result["total_events"] += len(month_events)
-                            result["debug"].append(f"✅ {code}: {len(month_events)} eventi")
-                except:
-                    pass
+                            result["debug"].append(f"  ✅ {code}: {len(month_events)} eventi")
+                except Exception as e:
+                    result["debug"].append(f"  ❌ {code} parse error: {e}")
         except Exception as e:
-            result["debug"].append(f"⚠️ {code}: {type(e).__name__}")
+            result["debug"].append(f"  ⚠️ {code}: {type(e).__name__}")
     
     return result
 
@@ -408,10 +566,15 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 browser.close()
                 return results
             
-            # === AGENDA ===
+            # === AGENDA CON NAVIGAZIONE ===
             st.toast("🗓️ Lettura Agenda...", icon="🗓️")
             try:
-                results["agenda"] = read_agenda_api(ctx, idx, anno)
+                # Prima prova con navigazione al calendario
+                results["agenda"] = read_agenda_with_navigation(page, ctx, idx, anno)
+                if results["agenda"]["total_events"] == 0:
+                    # Fallback: API dirette
+                    results["agenda"] = read_agenda_api(ctx, idx, anno)
+                
                 if results["agenda"]["total_events"] > 0:
                     st.toast(f"✅ Agenda: {results['agenda']['total_events']} eventi", icon="📅")
             except Exception as e:
@@ -721,30 +884,50 @@ if "res" in st.session_state:
         gg_ferie = c.get("ferie", 0)
         gg_malattia = c.get("malattia", 0)
         gg_permessi = c.get("permessi", 0)
-        gg_riposi = c.get("riposi", 0)
-        gg_omesse = c.get("omesse_timbrature", 0)
+        gg_riposi = c.get("riposi", 0)  # NON contano come giorni INPS pagati!
+        gg_omesse = c.get("omesse_timbrature", 0)  # Sono giorni LAVORATI!
         
         # Aggiungi eventi agenda
         agenda_events = agenda.get("events_by_type", {})
         agenda_omesse = agenda_events.get("OMESSA TIMBRATURA", 0)
-        agenda_ferie = agenda_events.get("FERIE PIANIFICATE", 0)
+        agenda_ferie = agenda_events.get("FERIE", 0) or agenda_events.get("FERIE PIANIFICATE", 0)
         agenda_malattia = agenda_events.get("MALATTIA", 0)
+        agenda_riposi = agenda_events.get("RIPOSO", 0)
         
-        tot_giustificati = gg_ferie + gg_malattia + gg_permessi + gg_riposi
-        tot_coperti = gg_lavorati + tot_giustificati
+        # CALCOLO CORRETTO:
+        # Le OMESSE TIMBRATURE sono giorni LAVORATI (hai lavorato ma dimenticato il badge)
+        # I RIPOSI COMPENSATIVI NON sono giorni pagati INPS
+        tot_lavorati_effettivi = gg_lavorati + gg_omesse  # Omesse = lavorato senza timbratura
+        tot_retribuiti = tot_lavorati_effettivi + gg_ferie + gg_malattia + gg_permessi
         gg_pagati = dg.get("giorni_pagati", 0)
-        diff = tot_coperti - gg_pagati
+        diff = tot_retribuiti - gg_pagati
+        
+        # Mostra info dettagliata
+        st.info(f"""
+        📊 **Riepilogo Giorni**:
+        - Lavorati con badge: **{gg_lavorati}** | Omesse timbrature: **{gg_omesse}** (= lavorati senza badge)
+        - **Totale giorni lavorati**: {tot_lavorati_effettivi}
+        - Ferie: **{gg_ferie}** | Malattia: **{gg_malattia}** | Permessi: **{gg_permessi}**
+        - Riposi compensativi: **{gg_riposi}** (non contano GG.INPS)
+        - **Totale retribuiti**: {tot_retribuiti} vs **Giorni INPS pagati**: {gg_pagati}
+        """)
         
         if abs(diff) <= 1:
-            st.success(f"✅ **DATI COERENTI** — Coperti: {tot_coperti} (Lav {gg_lavorati} + Giust {tot_giustificati}) vs Pagati: {gg_pagati}")
+            st.success(f"✅ **DATI COERENTI** — Retribuiti: {tot_retribuiti} vs Pagati INPS: {gg_pagati}")
         else:
-            st.error(f"❌ **ATTENZIONE** — Mancano {abs(diff)} giorni! Coperti: {tot_coperti} vs Pagati: {gg_pagati}")
+            if diff > 0:
+                st.warning(f"⚠️ **DIFFERENZA**: {diff} giorni in più nel cartellino (verifica i dati)")
+            else:
+                st.error(f"❌ **ATTENZIONE**: Mancano {abs(diff)} giorni! Retribuiti: {tot_retribuiti} vs Pagati: {gg_pagati}")
         
-        # Avvisi da Agenda
-        if agenda_omesse > 0:
-            st.warning(f"⚠️ **AGENDA**: {agenda_omesse} omesse timbrature rilevate!")
-        if gg_omesse > 0:
-            st.warning(f"⚠️ **CARTELLINO**: {gg_omesse} anomalie/omesse rilevate!")
+        # Info sulle omesse timbrature (reminder, non errore)
+        if gg_omesse > 0 or agenda_omesse > 0:
+            tot_omesse = max(gg_omesse, agenda_omesse)
+            st.caption(f"ℹ️ **Reminder**: {tot_omesse} omesse timbrature da regolarizzare (hai lavorato ma manca il badge)")
+        
+        if agenda_riposi > 0 or gg_riposi > 0:
+            tot_riposi = max(agenda_riposi, gg_riposi)
+            st.caption(f"💤 {tot_riposi} riposi compensativi (non contano come GG.INPS pagati)")
     elif is_13:
         if b.get("e_tredicesima"):
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
