@@ -38,6 +38,7 @@ if sys.platform == "win32":
 # ==============================================================================
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide", initial_sidebar_state="collapsed")
 
+# Timeout generosi per sito lento
 TIMEOUT_NAV = 60000 
 MESI_IT = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
            "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
@@ -56,6 +57,7 @@ def setup_genai():
 def get_best_model():
     try:
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Priorità a Flash (veloce) poi Pro
         for m in models:
             if "flash" in m.lower() and "1.5" in m: return m
         for m in models:
@@ -84,7 +86,9 @@ class AIParser:
                 blob = {"mime_type": "application/pdf", "data": f.read()}
             resp = model.generate_content([prompt, blob])
             return clean_json_response(resp.text)
-        except: return None
+        except Exception as e:
+            st.warning(f"Errore AI: {e}")
+            return None
 
 # ==============================================================================
 # PARSERS (FULL AI)
@@ -103,7 +107,6 @@ class BustaParser:
 class CartellinoParser:
     @staticmethod
     def parse(pdf_path):
-        # Prompt Potenziato: Estrae TUTTO dal PDF Cartellino
         prompt = """
         Analizza questo CARTELLINO PRESENZE/LIBRO UNICO.
         Devi contare i giorni in base a cosa c'è scritto nelle righe del calendario.
@@ -127,12 +130,11 @@ class CartellinoParser:
         return data or {"giorni_lavorati": 0, "ferie": 0, "malattia": 0, "omessa": 0, "riposi": 0, "is_est": True}
 
 # ==============================================================================
-# LOGICA
+# LOGICA COERENZA
 # ==============================================================================
 def calcola_coerenza(pagati, cart_data):
     report = {"status": "ok", "warnings": [], "errors": [], "details_calcolo": ""}
     
-    # Dati da cartellino (AI extract)
     lav = cart_data.get("giorni_lavorati", 0)
     fe = cart_data.get("ferie", 0)
     mal = cart_data.get("malattia", 0)
@@ -143,12 +145,12 @@ def calcola_coerenza(pagati, cart_data):
     coperti = lav + giustificati
     diff = coperti - pagati
     
-    desc_giust = []
-    if fe: desc_giust.append(f"{fe} Ferie")
-    if mal: desc_giust.append(f"{mal} Malattia")
-    if om: desc_giust.append(f"{om} Omesse")
-    if rip: desc_giust.append(f"{rip} Riposi")
-    txt_giust = ", ".join(desc_giust) if desc_giust else "0 Giustificativi"
+    desc = []
+    if fe: desc.append(f"{fe} Ferie")
+    if mal: desc.append(f"{mal} Malattia")
+    if om: desc.append(f"{om} Omesse")
+    if rip: desc.append(f"{rip} Riposi")
+    txt_giust = ", ".join(desc) if desc else "0 Giust."
     
     report["details_calcolo"] = f"<small>Confronto: {coperti} Coperti ({lav} Lav + {giustificati} Giust [{txt_giust}]) vs {pagati} Pagati</small>"
     
@@ -156,10 +158,10 @@ def calcola_coerenza(pagati, cart_data):
         if diff < 0:
             report["errors"].append(f"⚠️ Mancano {abs(diff)} giorni coperti ({coperti}) rispetto ai pagati ({pagati}).")
         else:
-            report["warnings"].append(f"ℹ️ {diff} giorni coperti in più dei pagati (es. straordinari?).")
-            
+            report["warnings"].append(f"ℹ️ {diff} giorni coperti in più dei pagati.")
+    
     if om > 0:
-        report["warnings"].append(f"⚠️ {om} giornate con Omesse Timbrature/Anomalie.")
+        report["warnings"].append(f"⚠️ {om} giornate con Omesse Timbrature.")
 
     if report["errors"]: report["status"] = "error"
     elif report["warnings"]: report["status"] = "warning"
@@ -167,18 +169,172 @@ def calcola_coerenza(pagati, cart_data):
     return report
 
 # ==============================================================================
-# CLIENT (Solo Login & Nav)
+# CLIENT GOTTARDO (FULL DOWNLOAD)
 # ==============================================================================
 class GottardoClient:
     def __init__(self, user, pwd):
         self.u = user
         self.p = pwd
+        self.browser = None
+
+    def execute_download(self, mese_num, anno, mese_nome, is_13ma):
+        paths = {"busta": None, "cart": None}
         
-    def check_login(self):
-        # Metodo dummy per UI feedback, la navigazione reale avverrebbe qui
-        # Per questa versione "File Based" (dove l'AI analizza i PDF scaricati),
-        # ci concentriamo sull'analisi. In prod, qui ci sarebbe il download_v2.
-        return True 
+        # Percorsi locali
+        suffix = "_13ma" if is_13ma else ""
+        local_busta = os.path.abspath(f"busta_{mese_num}_{anno}{suffix}.pdf")
+        local_cart = os.path.abspath(f"cartellino_{mese_num}_{anno}.pdf")
+        
+        # Se già esistono da run recenti, li riuso per velocità? No, meglio riscaricare sempre per sicurezza.
+        if os.path.exists(local_busta): os.remove(local_busta)
+        if os.path.exists(local_cart): os.remove(local_cart)
+
+        st.toast("Avvio Browser...", icon="🤖")
+        
+        with sync_playwright() as p:
+            self.browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-gpu"]
+            )
+            # Context con download acceptati
+            context = self.browser.new_context(accept_downloads=True)
+            context.set_default_timeout(TIMEOUT_NAV)
+            page = context.new_page()
+
+            try:
+                # 1. LOGIN
+                st.toast("Login in corso...", icon="🔐")
+                page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
+                page.fill('input[type="text"]', self.u)
+                page.fill('input[type="password"]', self.p)
+                page.press('input[type="password"]', "Enter")
+                
+                # Check login
+                try:
+                    page.wait_for_selector("text=I miei dati", timeout=20000)
+                except:
+                    st.error("Login fallito o timeout. Verifica credenziali.")
+                    return paths
+
+                # 2. DOWNLOAD BUSTA
+                st.toast(f"Scarico Busta {mese_nome}...", icon="💰")
+                try:
+                    # Naviga a Documenti
+                    self._nav_to_docs(page)
+                    
+                    # Cerca Link Mese
+                    target_text = f"{mese_nome} {anno}"
+                    if is_13ma: target_text = "Tredicesima"
+                    
+                    # Cerca link nella pagina
+                    with page.expect_download(timeout=15000) as download_info:
+                        # Trova link che contiene il testo (case insensitive)
+                        f = page.get_by_text(re.compile(target_text, re.IGNORECASE)).first
+                        if f.count() > 0:
+                            f.click()
+                        else:
+                            st.warning(f"Busta non trovata per {target_text}")
+                            raise Exception("Link not found")
+                    
+                    dl = download_info.value
+                    dl.save_as(local_busta)
+                    paths["busta"] = local_busta
+                    st.toast("Busta scaricata!", icon="✅")
+                    
+                except Exception as e:
+                    st.warning(f"Download Busta fallito: {e}")
+
+                # 3. DOWNLOAD CARTELLINO (Solo se non è 13ma)
+                if not is_13ma:
+                    st.toast("Scarico Cartellino...", icon="📅")
+                    try:
+                        self._nav_to_cartellino(page, mese_num, anno)
+                        
+                        # Cerca il bottone di stampa/ricerca
+                        # Clicca "Esegui Ricerca" (lente)
+                        # Nota: selettore complesso, provo approccio generico
+                        page.get_by_role("button", name=re.compile("ricerca|cerca", re.I)).last.click()
+                        time.sleep(3)
+                        
+                        # Clicca Icona PDF
+                        # Solitamente lancia un popup che è il PDF stesso
+                        with context.expect_page(timeout=15000) as popup_info:
+                            page.locator("img[src*='search'], .z-icon-search").first.click()
+                        
+                        popup = popup_info.value
+                        popup.wait_for_load_state()
+                        
+                        # Metodo "Embed trick": l'URL del popup ha spesso il blob o parametri
+                        # Se è un PDF diretto, possiamo salvarlo
+                        # Se è un visualizzatore JS, dobbiamo estrarre URL embed
+                        
+                        final_url = popup.url
+                        # Aggiungi EMBED=y se serve per forzare PDF stream
+                        if "EMBED" not in final_url:
+                            final_url += "&EMBED=y"
+                            
+                        resp = context.request.get(final_url)
+                        if resp.body()[:4] == b"%PDF":
+                            with open(local_cart, "wb") as f:
+                                f.write(resp.body())
+                            paths["cart"] = local_cart
+                            st.toast("Cartellino scaricato!", icon="✅")
+                        
+                        popup.close()
+                        
+                    except Exception as e:
+                        st.warning(f"Download Cartellino fallito: {e}")
+
+            except Exception as e:
+                st.error(f"Errore Navigazione: {e}")
+            finally:
+                self.browser.close()
+        
+        return paths
+
+    def _nav_to_docs(self, page):
+        # Naviga al tab Documenti (logica resiliente)
+        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+        time.sleep(2)
+        # Clicca menu Documenti (spesso ID revit_navigation_NavHoverItem_0_label)
+        try:
+            page.locator("text=Documenti").first.click()
+        except:
+             page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
+        time.sleep(2)
+        # Clicca Tab Cedolino
+        try:
+            page.locator("text=Cedolino").first.click()
+        except: pass
+        time.sleep(2)
+
+    def _nav_to_cartellino(self, page, m, y):
+        # Naviga a Presenze
+        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+        time.sleep(1)
+        try:
+            page.locator("text=Presenze").first.click()
+        except:
+            page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+        time.sleep(2)
+        
+        # Tab Cartellino
+        try:
+            page.locator("text=Cartellino").first.click()
+        except: pass
+        time.sleep(2)
+        
+        # Imposta date (Dal 01/MM/YYYY al FineMese)
+        last_day = calendar.monthrange(y, m)[1]
+        d_start = f"01/{m:02d}/{y}"
+        d_end = f"{last_day}/{m:02d}/{y}"
+        
+        # Input date (selettori tricky, uso tab e type)
+        inputs = page.locator(".dijitInputInner")
+        if inputs.count() >= 2:
+            inputs.nth(0).fill(d_start)
+            inputs.nth(1).fill(d_end)
+        time.sleep(1)
 
 # ==============================================================================
 # UI
@@ -197,14 +353,14 @@ st.markdown("""
 
 if "data" not in st.session_state: st.session_state["data"] = None
 
-st.title("💶 Gottardo Payroll (AI V2)")
+st.title("💶 Gottardo Payroll (Full)")
 
 user = st.session_state.get("username", "") or st.secrets.get("ZK_USER", "")
 pwd = st.session_state.get("password", "") or st.secrets.get("ZK_PASS", "")
 is_logged = st.session_state.get("is_logged", False)
 
 if not is_logged and not (user and pwd):
-    # LOGIN
+    # LOGIN FORM
     c1, c2, c3 = st.columns([2, 2, 1])
     with c1: u = st.text_input("User", placeholder="Username", label_visibility="collapsed")
     with c2: p = st.text_input("Pass", type="password", placeholder="Password", label_visibility="collapsed")
@@ -212,12 +368,12 @@ if not is_logged and not (user and pwd):
         if st.button("🔓 Accedi", use_container_width=True):
             st.session_state["username"] = u; st.session_state["password"] = p; st.session_state["is_logged"] = True; st.rerun()
 else:
-    # MAIN
+    # MAIN FORM
     st.session_state["username"] = user; st.session_state["password"] = pwd; st.session_state["is_logged"] = True
     c_user, c_mese, c_anno, c_tipo, c_btn, c_out = st.columns([1.2, 1.2, 0.8, 1.2, 1.2, 0.4])
     
     with c_user: st.markdown(f"#### 👤 {user}")
-    with c_mese: sel_mese = st.selectbox("Mese", MESI_IT, index=9, label_visibility="collapsed") # Default Ottobre
+    with c_mese: sel_mese = st.selectbox("Mese", MESI_IT, index=9, label_visibility="collapsed") # Default Oct
     with c_anno: sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1, label_visibility="collapsed")
     with c_tipo:
         tipo = st.selectbox("Tipo", ["Cedolino", "Tredicesima"], label_visibility="collapsed") if sel_mese == "Dicembre" else "Cedolino"
@@ -231,24 +387,24 @@ else:
         is_13ma = (tipo == "Tredicesima")
         
         with st.status("🔄 Elaborazione...", expanded=True) as status:
-            suffix = "_13ma" if is_13ma else ""
-            b_path = f"busta_{mese_num}_{sel_anno}{suffix}.pdf"
-            c_path = f"cartellino_{mese_num}_{sel_anno}.pdf"
+            # 1. DOWNLOAD REALE
+            client = GottardoClient(user, pwd)
+            paths = client.execute_download(mese_num, sel_anno, sel_mese, is_13ma)
             
-            # --- PARSING ---
+            b_path = paths["busta"]
+            c_path = paths["cart"]
+            
+            # 2. PARSING AI
             st.write("🧠 Analisi Busta...")
-            busta_res = BustaParser.parse(b_path, is_13ma) if os.path.exists(b_path) else {"giorni_pagati": 0, "netto": 0}
+            busta_res = BustaParser.parse(b_path, is_13ma) if b_path else {"giorni_pagati": 0, "netto": 0}
             
             if not is_13ma:
                 st.write("🧠 Analisi Cartellino...")
-                if os.path.exists(c_path):
+                if c_path:
                     cart_res = CartellinoParser.parse(c_path)
                 else:
-                    # Fallback stima se manca PDF
-                    st.warning("⚠️ Cartellino PDF non trovato. Stima teorica.")
-                    _, last = calendar.monthrange(sel_anno, mese_num)
-                    teorici = sum(1 for d in range(1, last+1) if datetime(sel_anno, mese_num, d).weekday() < 5)
-                    cart_res = {"giorni_lavorati": teorici, "ferie": 0, "malattia": 0, "omessa": 0, "riposi": 0, "is_est": True}
+                    st.error("❌ Cartellino non trovato. Impossibile calcolare presenze.")
+                    cart_res = {"giorni_lavorati": 0, "ferie": 0, "malattia": 0, "omessa": 0, "riposi": 0}
                 
                 report = calcola_coerenza(pagati=busta_res.get("giorni_pagati", 0), cart_data=cart_res)
             else:
@@ -275,7 +431,6 @@ if st.session_state["data"]:
         
     st.markdown("---")
     
-    # METRICS
     cols = st.columns(4)
     with cols[0]: st.markdown(f'<div class="metric-box"><div class="metric-val">€ {d["busta"].get("netto",0)}</div><div class="metric-lbl">Netto</div></div>', unsafe_allow_html=True)
     
@@ -283,13 +438,11 @@ if st.session_state["data"]:
         with cols[1]: st.markdown(f'<div class="metric-box"><div class="metric-val">{d["busta"].get("giorni_pagati",0)}</div><div class="metric-lbl">Pagati</div></div>', unsafe_allow_html=True)
         with cols[2]: st.markdown(f'<div class="metric-box"><div class="metric-val">{cart.get("giorni_lavorati",0)}</div><div class="metric-lbl">Lavorati</div></div>', unsafe_allow_html=True)
         
-        # Giustificati Totale
         giust = cart.get("ferie",0) + cart.get("malattia",0) + cart.get("omessa",0) + cart.get("riposi",0)
         with cols[3]: st.markdown(f'<div class="metric-box"><div class="metric-val">{giust}</div><div class="metric-lbl">Giustificati</div></div>', unsafe_allow_html=True)
         
-        # Dettaglio Giustificativi
         if giust > 0:
-            st.markdown("### � Dettaglio Assenze/Giustificativi")
+            st.markdown("### 📋 Assenze")
             ce1, ce2, ce3, ce4 = st.columns(4)
             if cart.get("ferie"): ce1.info(f"🏖️ {cart['ferie']} Ferie")
             if cart.get("malattia"): ce2.error(f"🤒 {cart['malattia']} Malattia")
