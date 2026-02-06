@@ -546,13 +546,13 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # Il "Mini Calendar" si apre cliccando un DropDownButton
                 
                 # Cerca l'icona/bottone dropdown
-                # Dal debug precedente: id=dijit_form_DropDownButton_2
-                dropdown_btn = calendar_frame.locator("[widgetid*='DropDownButton'], .dijitDropDownButton, .dijitDownArrowButton, .dijitCalendarIcon").first
+                # Basato su HTML utente: .popup-trigger, .calendar16, widgetid=revit_form_Button_x
+                dropdown_btn = calendar_frame.locator(".popup-trigger, .calendar16, [widgetid^='revit_form_Button'], .dijitCalendarIcon").first
                 
                 opened_popup = False
                 
                 if dropdown_btn.is_visible():
-                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario (standard)...")
+                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario (Revit/Zucchetti)...")
                     try:
                         dropdown_btn.click()
                         time.sleep(2.0)
