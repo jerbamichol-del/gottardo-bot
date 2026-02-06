@@ -632,7 +632,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                         else:
                             # Vai AVANTI
                             calendar_frame.locator("body").press("PageDown")
-                             result["debug"].append("  ⌨️ Premuto PageDown (Avanti)")
+                            result["debug"].append("  ⌨️ Premuto PageDown (Avanti)")
                         
                         time.sleep(1.5)
                         moves += 1
