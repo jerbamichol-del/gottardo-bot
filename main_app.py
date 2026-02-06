@@ -141,22 +141,47 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 except: pass
                 time.sleep(3)
                 
-                # Cerca link
+                # Cerca link (Strategia Multi-Pattern)
                 with page.expect_download(timeout=20000) as dl_info:
-                    # Cerca link per testo parziale (case insensitive)
                     if is_13ma:
                         page.get_by_text(re.compile(f"Tredicesima.*{anno}", re.I)).first.click()
                     else:
-                        # Cerca Mese e Anno
                         links = page.locator("a")
                         found = False
+                        # Patterns da cercare
+                        patterns = [
+                            f"{mese_nome} {anno}",      # Ottobre 2025
+                            f"{idx:02d}/{anno}",        # 10/2025
+                            f"{idx:02d}-{anno}",        # 10-2025
+                            f"{idx}/{anno}"             # 10/2025
+                        ]
+                        
+                        # Itera sui link
                         for i in range(links.count()):
-                            txt = links.nth(i).inner_text()
-                            if mese_nome in txt and str(anno) in txt and "Tredicesima" not in txt:
-                                links.nth(i).click()
-                                found = True
-                                break
-                        if not found: raise Exception("Link non trovato")
+                            txt = (links.nth(i).inner_text() or "").strip()
+                            # Salta link troppo corti o Tredicesima se non richiesta
+                            if len(txt) < 5 or "Tredicesima" in txt: continue
+                            
+                            # Cerca match
+                            for pat in patterns:
+                                if pat.lower() in txt.lower():
+                                    links.nth(i).click()
+                                    found = True
+                                    break
+                            if found: break
+                        
+                        if not found:
+                            # Fallback estremo: cerca solo Mese e Anno separati
+                            for i in range(links.count()):
+                                txt = links.nth(i).inner_text() or ""
+                                if mese_nome.lower() in txt.lower() and str(anno) in txt:
+                                    links.nth(i).click()
+                                    found = True
+                                    break
+                                    
+                        if not found: 
+                            st.error(f"Link non trovato per i pattern: {patterns}")
+                            raise Exception("Link Busta introvabile")
                 
                 dl_info.value.save_as(local_busta)
                 if os.path.exists(local_busta): paths["busta"] = local_busta
