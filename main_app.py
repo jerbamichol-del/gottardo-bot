@@ -542,117 +542,108 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     except Exception as dump_e:
                         result["debug"].append(f"    Errore dump: {dump_e}")
 
-                # 3. Naviga Indietro/Avanti (LOGICA RELATIVA AL TITOLO)
+                # 3. Naviga Indietro/Avanti (STRATEGIA TASTIERA -ROBUSTA)
                 if found_title:
                     moves = 0
                     max_moves = 24
                     
-                    # Identifica container toolbar
-                    # Risaliamo al parent del titolo
-                    toolbar = title_el.locator("..")
-                    
+                    # Cerca di dare il FOCUS al calendario per usare la tastiera
+                    # Clicchiamo sul container della griglia o sul corpo
+                    try:
+                        focus_target = calendar_frame.locator(".dijitCalendarContainer, .dojoxCalendarGrid, #calendarContainer").first
+                        if focus_target.is_visible():
+                            focus_target.click()
+                        else:
+                            calendar_frame.locator("body").click()
+                        time.sleep(0.5)
+                    except: pass
+
                     while moves < max_moves:
-                        # Rileggi data corrente
+                        # Rileggi data dal titolo (o testo)
                         try:
-                            current_title = title_el.inner_text().strip().upper()
-                        except:
-                            # Se titolo perso (re-render), cercalo di nuovo
-                             # ...simil logica o break
-                             current_title = "PERSO"
+                           # Rileggiamo con lo stesso metodo euristico di prima
+                           current_title = "PERSO"
+                           # Cerca titolo 20xx
+                           candidates = calendar_frame.locator("text=202").all() # Testo con anno 202x
+                           for c in candidates:
+                               if c.is_visible():
+                                   t = c.inner_text().strip()
+                                   if len(t) < 40 and re.search(r'\b20\d{2}\b', t):
+                                       current_title = t.upper()
+                                       break
+                        except: pass
                         
                         result["debug"].append(f"  📅 Titolo Attuale: {current_title}")
                         
-                        target_reached = False
-                        if "PERSO" not in current_title and target_month_name in current_title and str(anno) in current_title:
+                        # Check target
+                        if target_month_name in current_title and str(anno) in current_title:
                             result["debug"].append("  ✅ Mese target raggiunto!")
                             cal_nav_success = True
-                            target_reached = True
                             break
                         
-                        # Decide direzione
-                        is_future = True # Default indietro
-                        # ... logica data ...
-                        found_year_match = re.search(r'20\d{2}', current_title)
-                        if found_year_match:
-                             y = int(found_year_match.group(0))
+                        # Direzione
+                        is_future = True 
+                        found_year = re.search(r'20\d{2}', current_title)
+                        if found_year:
+                             y = int(found_year.group(0))
                              if y < anno: is_future = False
                              elif y == anno:
-                                 # check mese
-                                 mesi_list = [m.upper() for m in MESI_IT]
-                                 curr_idx = -1
-                                 for i,m in enumerate(mesi_list): 
-                                     if m in current_title: 
-                                         curr_idx = i; break
-                                 if curr_idx < (mese_num - 1): is_future = False
+                                 mesi = [m.upper() for m in MESI_IT]
+                                 c_idx = -1
+                                 for i,m in enumerate(mesi):
+                                     if m in current_title: c_idx=i; break
+                                 if c_idx < (mese_num -1): is_future = False
                         
-                        # Trova bottoni nel toolbar
-                        # Cerchiamo tutti i figli cliccabili
-                        buttons = toolbar.locator("span.dijitButton, span[role='button'], div[role='button']").all()
+                        # AZIONE TASTIERA
+                        # In molti calendar Dojo:
+                        # PageUp/PageDown -> Mese Prev/Next
+                        # Ctrl+Left/Right -> Mese Prev/Next
+                        # Left/Right -> Giorno Prev/Next (navigazione lenta ma funziona)
                         
-                        # Ordiniamoli o identifichiamoli
-                        # Tipicamente: [Icona] [Prev] [Next] [Titolo] oppure [Prev] [Next] [Titolo]
-                        # Strategia: Cerca il bottone IMMEDIATAMENTE a sx o dx del titolo?
-                        # O cerca classi "Prev"/"Next" / "Decrease"/"Increase"
+                        key_action = "PageDown" if is_future else "PageUp" # PageUp va indietro nei mesi solitamente? O PageDown? 
+                        # Verifica standard: PageUp = Previous Month, PageDown = Next Month in molti sistemi.
+                        # Ma a volte è invertito o usa Ctrl.
+                        # Proviamo ArrowLeft / ArrowRight ripetuti se siamo vicini, o PageUp.
                         
-                        btn_prev = None
-                        btn_next = None
+                        # In Dojo Calendar:
+                        # Tasto sinistra/destra sposta di un giorno.
+                        # Se teniamo premuto o facciamo molti click...
+                        # Proviamo a usare i bottoni "anonimi" come ultima spiaggia se tastiera non va.
+                        # Tentativo 1: Clicca bottone freccia "grafico"
                         
-                        # Logga candidati
-                        if moves == 0:
-                            result["debug"].append(f"  🔎 Analisi Toolbar ({len(buttons)} btns):")
-                            for b in buttons:
-                                try:
-                                    bid = b.get_attribute("id") or ""
-                                    bcls = b.get_attribute("class") or ""
-                                    btit = b.get_attribute("title") or ""
-                                    result["debug"].append(f"    - Btn: id={bid} cls={bcls} tit={btit}")
-                                    
-                                    # Heuristiche
-                                    combined = (bid + bcls + btit).lower()
-                                    if "prev" in combined or "decrease" in combined or "back" in combined or "sinistra" in combined:
-                                        btn_prev = b
-                                    elif "next" in combined or "increase" in combined or "forward" in combined or "destra" in combined:
-                                        btn_next = b
-                                except: pass
+                        nav_btn_clicked = False
+                        # Cerca bottoni con classi arrow o icon
+                        arrow_btns = calendar_frame.locator(".dijitArrowButtonInner, .dijitCalendarArrow").all()
+                        # Di solito:
+                        # 0: Mese Prev (mini cal)
+                        # 1: Mese Next (mini cal)
+                        # 2: Anno Prev
+                        # 3: Anno Next
+                        # Difficile.
+                        
+                        # TORNANDO ALLA TASTIERA
+                        # Se siamo nel 2026 e vogliamo 2025, dobbiamo andare INDIETRO.
+                        # PageUp = Indietro (prev month view)? Proviamo.
+                        if not is_future:
+                            # Vai INDIETRO
+                            # Tenta tastiera
+                            calendar_frame.locator("body").press("PageUp")
+                            result["debug"].append("  ⌨️ Premuto PageUp (Indietro)")
                         else:
-                            # Re-find veloce
-                            for b in buttons:
-                                try:
-                                    combined = (b.get_attribute("id") or "" + b.get_attribute("class") or "" + b.get_attribute("title") or "").lower()
-                                    if "prev" in combined or "decrease" in combined: btn_prev = b
-                                    elif "next" in combined or "increase" in combined: btn_next = b
-                                except: pass
-                        
-                        # Se euristiche falliscono, usa posizione (brutale ma efficace)
-                        # Assumiamo che titolo sia l'elemento N. I bottoni sono N-1 (Prev) e N-2 (Next) o viceversa
-                        # Troppo rischioso senza vedere il DOM.
-                        
-                        # Se non trovati, prova selettore generico "arrow"
-                        if not btn_prev: 
-                            btn_prev = toolbar.locator(".dijitCalendarDecrease, [class*='Prev'], [class*='prev']").first
-                        if not btn_next:
-                            btn_next = toolbar.locator(".dijitCalendarIncrease, [class*='Next'], [class*='next']").first
-                        
-                        # Esegui click
-                        btn_to_click = btn_prev if is_future else btn_next
-                        desc_click = "Precedente" if is_future else "Successivo"
-                        
-                        if btn_to_click and btn_to_click.is_visible():
-                            btn_to_click.click()
-                            result["debug"].append(f"  🖱️ Click {desc_click}")
-                        else:
-                             result["debug"].append(f"  ⚠️ Bottone {desc_click} non identificato!")
-                             # Ultimo tentativo: clicca coordinate? No.
-                             break
+                            # Vai AVANTI
+                            calendar_frame.locator("body").press("PageDown")
+                             result["debug"].append("  ⌨️ Premuto PageDown (Avanti)")
                         
                         time.sleep(1.5)
                         moves += 1
                         
+                        # Controllo stallo: se titolo non cambia dopo 2 tentativi, cambia strategia tastiera
+                        # (es. usa Ctrl+Left)
                 else:
-                    result["debug"].append("  ⚠️ Titolo calendario non identificato, impossibile navigare")
+                     result["debug"].append("  ⚠️ Titolo non trovato inizialmente, impossibile navigare")
 
             except Exception as e:
-                result["debug"].append(f"  ❌ Errore navigazione toolbar: {e}")
+                result["debug"].append(f"  ❌ Errore navigazione: {e}")
         
         # === CATTURA EVENTI DAL DOM (FALLBACK TOTALE) ===
         # Se la griglia non si trova, cerca OVUNQUE nel frame
@@ -689,11 +680,18 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     
                     real_matches = 0
                     for i in range(count):
-                        if matches.nth(i).is_visible():
-                            # Controllo extra: assicuriamoci non sia nella sidebar (se stiamo usando BODY)
-                            # Se usiamo GRID siamo salvi.
-                            # Se BODY, scartiamo se parent ha classe "LeftColumn" o simile?
-                            # Per ora accettiamo il rischio se la griglia fallisce.
+                        el = matches.nth(i)
+                        if el.is_visible():
+                            # MEGA FIX: scarta se elemento è "LeftColumn" (Sidebar)
+                            # Cerca antenati con classe LeftColumn
+                            # Playwright non ha "has_parent" facile nei locators a cascata inversa senza xpath
+                            # Usiamo bounding box? 
+                            # Se x < 300 (sidebar solitamente a sx), ignoralo.
+                            box = el.bounding_box()
+                            if box and box['x'] < 300:
+                                # result["debug"].append(f"    Scartato '{kw}' in sidebar (x={box['x']})")
+                                continue
+                            
                             real_matches += 1
                             if kw == "OMESSA": dom_events.append("OMESSA TIMBRATURA")
                             elif kw == "FERIE": dom_events.append("FERIE")
