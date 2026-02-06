@@ -542,13 +542,12 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     except Exception as dump_e:
                         result["debug"].append(f"    Errore dump: {dump_e}")
 
-                # 3. Naviga Indietro/Avanti (STRATEGIA TASTIERA -ROBUSTA)
+                # 3. Naviga Indietro/Avanti (STRATEGIA TASTIERA - CORRETTA)
                 if found_title:
                     moves = 0
-                    max_moves = 24
+                    max_moves = 36 # Aumentato per coprire più anni
                     
-                    # Cerca di dare il FOCUS al calendario per usare la tastiera
-                    # Clicchiamo sul container della griglia o sul corpo
+                    # Focus iniziale
                     try:
                         focus_target = calendar_frame.locator(".dijitCalendarContainer, .dojoxCalendarGrid, #calendarContainer").first
                         if focus_target.is_visible():
@@ -557,90 +556,124 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                             calendar_frame.locator("body").click()
                         time.sleep(0.5)
                     except: pass
-
+                    
+                    # Pattern regex per il formato titolo "01 ott - 31 ott 2025"
+                    # o "Gennaio 2026"
+                    
                     while moves < max_moves:
-                        # Rileggi data dal titolo (o testo)
+                        # Rileggi data dal titolo
+                        current_title_text = "PERSO"
                         try:
-                           # Rileggiamo con lo stesso metodo euristico di prima
-                           current_title = "PERSO"
-                           # Cerca titolo 20xx
-                           candidates = calendar_frame.locator("text=202").all() # Testo con anno 202x
+                           # Cerchiamo candidati testuali validi
+                           candidates = calendar_frame.locator("text=202").all() # Stringhe con anni 202x
                            for c in candidates:
                                if c.is_visible():
-                                   t = c.inner_text().strip()
-                                   if len(t) < 40 and re.search(r'\b20\d{2}\b', t):
-                                       current_title = t.upper()
+                                   t = c.inner_text().strip().upper()
+                                   # Filtra falsi positivi noti
+                                   if "SALDO" in t or "PERMESSI" in t or "FERIE" in t: continue
+                                   if len(t) > 40: continue
+                                   
+                                   # Cerca pattern anno
+                                   if re.search(r'\b20\d{2}\b', t):
+                                       current_title_text = t
                                        break
                         except: pass
                         
-                        result["debug"].append(f"  📅 Titolo Attuale: {current_title}")
+                        result["debug"].append(f"  📅 Titolo Attuale: {current_title_text}")
                         
-                        # Check target
-                        if target_month_name in current_title and str(anno) in current_title:
-                            result["debug"].append("  ✅ Mese target raggiunto!")
-                            cal_nav_success = True
-                            break
+                        # Interpretazione Data Corrente
+                        curr_y = -1
+                        curr_m = -1
                         
-                        # Direzione
-                        is_future = True 
-                        found_year = re.search(r'20\d{2}', current_title)
-                        if found_year:
-                             y = int(found_year.group(0))
-                             if y < anno: is_future = False
-                             elif y == anno:
-                                 mesi = [m.upper() for m in MESI_IT]
-                                 c_idx = -1
-                                 for i,m in enumerate(mesi):
-                                     if m in current_title: c_idx=i; break
-                                 if c_idx < (mese_num -1): is_future = False
+                        # Estrai Anno
+                        y_match = re.search(r'20\d{2}', current_title_text)
+                        if y_match:
+                            curr_y = int(y_match.group(0))
                         
-                        # AZIONE TASTIERA
-                        # In molti calendar Dojo:
-                        # PageUp/PageDown -> Mese Prev/Next
-                        # Ctrl+Left/Right -> Mese Prev/Next
-                        # Left/Right -> Giorno Prev/Next (navigazione lenta ma funziona)
+                        # Estrai Mese (più difficile se range)
+                        # Se formato "01 ott - 31 ott 2025"
+                        # Cerca mese in italiano
+                        found_m = False
+                        mesi_list = [m.upper() for m in MESI_IT] # GENNAIO, FEBBRAIO...
+                        mesi_short = [m[:3] for m in mesi_list]   # GEN, FEB, MAR... (o inglese? no, italiano)
                         
-                        key_action = "PageDown" if is_future else "PageUp" # PageUp va indietro nei mesi solitamente? O PageDown? 
-                        # Verifica standard: PageUp = Previous Month, PageDown = Next Month in molti sistemi.
-                        # Ma a volte è invertito o usa Ctrl.
-                        # Proviamo ArrowLeft / ArrowRight ripetuti se siamo vicini, o PageUp.
+                        # Cerca mese completo o abbr
+                        for i, m in enumerate(mesi_list):
+                            if m in current_title_text or (len(m)>4 and m[:-1] in current_title_text): # es OTTOBR in OTTOBRE
+                                curr_m = i + 1
+                                found_m = True
+                                break
                         
-                        # In Dojo Calendar:
-                        # Tasto sinistra/destra sposta di un giorno.
-                        # Se teniamo premuto o facciamo molti click...
-                        # Proviamo a usare i bottoni "anonimi" come ultima spiaggia se tastiera non va.
-                        # Tentativo 1: Clicca bottone freccia "grafico"
-                        
-                        nav_btn_clicked = False
-                        # Cerca bottoni con classi arrow o icon
-                        arrow_btns = calendar_frame.locator(".dijitArrowButtonInner, .dijitCalendarArrow").all()
-                        # Di solito:
-                        # 0: Mese Prev (mini cal)
-                        # 1: Mese Next (mini cal)
-                        # 2: Anno Prev
-                        # 3: Anno Next
-                        # Difficile.
-                        
-                        # TORNANDO ALLA TASTIERA
-                        # Se siamo nel 2026 e vogliamo 2025, dobbiamo andare INDIETRO.
-                        # PageUp = Indietro (prev month view)? Proviamo.
-                        if not is_future:
-                            # Vai INDIETRO
-                            # Tenta tastiera
-                            calendar_frame.locator("body").press("PageUp")
-                            result["debug"].append("  ⌨️ Premuto PageUp (Indietro)")
+                        if not found_m:
+                            # Cerca abbreviazioni (es "OTT", "FEB")
+                             for i, m3 in enumerate(mesi_short):
+                                 # Regex boundary per evitare falsi match
+                                 if re.search(r'\b' + m3 + r'\b', current_title_text): # es \bOTT\b
+                                     curr_m = i + 1
+                                     found_m = True
+                                     break
+
+                        # Logica Confronto
+                        if curr_y != -1 and curr_m != -1:
+                            result["debug"].append(f"    -> Interpretato: Mese={curr_m}, Anno={curr_y}")
+                            
+                            if curr_y == anno and curr_m == mese_num:
+                                result["debug"].append("  ✅ Mese target raggiunto!")
+                                cal_nav_success = True
+                                break
+                            
+                            # Calcola Direzione
+                            # Target: anno, mese_num
+                            # Current: curr_y, curr_m
+                            
+                            target_val = anno * 12 + mese_num
+                            curr_val = curr_y * 12 + curr_m
+                            
+                            go_back = False
+                            if curr_val > target_val:
+                                go_back = True # Siamo nel futuro, dobbiamo tornare indietro
+                            
+                            direction = "INDIETRO" if go_back else "AVANTI"
+                            key = "PageUp" if go_back else "PageDown" 
+                            # Verifica comando tastiera Dojo
+                            # Indietro = PageUp solitamente. O Left Arrow se siamo in view mensile.
+                            
+                            # AZIONE MOVIMENTO
+                            if go_back:
+                                # Prova PageUp
+                                calendar_frame.locator("body").press("PageUp")
+                                # Anche ArrowLeft può servire se PageUp non va
+                                # calendar_frame.locator("body").press("ArrowLeft") 
+                            else:
+                                calendar_frame.locator("body").press("PageDown")
+                            
+                            result["debug"].append(f"  ⌨️ Navigo {direction} ({key})...")
+                            
                         else:
-                            # Vai AVANTI
-                            calendar_frame.locator("body").press("PageDown")
-                            result["debug"].append("  ⌨️ Premuto PageDown (Avanti)")
+                            # Se non riusciamo a leggere la data, proviamo azioni random (rischiose)
+                            # O usiamo PageUp blind se siamo bloccati al 2026?
+                            # Assumiamo che se vediamo "2026" e vogliamo "2025", dobbiamo andare indietro
+                            if curr_y != -1:
+                                if curr_y > anno:
+                                    calendar_frame.locator("body").press("PageUp")
+                                    result["debug"].append("  ⌨️ Anno futuro rilevato, premo PageUp...")
+                                elif curr_y < anno:
+                                     calendar_frame.locator("body").press("PageDown")
+                                     result["debug"].append("  ⌨️ Anno passato rilevato, premo PageDown...")
+                                else:
+                                    # Anno giusto, mese sconosciuto. 
+                                    # Proviamo avanti?
+                                    calendar_frame.locator("body").press("PageDown")
+                                    result["debug"].append("  ⌨️ Mese sconosciuto, tento PageDown...")
+                            else:
+                                result["debug"].append("  ⚠️ Data illeggibile, impossibile navigare")
+                                break
                         
                         time.sleep(1.5)
                         moves += 1
                         
-                        # Controllo stallo: se titolo non cambia dopo 2 tentativi, cambia strategia tastiera
-                        # (es. usa Ctrl+Left)
                 else:
-                     result["debug"].append("  ⚠️ Titolo non trovato inizialmente, impossibile navigare")
+                    result["debug"].append("  ⚠️ Titolo non trovato inizialmente, impossibile navigare")
 
             except Exception as e:
                 result["debug"].append(f"  ❌ Errore navigazione: {e}")
