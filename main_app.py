@@ -352,17 +352,39 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             page = context.new_page()
             page.set_viewport_size({"width": 1920, "height": 1080})
 
-            # LOGIN
+            # LOGIN MIGLIORATO
             st_status.info("🔐 Login...")
             page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y")
-            page.fill('input[type="text"]', username)
-            page.fill('input[type="password"]', password)
-            page.press('input[type="password"]', 'Enter')
+            
+            # Verifica se siamo sulla pagina di login
+            if page.locator('input[type="text"]').count() > 0:
+                page.fill('input[type="text"]', username)
+                page.fill('input[type="password"]', password)
+                page.press('input[type="password"]', 'Enter')
+            
+            # Attesa intelligente
             try:
+                # Aspetta o il successo O l'errore
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+
+                # Controllo errori comuni Zucchetti
+                if page.locator("text=Login non valido").count() > 0 or page.locator("text=Utente o password errati").count() > 0:
+                     browser.close()
+                     return None, None, "❌ PASSWORD ERRATA (Il sito dice: Login non valido)"
+                
+                if page.locator("text=Utente già collegato").count() > 0:
+                    # Se utente già collegato, prova a forzare o proseguire
+                    try: page.click("text=Continua", timeout=2000); time.sleep(2)
+                    except: pass
+
                 page.wait_for_selector("text=I miei dati", timeout=20000)
                 debug_info.append("Login: OK")
-            except:
-                browser.close(); return None, None, "LOGIN FALLITO"
+            except Exception as e:
+                # Screenshot di debug se fallisce
+                page.screenshot(path="login_debug.png")
+                browser.close()
+                return None, None, "❌ TIMEOUT LOGIN (Controlla login_debug.png o riprova)"
 
             # AGENDA
             st_status.info("🗓️ Agenda...")
@@ -377,7 +399,10 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
             # BUSTA PAGA
             st_status.info("💰 Busta Paga...")
             try:
-                page.click("text=I miei dati", force=True)
+                # Navigazione sicura
+                if page.locator("text=I miei dati").is_visible():
+                    page.click("text=I miei dati")
+                
                 page.wait_for_selector("text=Documenti", timeout=10000).click()
                 time.sleep(3)
                 try: page.click("text=Cedolino", force=True)
@@ -412,10 +437,14 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                     except: pass
                     
                     # Navigazione Menu
-                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                    time.sleep(3)
-                    page.evaluate("document.getElementById('lnktab_5_label')?.click()")
-                    time.sleep(5)
+                    try:
+                        page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+                        time.sleep(3)
+                        page.evaluate("document.getElementById('lnktab_5_label')?.click()")
+                        time.sleep(5)
+                    except:
+                        debug_info.append("Cartellino: Menu non cliccabile")
+                        raise Exception("Menu fail")
 
                     # Date
                     try:
@@ -451,7 +480,6 @@ def scarica_documenti_automatici(mese_nome, anno, username, password, tipo_docum
                             c_ok = True
                             debug_info.append("Cartellino: OK")
                         else:
-                            # Fallback PDF stampa
                             popup.pdf(path=path_cart)
                             c_ok = True
                         try: popup.close()
@@ -566,3 +594,4 @@ if st.session_state.get('done'):
         
         st.write("LOG:")
         st.write(st.session_state.get('debug_info', []))
+
