@@ -1,11 +1,10 @@
 # ==============================================================================
-# GOTTARDO PAYROLL ANALYZER v2.0
+# GOTTARDO PAYROLL ANALYZER v2.1
 # ==============================================================================
-# Versione ottimizzata con:
-# - Report di coerenza con sistema a semafori
-# - Confronto incrociato automatico (busta + cartellino + agenda)
-# - Glossario voci busta paga
-# - UI pulita senza log di debug visibili
+# - Login e avvio in orizzontale (mobile-friendly)
+# - Riepilogo con date eventi (assenze, malattie, omesse timbrature)
+# - Niente log tecnico, niente glossario
+# - Fix colori e cartellino
 # ==============================================================================
 
 import sys
@@ -23,14 +22,14 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from datetime import datetime
 
-# --- OPTIONAL: DeepSeek (OpenAI-compatible) + PDF text extraction ---
+# --- OPTIONAL ---
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
 try:
-    import fitz  # PyMuPDF
+    import fitz
 except Exception:
     fitz = None
 
@@ -57,14 +56,14 @@ except Exception:
 # ==============================================================================
 # Costanti
 # ==============================================================================
-TIMEOUT_API = 30000  # Coerente con context.set_default_timeout(45000)
+TIMEOUT_API = 30000
 TIMEOUT_DEFAULT = 45000
 
 CALENDAR_CODES = {
-    "FEP": "Ferie Pianificate",
+    "FEP": "Ferie",
     "OMT": "Omessa Timbratura",
     "RCS": "Riposo Compensativo",
-    "RIC": "Riposo Compensativo Forzato",
+    "RIC": "Riposo Compensativo",
     "MAL": "Malattia"
 }
 
@@ -72,25 +71,6 @@ MESI_IT = [
     "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
 ]
-
-# Glossario voci busta paga
-GLOSSARIO_BUSTA = {
-    "Retribuzione Base": "Il tuo stipendio mensile lordo fisso, stabilito dal contratto.",
-    "Contingenza": "Indennità storica per adeguamento al costo della vita (congelata).",
-    "EDR": "Elemento Distinto della Retribuzione - importo fisso aggiuntivo.",
-    "Scatti Anzianità": "Aumenti periodici automatici basati sugli anni di servizio.",
-    "Straordinari": "Compenso per ore lavorate oltre l'orario contrattuale.",
-    "Maggiorazione Festiva": "Compenso extra per lavoro in giorni festivi.",
-    "Contributi INPS": "Trattenute previdenziali (circa 9.19% del lordo).",
-    "IRPEF": "Imposta sul Reddito delle Persone Fisiche - tassazione progressiva.",
-    "Addizionale Regionale": "Imposta aggiuntiva IRPEF dovuta alla Regione.",
-    "Addizionale Comunale": "Imposta aggiuntiva IRPEF dovuta al Comune.",
-    "TFR": "Trattamento di Fine Rapporto - accantonamento per liquidazione.",
-    "Ferie Residue AP": "Giorni di ferie dell'anno precedente non ancora goduti.",
-    "Ferie Maturate": "Giorni di ferie maturati nell'anno corrente.",
-    "Ferie Godute": "Giorni di ferie effettivamente utilizzati.",
-    "PAR": "Permessi Annui Retribuiti - ore/giorni di permesso spettanti.",
-}
 
 
 def get_credentials():
@@ -163,10 +143,10 @@ MODELLI_DISPONIBILI = inizializza_modelli_gemini()
 
 
 # ==============================================================================
-# AGENDA - API Method
+# AGENDA - API Method con dettaglio date
 # ==============================================================================
 def agenda_read_via_api(context, mese_num, anno, debug_log):
-    """Legge l'agenda tramite chiamate API dirette."""
+    """Legge l'agenda tramite API, restituisce eventi con date."""
     debug_log.append("📡 Lettura agenda via API...")
     
     api_responses = {"events": {}, "balances": None}
@@ -182,11 +162,10 @@ def agenda_read_via_api(context, mese_num, anno, debug_log):
                     data = resp.json()
                     if data:
                         api_responses["events"][code] = data
-                        debug_log.append(f"  ✅ {code}: {len(data) if isinstance(data, list) else 1}")
                 except Exception:
                     pass
-        except Exception as e:
-            debug_log.append(f"  ⚠️ {code}: {type(e).__name__}")
+        except Exception:
+            pass
     
     # Saldo ferie/permessi
     try:
@@ -200,14 +179,31 @@ def agenda_read_via_api(context, mese_num, anno, debug_log):
     return _process_api_responses(api_responses, mese_num, anno, debug_log)
 
 
+def _format_date_it(date_str):
+    """Converte 2026-01-15 in 15 gen"""
+    try:
+        if not date_str or len(date_str) < 10:
+            return date_str
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        mesi_short = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"]
+        return f"{dt.day} {mesi_short[dt.month - 1]}"
+    except Exception:
+        return date_str[:10] if date_str else "N/D"
+
+
 def _process_api_responses(api_responses, mese_num, anno, debug_log):
-    """Elabora le risposte API."""
+    """Elabora le risposte API con dettaglio date."""
     result = {
         "events_this_month": [],
         "events_by_type": {},
         "total_events": 0,
         "absences_count": 0,
-        "balances": api_responses.get("balances")
+        "balances": api_responses.get("balances"),
+        # Dettaglio per tipo con date
+        "ferie": [],
+        "malattie": [],
+        "omesse_timbrature": [],
+        "riposi": []
     }
     
     for code, events in api_responses.get("events", {}).items():
@@ -215,7 +211,6 @@ def _process_api_responses(api_responses, mese_num, anno, debug_log):
             events = [events] if events else []
         
         code_name = CALENDAR_CODES.get(code, code)
-        events_this_month = []
         
         for event in events:
             try:
@@ -228,28 +223,41 @@ def _process_api_responses(api_responses, mese_num, anno, debug_log):
                     except ValueError:
                         pass
                 
+                date_formatted = _format_date_it(start_time)
                 summary = event.get("summary", "") or event.get("description", "") or code_name
-                events_this_month.append({
+                
+                event_data = {
                     "type": code,
                     "type_name": code_name,
                     "summary": summary,
-                    "date": start_time[:10] if start_time else "N/D"
-                })
+                    "date": date_formatted,
+                    "date_raw": start_time[:10] if start_time else ""
+                }
+                
+                result["events_this_month"].append(event_data)
+                
+                # Categorizza per tipo
+                if code == "FEP":
+                    result["ferie"].append(date_formatted)
+                elif code == "MAL":
+                    result["malattie"].append(date_formatted)
+                elif code == "OMT":
+                    result["omesse_timbrature"].append(date_formatted)
+                elif code in ["RCS", "RIC"]:
+                    result["riposi"].append(date_formatted)
+                    
             except Exception:
                 continue
         
-        if events_this_month:
-            result["events_by_type"][code_name] = len(events_this_month)
-            result["events_this_month"].extend(events_this_month)
+        # Conta per tipo
+        count_this_type = len([e for e in result["events_this_month"] if e["type"] == code])
+        if count_this_type > 0:
+            result["events_by_type"][code_name] = count_this_type
     
     result["total_events"] = len(result["events_this_month"])
     
-    # Conta assenze (escludendo anomalie come OMT che non sono assenze vere)
-    assenze_codes = ["FEP", "RCS", "RIC", "MAL"]
-    result["absences_count"] = sum(
-        result["events_by_type"].get(CALENDAR_CODES.get(c, c), 0) 
-        for c in assenze_codes
-    )
+    # Assenze = ferie + malattie + riposi (no OMT)
+    result["absences_count"] = len(result["ferie"]) + len(result["malattie"]) + len(result["riposi"])
     
     debug_log.append(f"  📊 Eventi mese: {result['total_events']}, Assenze: {result['absences_count']}")
     return result
@@ -306,16 +314,13 @@ def estrai_con_fallback(file_path, prompt, tipo="documento"):
     if bytes_data[:4] != b"%PDF":
         return None
 
-    last_err = None
-
     for idx, (nome, model) in enumerate(MODELLI_DISPONIBILI, 1):
         try:
             resp = model.generate_content([prompt, {"mime_type": "application/pdf", "data": bytes_data}])
             out = clean_json_response(getattr(resp, "text", ""))
             if out and isinstance(out, dict):
                 return out
-        except Exception as e:
-            last_err = e
+        except Exception:
             continue
 
     # Fallback DeepSeek
@@ -402,16 +407,6 @@ Solo JSON:
 # Analisi Coerenza
 # ==============================================================================
 def analizza_coerenza(dati_busta, dati_cartellino, dati_agenda, mese_num, anno):
-    """
-    Analizza la coerenza tra i tre documenti e genera un report.
-    
-    Returns:
-        dict con:
-        - status: "ok" | "warning" | "error"
-        - issues: lista di problemi trovati
-        - summary: riepilogo testuale
-        - details: dettagli per ogni area
-    """
     result = {
         "status": "ok",
         "issues": [],
@@ -420,7 +415,6 @@ def analizza_coerenza(dati_busta, dati_cartellino, dati_agenda, mese_num, anno):
         "details": {}
     }
     
-    # Estrai dati
     giorni_pagati = 0
     giorni_lavorati = 0
     giorni_assenza_agenda = 0
@@ -448,46 +442,43 @@ def analizza_coerenza(dati_busta, dati_cartellino, dati_agenda, mese_num, anno):
             "per_tipo": dati_agenda.get("events_by_type", {})
         }
     
-    # Calcola giorni teorici del mese (escludendo weekend)
+    # Giorni teorici (lun-ven)
     giorni_teorici = 0
     try:
         _, ultimo_giorno = calendar.monthrange(anno, mese_num)
         for giorno in range(1, ultimo_giorno + 1):
             data = datetime(anno, mese_num, giorno)
-            if data.weekday() < 5:  # Lun-Ven
+            if data.weekday() < 5:
                 giorni_teorici += 1
     except Exception:
-        giorni_teorici = 22  # fallback
+        giorni_teorici = 22
     
     result["details"]["teorici"] = giorni_teorici
     
-    # === ANALISI COERENZA ===
+    # === ANALISI ===
     
     # 1. Confronto Giorni Pagati vs Lavorati
     if dati_busta and dati_cartellino and giorni_lavorati > 0:
         diff = giorni_lavorati - giorni_pagati
         
-        if abs(diff) <= 1:
-            # OK - tolleranza di 1 giorno
-            pass
-        elif diff > 0:
-            result["warnings"].append(
-                f"Hai lavorato {diff} giorni in più di quelli pagati ({giorni_lavorati} vs {giorni_pagati})"
-            )
-        else:
-            result["issues"].append(
-                f"Pagati {abs(diff)} giorni in più di quelli lavorati ({giorni_pagati} vs {giorni_lavorati})"
-            )
-    
-    # 2. Confronto con Agenda
-    if dati_agenda and giorni_assenza_agenda > 0:
-        giorni_attesi = giorni_teorici - giorni_assenza_agenda
-        
-        if dati_cartellino and giorni_lavorati > 0:
-            if abs(giorni_lavorati - giorni_attesi) > 2:
+        if abs(diff) > 1:
+            if diff > 0:
                 result["warnings"].append(
-                    f"Giorni lavorati ({giorni_lavorati}) diversi da attesi ({giorni_attesi} = {giorni_teorici} teorici - {giorni_assenza_agenda} assenze)"
+                    f"Hai lavorato {diff} giorni in più di quelli pagati ({giorni_lavorati} vs {giorni_pagati})"
                 )
+            else:
+                result["issues"].append(
+                    f"Pagati {abs(diff)} giorni in più di quelli lavorati ({giorni_pagati} vs {giorni_lavorati})"
+                )
+    
+    # 2. Omessa timbratura
+    if dati_agenda:
+        omt_count = len(dati_agenda.get("omesse_timbrature", []))
+        if omt_count > 0:
+            date_omt = ", ".join(dati_agenda.get("omesse_timbrature", []))
+            result["warnings"].append(
+                f"{omt_count} omessa/e timbratura: {date_omt}"
+            )
     
     # 3. Anomalie badge
     if dati_cartellino:
@@ -497,15 +488,7 @@ def analizza_coerenza(dati_busta, dati_cartellino, dati_agenda, mese_num, anno):
                 f"{anomalie} giorno/i senza timbratura badge"
             )
     
-    # 4. Omessa timbratura in agenda
-    if dati_agenda:
-        omt_count = dati_agenda.get("events_by_type", {}).get("Omessa Timbratura", 0)
-        if omt_count > 0:
-            result["warnings"].append(
-                f"{omt_count} evento/i di 'Omessa Timbratura' segnalati"
-            )
-    
-    # Determina status finale
+    # Status finale
     if result["issues"]:
         result["status"] = "error"
     elif result["warnings"]:
@@ -513,13 +496,13 @@ def analizza_coerenza(dati_busta, dati_cartellino, dati_agenda, mese_num, anno):
     else:
         result["status"] = "ok"
     
-    # Genera summary
+    # Summary
     if result["status"] == "ok":
-        result["summary"] = "✅ Tutto in ordine! I dati di busta paga, cartellino e agenda sono coerenti."
+        result["summary"] = "Tutto in ordine! I dati sono coerenti."
     elif result["status"] == "warning":
-        result["summary"] = f"⚠️ Attenzione: {len(result['warnings'])} aspetto/i da verificare."
+        result["summary"] = f"{len(result['warnings'])} aspetto/i da verificare"
     else:
-        result["summary"] = f"❌ Rilevate {len(result['issues'])} incongruenze significative."
+        result["summary"] = f"{len(result['issues'])} incongruenze rilevate"
     
     return result
 
@@ -575,15 +558,9 @@ def _ensure_query(url: str, key: str, value: str) -> str:
 
 
 # ==============================================================================
-# Core Bot (Semplificato)
+# Core Bot
 # ==============================================================================
 def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
-    """
-    Esegue l'analisi completa: scarica documenti, estrae dati, analizza coerenza.
-    
-    Returns:
-        dict con: busta, cartellino, agenda, coerenza, debug_log
-    """
     try:
         mese_num = MESI_IT.index(mese_nome) + 1
     except Exception:
@@ -640,16 +617,15 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
                 log("✅ Login riuscito")
             except Exception:
                 browser.close()
-                return {"error": "LOGIN_FALLITO"}
+                return {"error": "Login fallito. Verifica le credenziali."}
 
             # AGENDA
             log("🗓️ Lettura agenda...")
             time.sleep(2)
             try:
                 result["agenda"] = agenda_read_via_api(context, mese_num, anno, debug_log)
-                log(f"✅ Agenda: {result['agenda'].get('total_events', 0)} eventi")
-            except Exception as e:
-                log(f"⚠️ Agenda non disponibile: {type(e).__name__}")
+            except Exception:
+                pass
 
             # BUSTA PAGA
             log("💰 Scaricamento cedolino...")
@@ -677,28 +653,24 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
                                 dl.value.save_as(path_busta)
                                 if os.path.exists(path_busta):
                                     busta_ok = True
-                                    log("✅ Cedolino scaricato")
                                 break
                         except Exception:
                             continue
-            except Exception as e:
-                log(f"⚠️ Errore cedolino: {type(e).__name__}")
+            except Exception:
+                pass
 
             # CARTELLINO
             log("📅 Scaricamento cartellino...")
             cart_ok = False
             try:
-                # Torna alla home
                 page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
                 time.sleep(2)
                 
-                # Vai a Time > Cartellino
                 page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                 time.sleep(3)
                 page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                 time.sleep(4)
                 
-                # Imposta date
                 dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                 al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
                 
@@ -717,11 +689,9 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
                     al.press("Tab")
                     time.sleep(0.5)
                 
-                # Esegui ricerca
                 page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
                 time.sleep(6)
                 
-                # Click su icona visualizza
                 icona = page.locator("img[src*='search']").first
                 if icona.count() > 0:
                     with context.expect_page(timeout=20000) as popup_info:
@@ -738,28 +708,25 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
                     if body[:4] == b"%PDF":
                         Path(path_cart).write_bytes(body)
                         cart_ok = True
-                        log("✅ Cartellino scaricato")
                     
                     try:
                         popup.close()
                     except Exception:
                         pass
                         
-            except Exception as e:
-                log(f"⚠️ Errore cartellino: {type(e).__name__}")
+            except Exception:
+                pass
 
             browser.close()
 
     except Exception as e:
-        return {"error": f"Errore generale: {e}"}
+        return {"error": f"Errore: {e}"}
 
     # ANALISI AI
-    log("🧠 Analisi documenti con AI...")
+    log("🧠 Analisi documenti...")
     
     if busta_ok:
         result["busta"] = estrai_dati_busta_dettagliata(path_busta)
-        if result["busta"]:
-            log("✅ Busta paga analizzata")
         try:
             os.remove(path_busta)
         except Exception:
@@ -767,14 +734,29 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
     
     if cart_ok:
         result["cartellino"] = estrai_dati_cartellino(path_cart)
-        if result["cartellino"]:
-            log("✅ Cartellino analizzato")
         try:
             os.remove(path_cart)
         except Exception:
             pass
+    
+    # Se cartellino non disponibile, stima da busta - assenze
+    if not result["cartellino"] and result["busta"] and result["agenda"]:
+        giorni_pagati = result["busta"].get("dati_generali", {}).get("giorni_pagati", 0)
+        assenze = result["agenda"].get("absences_count", 0)
+        
+        # Calcola giorni teorici
+        _, ultimo_giorno = calendar.monthrange(anno, mese_num)
+        giorni_teorici = sum(1 for g in range(1, ultimo_giorno + 1) if datetime(anno, mese_num, g).weekday() < 5)
+        
+        giorni_stimati = giorni_teorici - assenze
+        
+        result["cartellino"] = {
+            "giorni_reali": giorni_stimati,
+            "giorni_senza_badge": 0,
+            "note": "Stimato da agenda (cartellino non disponibile)"
+        }
 
-    # ANALISI COERENZA
+    # COERENZA
     log("🔍 Verifica coerenza...")
     result["coerenza"] = analizza_coerenza(
         result["busta"],
@@ -783,29 +765,34 @@ def esegui_analisi(mese_nome, anno, username, password, progress_callback=None):
         mese_num,
         anno
     )
-    log("✅ Analisi completata!")
 
     return result
 
 
 # ==============================================================================
-# UI - Streamlit
+# UI - Streamlit (Senza sidebar, tutto in pagina)
 # ==============================================================================
 st.set_page_config(
-    page_title="Gottardo Payroll Analyzer",
+    page_title="Gottardo Payroll",
     page_icon="💶",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-# CSS Custom per UI pulita
+# CSS
 st.markdown("""
 <style>
+    /* Nascondi sidebar */
+    [data-testid="stSidebar"] { display: none; }
+    
+    /* Status boxes */
     .status-ok { 
         background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
         border-left: 4px solid #28a745;
         padding: 1rem;
         border-radius: 0.5rem;
         margin: 1rem 0;
+        color: #155724;
     }
     .status-warning {
         background: linear-gradient(135deg, #fff3cd 0%, #ffeeba 100%);
@@ -813,6 +800,7 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
         margin: 1rem 0;
+        color: #856404;
     }
     .status-error {
         background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
@@ -820,68 +808,71 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
         margin: 1rem 0;
+        color: #721c24;
     }
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        text-align: center;
-    }
-    .big-number {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #333;
-    }
+    .status-ok h3, .status-warning h3, .status-error h3 { margin: 0 0 0.5rem 0; }
+    .status-ok p, .status-warning p, .status-error p { margin: 0; }
+    
+    /* Input compatti */
+    .stTextInput > div > div > input { padding: 0.5rem; }
+    .stSelectbox > div > div { padding: 0; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("💶 Analisi Stipendio Gottardo")
-st.caption("Confronto automatico tra busta paga, cartellino e agenda")
 
-# Sidebar - Credenziali e Parametri
-with st.sidebar:
-    st.header("🔐 Accesso")
+# === SEZIONE LOGIN/AVVIO IN ORIZZONTALE ===
+username, password = get_credentials()
+
+if not st.session_state.get("credentials_set"):
+    st.markdown("### 🔐 Accedi")
+    col1, col2, col3 = st.columns([2, 2, 1])
     
-    username, password = get_credentials()
-    
-    if not st.session_state.get("credentials_set"):
-        input_user = st.text_input("Username", value=username or "")
-        input_pass = st.text_input("Password", type="password")
-        
-        if st.button("💾 Salva", use_container_width=True):
+    with col1:
+        input_user = st.text_input("Username", value=username or "", label_visibility="collapsed", placeholder="Username")
+    with col2:
+        input_pass = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
+    with col3:
+        if st.button("� Accedi", use_container_width=True):
             if input_user and input_pass:
                 st.session_state["username"] = input_user
                 st.session_state["password"] = input_pass
                 st.session_state["credentials_set"] = True
                 st.rerun()
-    else:
-        st.success(f"✅ {st.session_state['username']}")
-        if st.button("🔄 Cambia utente"):
-            st.session_state["credentials_set"] = False
-            st.rerun()
+            else:
+                st.error("Inserisci username e password")
+else:
+    # Utente loggato - mostra selezione periodo
+    st.markdown(f"**👤 {st.session_state['username']}**")
     
-    st.divider()
+    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
     
-    if st.session_state.get("credentials_set"):
-        st.header("📅 Periodo")
-        sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1)
-        sel_mese = st.selectbox("Mese", MESI_IT, index=11)
-        
+    with col1:
+        sel_mese = st.selectbox("Mese", MESI_IT, index=0, label_visibility="collapsed")
+    with col2:
+        sel_anno = st.selectbox("Anno", [2024, 2025, 2026], index=1, label_visibility="collapsed")
+    with col3:
         if st.button("🚀 ANALIZZA", type="primary", use_container_width=True):
             st.session_state.pop("result", None)
             st.session_state["running"] = True
             st.session_state["sel_mese"] = sel_mese
             st.session_state["sel_anno"] = sel_anno
+    with col4:
+        if st.button("🔄", help="Cambia utente"):
+            st.session_state["credentials_set"] = False
+            st.session_state.pop("result", None)
+            st.rerun()
 
-# Main Content
+st.divider()
+
+# === ESECUZIONE ANALISI ===
 if st.session_state.get("running"):
-    with st.spinner("🔄 Analisi in corso... Attendi qualche minuto."):
-        progress_placeholder = st.empty()
-        
-        def update_progress(msg):
-            progress_placeholder.info(msg)
-        
+    progress_placeholder = st.empty()
+    
+    def update_progress(msg):
+        progress_placeholder.info(msg)
+    
+    with st.spinner("🔄 Analisi in corso..."):
         result = esegui_analisi(
             st.session_state["sel_mese"],
             st.session_state["sel_anno"],
@@ -889,12 +880,13 @@ if st.session_state.get("running"):
             st.session_state.get("password"),
             progress_callback=update_progress
         )
-        
-        progress_placeholder.empty()
-        st.session_state["result"] = result
-        st.session_state["running"] = False
-        st.rerun()
+    
+    progress_placeholder.empty()
+    st.session_state["result"] = result
+    st.session_state["running"] = False
+    st.rerun()
 
+# === RISULTATI ===
 if "result" in st.session_state:
     result = st.session_state["result"]
     
@@ -906,50 +898,85 @@ if "result" in st.session_state:
         cartellino = result.get("cartellino", {})
         agenda = result.get("agenda", {})
         
-        # === HEADER STATUS ===
+        # === STATUS ===
         status = coerenza.get("status", "ok")
         summary = coerenza.get("summary", "")
         
         if status == "ok":
-            st.markdown(f'<div class="status-ok"><h3>✅ COERENZA VERIFICATA</h3><p>{summary}</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="status-ok"><h3>✅ TUTTO OK</h3><p>{summary}</p></div>', unsafe_allow_html=True)
         elif status == "warning":
             st.markdown(f'<div class="status-warning"><h3>⚠️ ATTENZIONE</h3><p>{summary}</p></div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="status-error"><h3>❌ INCONGRUENZE RILEVATE</h3><p>{summary}</p></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="status-error"><h3>❌ PROBLEMI</h3><p>{summary}</p></div>', unsafe_allow_html=True)
         
-        # === PROBLEMI/WARNING ===
+        # === PROBLEMI DETTAGLIATI ===
         issues = coerenza.get("issues", [])
         warnings = coerenza.get("warnings", [])
         
         if issues or warnings:
-            with st.expander("🔍 Dettaglio problemi rilevati", expanded=True):
-                for issue in issues:
-                    st.error(f"❌ {issue}")
-                for warning in warnings:
-                    st.warning(f"⚠️ {warning}")
+            for issue in issues:
+                st.error(f"❌ {issue}")
+            for warning in warnings:
+                st.warning(f"⚠️ {warning}")
         
-        # === RIEPILOGO VELOCE ===
+        # === RIEPILOGO ===
         st.subheader("📊 Riepilogo")
         
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             netto = busta.get("dati_generali", {}).get("netto", 0) if busta else 0
-            st.metric("💵 Netto in Busta", f"€ {netto:,.2f}")
+            st.metric("💵 Netto", f"€ {netto:,.2f}")
         
         with col2:
             giorni_pagati = busta.get("dati_generali", {}).get("giorni_pagati", 0) if busta else 0
             st.metric("📋 Giorni Pagati", int(giorni_pagati))
         
         with col3:
-            giorni_lavorati = cartellino.get("giorni_reali", 0) if cartellino else "N/D"
-            st.metric("🏢 Giorni Lavorati", giorni_lavorati)
+            giorni_lavorati = cartellino.get("giorni_reali", "N/D") if cartellino else "N/D"
+            note = cartellino.get("note", "") if cartellino else ""
+            help_text = note if "Stimato" in note else None
+            st.metric("🏢 Giorni Lavorati", giorni_lavorati, help=help_text)
         
         with col4:
             assenze = agenda.get("absences_count", 0) if agenda else 0
-            st.metric("🗓️ Assenze Agenda", assenze)
+            st.metric("🗓️ Assenze", assenze)
         
-        # === DETTAGLIO BUSTA PAGA ===
+        # === EVENTI AGENDA DETTAGLIATI ===
+        if agenda:
+            st.subheader("📅 Dettaglio Agenda")
+            
+            cols = st.columns(4)
+            
+            # Ferie
+            ferie = agenda.get("ferie", [])
+            if ferie:
+                with cols[0]:
+                    st.markdown(f"**🏖️ Ferie ({len(ferie)})**")
+                    st.write(", ".join(ferie))
+            
+            # Malattie
+            malattie = agenda.get("malattie", [])
+            if malattie:
+                with cols[1]:
+                    st.markdown(f"**🤒 Malattia ({len(malattie)})**")
+                    st.write(", ".join(malattie))
+            
+            # Riposi
+            riposi = agenda.get("riposi", [])
+            if riposi:
+                with cols[2]:
+                    st.markdown(f"**😴 Riposi ({len(riposi)})**")
+                    st.write(", ".join(riposi))
+            
+            # Omesse timbrature
+            omt = agenda.get("omesse_timbrature", [])
+            if omt:
+                with cols[3]:
+                    st.markdown(f"**⚠️ Omesse Timbrature ({len(omt)})**")
+                    st.write(", ".join(omt))
+        
+        # === DETTAGLIO BUSTA ===
         if busta:
             with st.expander("💰 Dettaglio Busta Paga"):
                 comp = busta.get("competenze", {})
@@ -961,12 +988,12 @@ if "result" in st.session_state:
                     st.markdown("**➕ Competenze**")
                     st.write(f"• Retribuzione base: € {comp.get('base', 0):,.2f}")
                     if comp.get("anzianita", 0) > 0:
-                        st.write(f"• Anzianità/Scatti: € {comp.get('anzianita', 0):,.2f}")
+                        st.write(f"• Anzianità: € {comp.get('anzianita', 0):,.2f}")
                     if comp.get("straordinari", 0) > 0:
                         st.write(f"• Straordinari: € {comp.get('straordinari', 0):,.2f}")
                     if comp.get("festivita", 0) > 0:
                         st.write(f"• Festività: € {comp.get('festivita', 0):,.2f}")
-                    st.write(f"**Totale Lordo: € {comp.get('lordo_totale', 0):,.2f}**")
+                    st.write(f"**Totale: € {comp.get('lordo_totale', 0):,.2f}**")
                 
                 with c2:
                     st.markdown("**➖ Trattenute**")
@@ -974,41 +1001,17 @@ if "result" in st.session_state:
                     st.write(f"• IRPEF: € {tratt.get('irpef_netta', 0):,.2f}")
                     if tratt.get("addizionali_totali", 0) > 0:
                         st.write(f"• Addizionali: € {tratt.get('addizionali_totali', 0):,.2f}")
-                    totale_tratt = tratt.get("inps", 0) + tratt.get("irpef_netta", 0) + tratt.get("addizionali_totali", 0)
-                    st.write(f"**Totale Trattenute: € {totale_tratt:,.2f}**")
                 
                 st.divider()
                 
-                ferie = busta.get("ferie", {})
+                ferie_b = busta.get("ferie", {})
                 par = busta.get("par", {})
                 
                 f1, f2 = st.columns(2)
                 with f1:
                     st.markdown("**🏖️ Ferie**")
-                    st.write(f"Residue anno precedente: {ferie.get('residue_ap', 0)}")
-                    st.write(f"Maturate: {ferie.get('maturate', 0)}")
-                    st.write(f"Godute: {ferie.get('godute', 0)}")
-                    st.write(f"**Saldo: {ferie.get('saldo', 0)}**")
+                    st.write(f"Residue AP: {ferie_b.get('residue_ap', 0)} | Maturate: {ferie_b.get('maturate', 0)} | Godute: {ferie_b.get('godute', 0)} | **Saldo: {ferie_b.get('saldo', 0)}**")
                 
                 with f2:
-                    st.markdown("**⏱️ Permessi (PAR)**")
-                    st.write(f"Residui anno precedente: {par.get('residue_ap', 0)}")
-                    st.write(f"Spettanti: {par.get('spettanti', 0)}")
-                    st.write(f"Fruiti: {par.get('fruite', 0)}")
-                    st.write(f"**Saldo: {par.get('saldo', 0)}**")
-        
-        # === EVENTI AGENDA ===
-        if agenda and agenda.get("total_events", 0) > 0:
-            with st.expander("🗓️ Eventi Agenda del Mese"):
-                for tipo, count in agenda.get("events_by_type", {}).items():
-                    st.write(f"• {tipo}: **{count}** evento/i")
-        
-        # === GLOSSARIO ===
-        with st.expander("📖 Glossario Voci Busta Paga"):
-            for voce, spiegazione in GLOSSARIO_BUSTA.items():
-                st.markdown(f"**{voce}**: {spiegazione}")
-        
-        # === DEBUG (nascosto) ===
-        with st.expander("🔧 Log Tecnico", expanded=False):
-            for line in result.get("debug_log", []):
-                st.text(line)
+                    st.markdown("**⏱️ Permessi**")
+                    st.write(f"Residui AP: {par.get('residue_ap', 0)} | Spettanti: {par.get('spettanti', 0)} | Fruiti: {par.get('fruite', 0)} | **Saldo: {par.get('saldo', 0)}**")
