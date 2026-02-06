@@ -466,126 +466,117 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
 
                 time.sleep(2) # Attesa cambio vista
 
-                # 1. Attiva il TAB "Calendario" nella sidebar se necessario (CRITICO PER VEDERE DATEPICKER)
-                # Cerca bottone con classe specifica vista nel debug HTML: heatMapCalendarButton
-                # Oppure id dijit_form_Button_0
-                sidebar_cal_btn = calendar_frame.locator(".heatMapCalendarButton, span[widgetid='dijit_form_Button_0']").first
+                # === NUOVA NAVIGAZIONE: USA FRECCE PRINCIPALI TOOLBAR (NO SIDEBAR) ===
+                # 1. Assicurati Vista MENSILE
+                result["debug"].append("  🖱️ Imposto vista MENSILE...")
+                month_btns = calendar_frame.locator(".dijitButtonText, .dijitButtonContents").filter(has_text="Mese")
+                if month_btns.count() > 0:
+                    for i in range(month_btns.count()):
+                        if month_btns.nth(i).is_visible():
+                            try:
+                                month_btns.nth(i).click()
+                                time.sleep(2)
+                                break
+                            except: pass
                 
-                # Se non visibile, prova a cercarlo più genericamente
-                if not sidebar_cal_btn.is_visible():
-                     sidebar_cal_btn = calendar_frame.locator("span[role='button']").filter(has_text="Calendario").first
-
-                if sidebar_cal_btn.count() > 0:
-                    result["debug"].append("  Click tab 'Calendario' sidebar (per mostrare mini-cal)...")
-                    try:
-                        sidebar_cal_btn.click()
-                        time.sleep(1) # Attesa animazione
-                    except: pass
+                # 2. Leggi Data Corrente dal Titolo Principale
+                # Cerca il titolo grande al centro: es "Gennaio 2026"
+                # ID tipici dojo: calendarTitle, ecc.
+                # Cerchiamo un elemento testo che contiene l'anno corrente
+                found_title = False
+                title_el = None
                 
-                # 2. Interagisci con il MINI-CALENDAR (DatePicker)
-                result["debug"].append("  Interazione con Mini-Calendar (#datePicker)...")
+                # Possibili selettori titolo
+                title_selectors = [
+                    ".dijitCalendarTitle", ".dojoxCalendarTitle", 
+                    "#calendarTitle", ".calendarTitle",
+                    "span[id*='Title']", "div[id*='Title']"
+                ]
                 
-                # Assicurati che datePicker sia visibile
-                dp = calendar_frame.locator("#datePicker")
-                if not dp.is_visible():
-                     result["debug"].append("  ⚠️ #datePicker ancora invisibile dopo click tab! Riprovo click...")
-                     try: sidebar_cal_btn.click() 
-                     except: pass
-                     time.sleep(1)
-
-                # Loop navigazione (max 24 tentativi = 2 anni)
-                moves = 0
-                max_moves = 24
-                reached = False
+                for sel in title_selectors:
+                    els = calendar_frame.locator(sel)
+                    if els.count() > 0:
+                        for i in range(els.count()):
+                            t = els.nth(i).inner_text().strip()
+                            # Se contiene un anno (4 cifre), è probabilmente il titolo
+                            if re.search(r'\b20\d{2}\b', t):
+                                title_el = els.nth(i)
+                                found_title = True
+                                break
+                    if found_title: break
                 
-                while moves < max_moves:
-                    # Rileggi mese/anno correnti dal mini-cal
-                    # Selettori ID specifici visti nell'HTML
-                    curr_year_el = calendar_frame.locator("#datePicker_yddb_label, .dijitCalendarYearLabel span").first
-                    curr_month_el = calendar_frame.locator("#datePicker_mddb_label, .dijitCalendarCurrentMonthLabel").first
+                # Se non trova titolo specifico, cerca nel body un testo grande? No, rischioso.
+                # Fallback: cerca span con testo Mese Anno corrente approssimativo
+                
+                # 3. Naviga Indietro/Avanti con le Frecce Principali
+                if found_title:
+                    moves = 0
+                    max_moves = 24
                     
-                    if not curr_year_el.is_visible():
-                        result["debug"].append("  ⚠️ Elementi anno/mese ancora NON visibili nel mini-cal")
-                        break
+                    while moves < max_moves:
+                        current_title = title_el.inner_text().strip().upper() # es "GENNAIO 2026"
+                        result["debug"].append(f"  📅 Titolo Calendario: {current_title}")
                         
-                    curr_year_text = curr_year_el.inner_text().strip()
-                    curr_month_text = curr_month_el.inner_text().strip().upper()
-                    
-                    # Debug stato corrente
-                    if moves == 0 or moves % 5 == 0:
-                         result["debug"].append(f"  📅 Mini-Cal è su: {curr_month_text} {curr_year_text}")
-                    
-                    # Controllo Target
-                    if str(anno) in curr_year_text and target_month_name in curr_month_text:
-                        result["debug"].append("  ✅ Mese target raggiunto nel Mini-Cal!")
-                        reached = True
-                        break
-                    
-                    # Logica Direzione
-                    go_back = False
-                    try:
-                        curr_y_int = int(curr_year_text)
-                        if curr_y_int > anno:
-                            go_back = True
-                        elif curr_y_int == anno:
-                            # Confronto mesi
-                            mesi_list = [m.upper() for m in MESI_IT]
-                            curr_m_idx = -1
-                            for i, m in enumerate(mesi_list):
-                                if m in curr_month_text:
-                                    curr_m_idx = i
+                        if target_month_name in current_title and str(anno) in current_title:
+                            result["debug"].append("  ✅ Mese target raggiunto!")
+                            cal_nav_success = True
+                            break
+                        
+                        # Decide direzione
+                        # Cerca anno nel titolo
+                        curr_year_match = re.search(r'20\d{2}', current_title)
+                        is_future = False
+                        if curr_year_match:
+                            curr_y = int(curr_year_match.group(0))
+                            if curr_y > anno:
+                                is_future = True
+                            elif curr_y == anno:
+                                # Mese
+                                mesi_list = [m.upper() for m in MESI_IT]
+                                curr_m_idx = -1
+                                for i, m in enumerate(mesi_list):
+                                    if m in current_title:
+                                        curr_m_idx = i
+                                        break
+                                if curr_m_idx > (mese_num - 1):
+                                    is_future = True
+                        
+                        # Clicca Freccia
+                        arrow_sel = ""
+                        if is_future:
+                             # Freccia Sinistra / Precedente
+                             # Spesso hanno title="Precedente" o classe Previous
+                             arrow_btns = calendar_frame.locator("[title='Precedente'], [aria-label='Previous'], .dijitCalendarPreviousMonth, .prev, .previous")
+                             desc = "Precedente"
+                        else:
+                             # Freccia Destra / Successivo
+                             arrow_btns = calendar_frame.locator("[title='Successivo'], [aria-label='Next'], .dijitCalendarNextMonth, .next")
+                             desc = "Successivo"
+                        
+                        if arrow_btns.count() > 0:
+                            # Clicca la prima visibile
+                            clicked = False
+                            for k in range(arrow_btns.count()):
+                                if arrow_btns.nth(k).is_visible():
+                                    arrow_btns.nth(k).click()
+                                    clicked = True
+                                    result["debug"].append(f"  ⬅️ Click {desc}...")
                                     break
-                            if curr_m_idx > (mese_num - 1):
-                                go_back = True
-                    except: pass
-                    
-                    # Esegui Click su frecce Mini-Cal (ID specifici visti in HTML)
-                    # #datePicker .dijitCalendarDecrease
-                    if go_back:
-                        btn = calendar_frame.locator("#datePicker .dijitCalendarDecrease").first
-                        if btn.is_visible():
-                            btn.click()
+                            if not clicked:
+                                result["debug"].append(f"  ⚠️ Nessun bottone {desc} visibile")
+                                break
                         else:
-                            result["debug"].append("  ⚠️ Bottone 'Precedente' mini-cal non trovato")
-                            break
-                    else:
-                        btn = calendar_frame.locator("#datePicker .dijitCalendarIncrease").first
-                        if btn.is_visible():
-                            btn.click()
-                        else:
-                            result["debug"].append("  ⚠️ Bottone 'Successivo' mini-cal non trovato")
-                            break
-                    
-                    time.sleep(0.4) # Breve attesa animazione
-                    moves += 1
-                
-                if reached:
-                    # 3. CLICCA UN GIORNO NEL MINI-CAL PER AGGIORNARE VISTA
-                    result["debug"].append("  🖱️ Seleziono un giorno per caricare l'Agenda...")
-                    # Cerca giorni del mese corrente (non previous/next month days che sono grigi)
-                    current_month_days = calendar_frame.locator("#datePicker .dijitCalendarCurrentMonth")
-                    count = current_month_days.count()
-                    
-                    day_clicked = False
-                    if count > 0:
-                        # Clicca il 15° giorno (o centrale)
-                        target_day_idx = min(15, count - 1)
-                        day_el = current_month_days.nth(target_day_idx)
-                        day_text = day_el.inner_text().strip()
-                        result["debug"].append(f"  Click giorno {day_text}...")
-                        day_el.click()
-                        day_clicked = True
-                    
-                    if day_clicked:
-                        # Attesa caricamento vista principale
-                        result["debug"].append("  ⏳ Attesa caricamento vista principale...")
-                        time.sleep(5) # Aumentato per sicurezza
-                        cal_nav_success = True
-                    else:
-                        result["debug"].append("  ⚠️ Nessun giorno cliccabile trovato")
+                             # Fallback: cerca bottoni con icone freccia? Risolviamo col selector sopra
+                             result["debug"].append(f"  ⚠️ Bottoni navigazione non trovati")
+                             break
+                        
+                        time.sleep(1.5) # Attesa ricaricamento eventi
+                        moves += 1
+                else:
+                    result["debug"].append("  ⚠️ Titolo calendario non identificato, impossibile navigare")
 
             except Exception as e:
-                result["debug"].append(f"  ❌ Errore navigazione sidebar: {e}")
+                result["debug"].append(f"  ❌ Errore navigazione toolbar: {e}")
         
         # === CATTURA EVENTI DAL DOM (SOLO GRIGLIA CALENDARIO - METODO TESTUALE) ===
         result["debug"].append("🔍 Avvio scraping eventi (Metodo Testuale su #calendarContainer)...")
@@ -596,8 +587,15 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
             try:
                 # 1. Isola il contenitore della griglia (ignora sidebar)
                 # Dagli ID visti nel debug: calendarUI_ExtendedCalendar_0 EVIDENTE NEL LOG
-                grid_container = calendar_frame.locator("#calendarUI_ExtendedCalendar_0, #calendarContainer").first
+                # Proviamo anche selettore più ampio se l'ID specifico fallisce
+                # Cerca un div grande che contiene "Lun", "Mar", etc. (header giorni)
+                grid_container = calendar_frame.locator("#calendarUI_ExtendedCalendar_0, #calendarContainer, .dijitCalendarContainer").first
                 
+                # Se non lo trova per ID, cerchiamo per struttura
+                if not grid_container.is_visible():
+                     # Cerca la griglia principale tramite classi dojo
+                     grid_container = calendar_frame.locator(".dojoxCalendarGrid, .dijitCalendarContainer").first
+
                 if grid_container.is_visible():
                     # Aspetta un attimo per sicurezza rendering
                     time.sleep(1)
