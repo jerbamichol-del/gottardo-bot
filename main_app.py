@@ -437,6 +437,35 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         cal_nav_success = False
         if calendar_frame:
             try:
+                # 0. FORZA VISTA MENSILE (CRITICO!)
+                # Cerca e clicca il bottone "Mese" nella toolbar principale
+                result["debug"].append("  🖱️ Imposto vista MENSILE (click 'Mese')...")
+                
+                # Selettori per il bottone Mese
+                # Cerchiamo bottoni che contengono il testo "Mese"
+                month_view_btns = calendar_frame.locator(".dijitButtonText, .dijitButton").filter(has_text="Mese")
+                
+                clicked_view = False
+                if month_view_btns.count() > 0:
+                    # Clicca il primo visibile
+                    for i in range(month_view_btns.count()):
+                        btn = month_view_btns.nth(i)
+                        if btn.is_visible():
+                            btn.click()
+                            clicked_view = True
+                            result["debug"].append("  ✅ Vista 'Mese' cliccata")
+                            break
+                            
+                if not clicked_view:
+                     # Fallback su span testo esatto
+                     try:
+                         calendar_frame.locator("span", has_text="Mese").first.click()
+                         result["debug"].append("  ✅ Vista 'Mese' cliccata (fallback span)")
+                     except:
+                         result["debug"].append("  ⚠️ Bottone 'Mese' non trovato")
+
+                time.sleep(2) # Attesa cambio vista
+
                 # 1. Attiva il TAB "Calendario" nella sidebar se necessario
                 sidebar_cal_btn = calendar_frame.locator("span[widgetid*='Button']").filter(has_text="Calendario").first
                 if sidebar_cal_btn.count() > 0 and sidebar_cal_btn.is_visible():
@@ -539,101 +568,69 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
             except Exception as e:
                 result["debug"].append(f"  ❌ Errore navigazione sidebar: {e}")
         
-        # Selettori specifici per calendari Dojo/Dijit/ZK
-                date_selectors = [".dojoxCalendarTitle", ".dijitCalendarTitle", ".z-calendar-title", ".title", "span[id*='title']"]
-                
-                current_date_text = ""
-                for ds in date_selectors:
-                    if frame.locator(ds).first.is_visible():
-                        current_date_text = frame.locator(ds).first.inner_text()
-                        break
-                
-                if current_date_text:
-                    result["debug"].append(f"  📅 Mese visualizzato: {current_date_text}")
-                    
-                    # Logica semplice: se il mese/anno non c'è nel titolo, naviga
-                    # Cerchiamo pulsanti prev/next
-                    max_moves = 12
-                    moves = 0
-                    
-                    # Mappa mesi
-                    target_month_name = MESI_IT[mese_num - 1].upper() # es: OTTOBRE
-                    
-                    while moves < max_moves:
-                        current_text_upper = frame.locator("body").inner_text().upper() # Testo grezzo del body
-                        if target_month_name in current_text_upper and str(anno) in current_text_upper:
-                            result["debug"].append("  ✅ Mese corretto raggiunto!")
-                            break
-                        
-                        # Cerca bottoni prev/next
-                        # Tipici bottoni: < > o frecce
-                        prev_btns = frame.locator("[class*='Prev'], [class*='Previous'], [title*='Precedente'], [aria-label*='Previous']")
-                        
-                        if prev_btns.count() > 0:
-                            prev_btns.first.click()
-                            time.sleep(1.5) # Aspetta reload
-                            moves += 1
-                            result["debug"].append(f"  ⬅️ Click Precedente ({moves})")
-                        else:
-                            result["debug"].append("  ⚠️ Bottone Precedente non trovato")
-                            break
-            except Exception as e:
-                result["debug"].append(f"  ⚠️ Errore navigazione mese: {e}")
+        # === CATTURA EVENTI DAL DOM (SOLO GRIGLIA CALENDARIO) ===
+        result["debug"].append("� Avvio scraping eventi DOJO (modalità rigida)...")
         
-        # Selettori specifici per calendari Dojo/Dijit/ZK
-        event_selectors = [
-            ".dojoxCalendarEvent", ".dijitCalendarEvent", 
-            "[class*='calendarEvent']", "[class*='CalendarEvent']",
-            "[style*='background'][style*='rgb']", # Barre colorate
-            ".z-calendar-event", "[class*='z-event']",
-            "div[class*='event']", "[role='button'][class*='event']",
-            "*:has-text('OMESSA')", "*:has-text('FERIE')", 
-            "*:has-text('MALATTIA')", "*:has-text('RIPOSO')"
+        # Attendiamo caricamento griglia ed eventi
+        if calendar_frame:
+            try:
+                # Aspetta che appaiano gli eventi (max 3 sec)
+                # Nota: se non ci sono eventi nel mese, andrà in timeout (normale)
+                calendar_frame.wait_for_selector(".dojoxCalendarEvent", timeout=3000)
+            except: pass
+
+        # Selettori RIGIDAMENTE limitati agli eventi reali nella griglia
+        # Ignoriamo label, titoli e sidebar
+        event_classes = [
+            ".dojoxCalendarEvent", 
+            ".dijitCalendarEvent",
+            ".z-calendar-event"
         ]
         
         dom_events = []
         
-        for frame in target_frames:
-            try:
-                # Aspetta che il frame carichi
-                frame.wait_for_load_state("domcontentloaded", timeout=2000)
-            except: pass
-            
-            for sel in event_selectors:
+        # Cerca solo dentro il frame corretto
+        if calendar_frame:
+            for sel in event_classes:
                 try:
-                    elements = frame.locator(sel)
+                    # Cerca tutti gli elementi evento
+                    elements = calendar_frame.locator(sel)
                     count = elements.count()
-                    if count > 0 and count < 200:
-                        result["debug"].append(f"📌 Frame '{frame.name}' - {sel}: {count}")
-                        for i in range(min(count, 30)):
+                    
+                    if count > 0:
+                        result["debug"].append(f"📌 Trovati {count} elementi con selettore {sel}")
+                        for i in range(count):
                             try:
                                 el = elements.nth(i)
+                                
+                                # Verifica visibilità per evitare elementi nascosti
+                                if not el.is_visible():
+                                    continue
+                                
+                                # Estrai testo e attributi
                                 text = (el.inner_text() or "").strip()
                                 title = (el.get_attribute("title") or "").strip()
                                 aria = (el.get_attribute("aria-label") or "").strip()
-                                content = text or title or aria
                                 
-                                if content and len(content) > 2:
-                                    content_upper = content.upper()
-                                    if any(kw in content_upper for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO", "OMT", "FEP", "MAL", "RCS", "RIC"]):
-                                        dom_events.append(content)
+                                # Combina tutto
+                                content = f"{text} {title} {aria}".upper()
+                                
+                                # Mappa Keyword -> Tipo Evento
+                                # Priorità alle keyword specifiche che identificano eventi REALI
+                                if "OMESSA" in content or "OMT" in content:
+                                    dom_events.append("OMESSA TIMBRATURA")
+                                elif "FERIE" in content or "FEP" in content:
+                                    dom_events.append("FERIE")
+                                elif "MALATTIA" in content or "MAL" in content:
+                                    dom_events.append("MALATTIA")
+                                elif "RIPOSO" in content or "RCS" in content or "RIC" in content or "RPS" in content:
+                                    dom_events.append("RIPOSO")
+                                
                             except: continue
                 except: continue
         
-        # Seconda strategia: ricerca testo diretto (nei frame)
-        if len(dom_events) == 0:
-            result["debug"].append("🔎 Ricerca testo diretto nei frame...")
-            for frame in target_frames:
-                for keyword in ["OMESSA TIMBRATURA", "FERIE PIANIFICATE", "RIPOSO COMPENSATIVO", "MALATTIA"]:
-                    try:
-                        matches = frame.locator(f"text={keyword}").count()
-                        if matches > 0:
-                            result["debug"].append(f"  📝 Frame '{frame.name}' - '{keyword}': {matches}")
-                            for i in range(matches):
-                                dom_events.append(keyword)
-                    except: pass
-        
-        result["debug"].append(f"📋 Totale eventi DOM: {len(dom_events)}")
+        result["debug"].append(f"📋 Totale eventi validi estratti: {len(dom_events)}")
+
         
     except Exception as e:
         result["debug"].append(f"❌ Errore navigazione: {type(e).__name__}")
