@@ -542,8 +542,106 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     except Exception as dump_e:
                         result["debug"].append(f"    Errore dump: {dump_e}")
 
-                # 3. Naviga Indietro/Avanti (STRATEGIA TASTIERA - CORRETTA)
-                if found_title:
+                # 3. Naviga Indietro/Avanti (STRATEGIA POPUP: ICONA -> MINI CAL -> FRECCE)
+                # Il "Mini Calendar" si apre cliccando un DropDownButton
+                
+                # Cerca l'icona/bottone dropdown
+                # Dal debug precedente: id=dijit_form_DropDownButton_2
+                dropdown_btn = calendar_frame.locator("[widgetid*='DropDownButton'], .dijitDropDownButton, .dijitDownArrowButton").first
+                
+                if dropdown_btn.is_visible():
+                    result["debug"].append("  🖱️ Clicco icona Dropdown Calendario per aprire il Mini-CAL...")
+                    dropdown_btn.click()
+                    time.sleep(1.5) # Attesa apertura popup
+                
+                # Ora cerchiamo il POPUP del calendario (spesso è un dijitPopup o dijitCalendarMenu)
+                # Potrebbe essere dentro il frame o nel root. Proviamo nel frame.
+                mini_cal = calendar_frame.locator(".dijitCalendar, .dijitCalendarPopup").last
+                
+                if mini_cal.is_visible():
+                    result["debug"].append("  ✅ Mini-Calendario APERTO!")
+                    
+                    moves = 0
+                    max_moves = 36
+                    
+                    while moves < max_moves:
+                        # 3a. Leggi data dal Mini-Calendario
+                        try:
+                            # Titolo dentro il popup (Mese Anno)
+                            curr_month_el = mini_cal.locator(".dijitCalendarMonthLabel").first
+                            curr_year_el = mini_cal.locator(".dijitCalendarYearLabel, .dijitCalendarSelectedYear").first
+                            
+                            curr_title = ""
+                            if curr_month_el.is_visible(): curr_title += curr_month_el.inner_text() + " "
+                            if curr_year_el.is_visible(): curr_title += curr_year_el.inner_text()
+                            curr_title = curr_title.strip().upper()
+                        except:
+                            curr_title = "ERROR"
+
+                        # result["debug"].append(f"    📅 Mini-Cal Data: {curr_title}")
+                        
+                        # 3b. Logica Direzione
+                        curr_y = -1; curr_m = -1
+                        y_match = re.search(r'20\d{2}', curr_title)
+                        if y_match: curr_y = int(y_match.group(0))
+                        
+                        mesi = [m.upper() for m in MESI_IT]
+                        for i, m in enumerate(mesi):
+                            if m in curr_title or (len(m)>4 and m[:-1] in curr_title):
+                                curr_m = i + 1; break
+                        
+                        if curr_y != -1 and curr_m != -1:
+                           # Check Target
+                           if curr_y == anno and curr_m == mese_num:
+                                 result["debug"].append("    ✅ Data Target Raggiunta nel Popup!")
+                                 
+                                 # 3c. Clicca GIORNO per applicare
+                                 days = mini_cal.locator(".dijitCalendarDateTemplate:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth), .dijitCalendarCurrentMonth").all()
+                                 if len(days) > 0:
+                                     # Clicca il 15° o centrale
+                                     idx = min(15, len(days)-1)
+                                     try:
+                                         days[idx].click()
+                                         result["debug"].append(f"    🖱️ Click giorno {idx+1} nel popup per confermare")
+                                         time.sleep(3) # Attesa ricaricamento pagina principale
+                                         cal_nav_success = True
+                                     except: pass
+                                 else:
+                                     result["debug"].append("    ⚠️ Nessun giorno cliccabile trovato nel popup")
+                                 break
+                        
+                           # Direzione
+                           target_val = anno * 12 + mese_num
+                           curr_val = curr_y * 12 + curr_m
+                           
+                           is_future = False
+                           if curr_val > target_val: is_future = True
+                           
+                           # Clicca Frecce nel Popup
+                           arrow_sel = ".dijitCalendarDecrease" if is_future else ".dijitCalendarIncrease"
+                           
+                           btn = mini_cal.locator(arrow_sel).first
+                           if btn.is_visible():
+                               btn.click()
+                           else:
+                                result["debug"].append(f"    ⚠️ Bottone {arrow_sel} non trovato")
+                                break
+                        else:
+                            # Se non leggiamo la data, cosa facciamo?
+                            # Proviamo a cliccare 'Decrease' alla cieca se siamo nel 2026?
+                            arrow_sel = ".dijitCalendarDecrease"
+                            try: mini_cal.locator(arrow_sel).first.click()
+                            except: break
+                        
+                        time.sleep(0.5)
+                        moves += 1
+                else:
+                    result["debug"].append("  ⚠️ Popup Mini-Calendario NON APERTO dopo il click")
+                    # Fallback disperato
+                    try:
+                        calendar_frame.locator("body").press("PageUp")
+                    except: pass
+
                     moves = 0
                     max_moves = 36 # Aumentato per coprire più anni
                     
@@ -561,19 +659,15 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     # o "Gennaio 2026"
                     
                     while moves < max_moves:
-                        # Rileggi data dal titolo
+                        # Rileggi data
                         current_title_text = "PERSO"
                         try:
-                           # Cerchiamo candidati testuali validi
-                           candidates = calendar_frame.locator("text=202").all() # Stringhe con anni 202x
+                           candidates = calendar_frame.locator("text=202").all()
                            for c in candidates:
                                if c.is_visible():
                                    t = c.inner_text().strip().upper()
-                                   # Filtra falsi positivi noti
                                    if "SALDO" in t or "PERMESSI" in t or "FERIE" in t: continue
                                    if len(t) > 40: continue
-                                   
-                                   # Cerca pattern anno
                                    if re.search(r'\b20\d{2}\b', t):
                                        current_title_text = t
                                        break
@@ -581,93 +675,74 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                         
                         result["debug"].append(f"  📅 Titolo Attuale: {current_title_text}")
                         
-                        # Interpretazione Data Corrente
-                        curr_y = -1
-                        curr_m = -1
+                        # ANTI-STALLO CHECK
+                        if moves > 0 and current_title_text == prev_title and current_title_text != "PERSO":
+                            stuck_count += 1
+                            if stuck_count >= 2:
+                                result["debug"].append("  ⚠️ Stallo rilevato. Cambio strategia input...")
+                                current_strat_idx = (current_strat_idx + 1)
+                                stuck_count = 0
+                        else:
+                            stuck_count = 0
                         
-                        # Estrai Anno
-                        y_match = re.search(r'20\d{2}', current_title_text)
-                        if y_match:
-                            curr_y = int(y_match.group(0))
-                        
-                        # Estrai Mese (più difficile se range)
-                        # Se formato "01 ott - 31 ott 2025"
-                        # Cerca mese in italiano
-                        found_m = False
-                        mesi_list = [m.upper() for m in MESI_IT] # GENNAIO, FEBBRAIO...
-                        mesi_short = [m[:3] for m in mesi_list]   # GEN, FEB, MAR... (o inglese? no, italiano)
-                        
-                        # Cerca mese completo o abbr
-                        for i, m in enumerate(mesi_list):
-                            if m in current_title_text or (len(m)>4 and m[:-1] in current_title_text): # es OTTOBR in OTTOBRE
-                                curr_m = i + 1
-                                found_m = True
-                                break
-                        
-                        if not found_m:
-                            # Cerca abbreviazioni (es "OTT", "FEB")
-                             for i, m3 in enumerate(mesi_short):
-                                 # Regex boundary per evitare falsi match
-                                 if re.search(r'\b' + m3 + r'\b', current_title_text): # es \bOTT\b
-                                     curr_m = i + 1
-                                     found_m = True
-                                     break
+                        prev_title = current_title_text
 
-                        # Logica Confronto
+                        # Interpretazione Data
+                        curr_y = -1; curr_m = -1
+                        y_match = re.search(r'20\d{2}', current_title_text)
+                        if y_match: curr_y = int(y_match.group(0))
+                        
+                        mesi_list = [m.upper() for m in MESI_IT]
+                        for i, m in enumerate(mesi_list):
+                            if m in current_title_text or (len(m)>4 and m[:-1] in current_title_text):
+                                curr_m = i + 1; break
+                        if curr_m == -1: # Try short
+                             for i, m3 in enumerate([m[:3] for m in mesi_list]):
+                                 if re.search(r'\b' + m3 + r'\b', current_title_text):
+                                     curr_m = i + 1; break
+
+                        # Logica Movimento
                         if curr_y != -1 and curr_m != -1:
-                            result["debug"].append(f"    -> Interpretato: Mese={curr_m}, Anno={curr_y}")
-                            
                             if curr_y == anno and curr_m == mese_num:
                                 result["debug"].append("  ✅ Mese target raggiunto!")
                                 cal_nav_success = True
                                 break
                             
-                            # Calcola Direzione
-                            # Target: anno, mese_num
-                            # Current: curr_y, curr_m
-                            
                             target_val = anno * 12 + mese_num
                             curr_val = curr_y * 12 + curr_m
+                            go_back = curr_val > target_val
                             
-                            go_back = False
-                            if curr_val > target_val:
-                                go_back = True # Siamo nel futuro, dobbiamo tornare indietro
+                            # Seleziona Strategia
+                            strats = strategies_back if go_back else strategies_fwd
+                            strat_name = strats[current_strat_idx % len(strats)]
                             
-                            direction = "INDIETRO" if go_back else "AVANTI"
-                            key = "PageUp" if go_back else "PageDown" 
-                            # Verifica comando tastiera Dojo
-                            # Indietro = PageUp solitamente. O Left Arrow se siamo in view mensile.
+                            result["debug"].append(f"  Action: {strat_name} (Stuck={stuck_count})")
                             
-                            # AZIONE MOVIMENTO
-                            if go_back:
-                                # Prova PageUp
-                                calendar_frame.locator("body").press("PageUp")
-                                # Anche ArrowLeft può servire se PageUp non va
-                                # calendar_frame.locator("body").press("ArrowLeft") 
+                            if "Button" in strat_name:
+                                # Click fisico bottone
+                                dir_class = "Decrease" if go_back else "Increase"
+                                # Cerca bottoni con quella classe o title
+                                btns = calendar_frame.locator(f".dijitCalendar{dir_class}, .dijitArrowButtonInner").all()
+                                clicked_btn = False
+                                for b in btns:
+                                    try:
+                                        if b.is_visible():
+                                            # euristica extra: deve essere vicino al titolo? NO, proviamo a caso.
+                                            b.click()
+                                            clicked_btn = True
+                                            break
+                                    except: pass
+                                if not clicked_btn:
+                                     # Prova a cliccare bottoni generici "Prev/Next" based on position?
+                                     result["debug"].append("    Nessun bottone freccia trovato per click")
                             else:
-                                calendar_frame.locator("body").press("PageDown")
-                            
-                            result["debug"].append(f"  ⌨️ Navigo {direction} ({key})...")
+                                # Keyboard action
+                                keys_to_press = strat_name
+                                calendar_frame.locator("body").press(keys_to_press)
                             
                         else:
-                            # Se non riusciamo a leggere la data, proviamo azioni random (rischiose)
-                            # O usiamo PageUp blind se siamo bloccati al 2026?
-                            # Assumiamo che se vediamo "2026" e vogliamo "2025", dobbiamo andare indietro
-                            if curr_y != -1:
-                                if curr_y > anno:
-                                    calendar_frame.locator("body").press("PageUp")
-                                    result["debug"].append("  ⌨️ Anno futuro rilevato, premo PageUp...")
-                                elif curr_y < anno:
-                                     calendar_frame.locator("body").press("PageDown")
-                                     result["debug"].append("  ⌨️ Anno passato rilevato, premo PageDown...")
-                                else:
-                                    # Anno giusto, mese sconosciuto. 
-                                    # Proviamo avanti?
-                                    calendar_frame.locator("body").press("PageDown")
-                                    result["debug"].append("  ⌨️ Mese sconosciuto, tento PageDown...")
-                            else:
-                                result["debug"].append("  ⚠️ Data illeggibile, impossibile navigare")
-                                break
+                            # Fallback blind
+                            calendar_frame.locator("body").press("PageUp")
                         
                         time.sleep(1.5)
                         moves += 1
