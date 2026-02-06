@@ -1,6 +1,4 @@
 streamlit
 playwright
-google-generativeai
-requests
-openai
 pymupdf
+requests
