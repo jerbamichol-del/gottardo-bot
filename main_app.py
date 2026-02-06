@@ -57,15 +57,24 @@ except Exception:
 MESI_IT = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
            "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
 
+# Codici eventi calendario Gottardo (dallo screenshot del portale)
 CALENDAR_CODES = {
-    "FEP": "FERIE PIANIFICATE",
-    "OMT": "OMESSA TIMBRATURA",
-    "RCS": "RIPOSO COMPENSATIVO",
-    "RIC": "RIPOSO FORZATO",
-    "MAL": "MALATTIA"
+    "FEP": "FERIE PIANIFICATE",           # 🟡 Giallo
+    "OMT": "OMESSA TIMBRATURA",            # 🔴 Rosa/Rosso
+    "RCS": "RIPOSO COMPENSATIVO SUCC",     # 🟢 Verde
+    "RIC": "RIPOSO COMPENSATIVO FORZ",     # 🟢 Verde
+    "MAL": "MALATTIA"                      # 🔵 Azzurro
 }
 
-AGENDA_KEYWORDS = ["OMESSA TIMBRATURA", "MALATTIA", "RIPOSO", "FERIE", "PERMESS", "ANOMALIA", "ASSENZA"]
+# Keywords per riconoscere eventi nell'agenda (DOM parsing)
+AGENDA_KEYWORDS = [
+    "OMESSA TIMBRATURA", "OMESSA", "OMT",
+    "MALATTIA", "MAL",
+    "RIPOSO COMPENSATIVO", "RCS", "RIC",
+    "FERIE PIANIFICATE", "FERIE", "FEP",
+    "PERMESSO", "PAR",
+    "ANOMALIA", "ASSENZA"
+]
 
 
 # ==============================================================================
@@ -366,71 +375,115 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         # Naviga al calendario (Time -> Calendario)
         result["debug"].append("🗓️ Navigazione al calendario...")
         
+        # 1) Clicca su Time nel menu
         try:
             page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
+            result["debug"].append("  Menu Time cliccato (JS)")
         except:
             try:
                 page.locator("text=Time").first.click(force=True)
+                result["debug"].append("  Menu Time cliccato (locator)")
             except:
-                pass
-        time.sleep(2)
+                result["debug"].append("  ⚠️ Menu Time non trovato")
+        time.sleep(3)
         
-        # Prova a cliccare su "Calendario" o "Agenda"
-        for tab_name in ["Calendario", "Agenda", "Calendar"]:
+        # 2) Cerca il pannello/tab del calendario - vari tentativi
+        # Guardando lo screenshot: "Mese" è un tab che mostra la vista calendario
+        calendar_tabs = ["Mese", "Calendario", "Agenda", "Calendar", "Month"]
+        tab_clicked = False
+        
+        for tab_name in calendar_tabs:
             try:
-                page.locator(f"text={tab_name}").first.click(force=True, timeout=3000)
-                result["debug"].append(f"✅ Cliccato tab: {tab_name}")
-                break
+                tab = page.locator(f"text={tab_name}").first
+                if tab.is_visible(timeout=2000):
+                    tab.click(force=True)
+                    result["debug"].append(f"  ✅ Tab '{tab_name}' cliccato")
+                    tab_clicked = True
+                    break
             except:
                 continue
         
-        time.sleep(3)
+        if not tab_clicked:
+            # Prova con ID specifici
+            for tab_id in ["lnktab_0_label", "lnktab_1_label", "lnktab_2_label"]:
+                try:
+                    if page.evaluate(f"!!document.getElementById('{tab_id}')"):
+                        page.evaluate(f"document.getElementById('{tab_id}')?.click()")
+                        result["debug"].append(f"  ✅ Tab {tab_id} cliccato")
+                        break
+                except:
+                    pass
         
-        # Prova anche con gli ID dei tab
-        for tab_id in ["lnktab_0_label", "lnktab_1_label"]:
-            try:
-                page.evaluate(f"document.getElementById('{tab_id}')?.click()")
-                time.sleep(1)
-            except:
-                pass
+        time.sleep(4)
         
-        time.sleep(3)
+        # === CATTURA EVENTI DAL DOM ===
+        result["debug"].append("🔍 Ricerca eventi nel DOM del calendario...")
         
-        # Se siamo nella vista calendario, cerchiamo gli eventi nel DOM
-        result["debug"].append("🔍 Ricerca eventi nel DOM...")
-        
-        # Selettori per eventi calendario
+        # Selettori specifici per calendari Dojo/Dijit/ZK (usati da portali HR italiani)
         event_selectors = [
-            ".calendarEvent",
-            "[class*='Event']",
+            # Calendari Dojo
             ".dojoxCalendarEvent",
-            "[title*='OMESSA']",
-            "[title*='FERIE']",
-            "[title*='MALATTIA']",
-            "[title*='RIPOSO']"
+            ".dijitCalendarEvent", 
+            "[class*='calendarEvent']",
+            "[class*='CalendarEvent']",
+            # Eventi con background colorato (barre)
+            "[style*='background'][style*='rgb']",
+            # ZK Framework (usato da Zucchetti)
+            ".z-calendar-event",
+            "[class*='z-event']",
+            # Generici
+            "div[class*='event']",
+            "[role='button'][class*='event']",
+            # Celle con eventi per titolo/testo
+            "*:has-text('OMESSA')",
+            "*:has-text('FERIE')",
+            "*:has-text('MALATTIA')",
+            "*:has-text('RIPOSO')"
         ]
         
         dom_events = []
+        
+        # Prima: cerca con selettori CSS
         for sel in event_selectors:
             try:
                 elements = page.locator(sel)
                 count = elements.count()
-                if count > 0:
+                if count > 0 and count < 200:  # Evita troppi elementi
                     result["debug"].append(f"📌 {sel}: {count} elementi")
-                    for i in range(min(count, 50)):
+                    for i in range(min(count, 30)):
                         try:
                             el = elements.nth(i)
                             text = (el.inner_text() or "").strip()
                             title = (el.get_attribute("title") or "").strip()
-                            content = text or title
+                            aria = (el.get_attribute("aria-label") or "").strip()
+                            content = text or title or aria
+                            
+                            # Filtra solo eventi rilevanti
                             if content and len(content) > 2:
-                                dom_events.append(content)
+                                content_upper = content.upper()
+                                if any(kw in content_upper for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO", "OMT", "FEP", "MAL", "RCS", "RIC"]):
+                                    dom_events.append(content)
+                                    result["debug"].append(f"  → Trovato: {content[:40]}")
                         except:
                             continue
             except:
                 continue
         
-        result["debug"].append(f"📋 Trovati {len(dom_events)} eventi nel DOM")
+        # Seconda strategia: cerca direttamente il testo nella pagina
+        if len(dom_events) == 0:
+            result["debug"].append("🔎 Ricerca testo diretto nella pagina...")
+            
+            for keyword in ["OMESSA TIMBRATURA", "FERIE PIANIFICATE", "RIPOSO COMPENSATIVO", "MALATTIA"]:
+                try:
+                    matches = page.locator(f"text={keyword}").count()
+                    if matches > 0:
+                        result["debug"].append(f"  📝 '{keyword}': {matches} occorrenze")
+                        for i in range(matches):
+                            dom_events.append(keyword)
+                except:
+                    pass
+        
+        result["debug"].append(f"📋 Totale eventi DOM: {len(dom_events)}")
         
     except Exception as e:
         result["debug"].append(f"❌ Errore navigazione: {type(e).__name__}")
