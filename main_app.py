@@ -1662,15 +1662,28 @@ if "res" in st.session_state:
         a_malattia = a_evs.get("MALATTIA", 0)
 
         # Se l'agenda ha dati, usa quelli come fonte primaria per le assenze
+        # Se l'agenda ha dati, usa quelli come fonte primaria per le assenze...
+        # MA SOLO SE sono coerenti con la busta (tolleranza 2 giorni)
         if agenda.get("success") and a_ferie > 0:
-            gg_ferie_effettive = a_ferie  # Giorni reali di ferie (linee gialle)
+            gg_ferie_rilevate = a_ferie
             
             # Verifica incrociata: ferie_agenda dovrebbe ≈ (ferie_busta + permessi_busta) in giorni
-            if gg_assenze_busta > 0 and abs(gg_ferie_effettive - gg_assenze_busta) > 1:
-                st.info(
-                    f"ℹ️ **Verifica Ferie**: Agenda mostra {gg_ferie_effettive} giorni, "
-                    f"Busta indica {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = {gg_assenze_busta} giorni"
+            if gg_assenze_busta > 0 and abs(gg_ferie_rilevate - gg_assenze_busta) > 2:
+                # Discrepanza troppo alta! Probabile errore di scraping agenda (es. ferie in blocco unico non rilevate)
+                # Usiamo la BUSTA come fonte più affidabile in questo caso
+                st.warning(
+                    f"⚠️ **Verifica Ferie**: L'Agenda ha rilevato solo {gg_ferie_rilevate} giorni, "
+                    f"ma la Busta indica {gg_assenze_busta} giorni totali (da ore). "
+                    f"Uso il dato della BUSTA per il calcolo finale."
                 )
+                gg_ferie_effettive = gg_assenze_busta
+            else:
+                # Dati coerenti o solo busta assente -> usa agenda
+                gg_ferie_effettive = gg_ferie_rilevate
+                if gg_assenze_busta > 0 and abs(gg_ferie_rilevate - gg_assenze_busta) > 0:
+                     st.info(
+                        f"ℹ️ **Verifica Ferie**: Agenda mostra {gg_ferie_rilevate} giorni, Busta {gg_assenze_busta} giorni. Uso Agenda."
+                    )
         else:
             # Fallback: usa dati busta
             gg_ferie_effettive = gg_assenze_busta
@@ -1714,7 +1727,7 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", tot_calcolato, delta=f"{diff_gg:+d}" if diff_gg != 0 else None)
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None)
         col3.metric("👔 Lavorati", c_lavorati)
         col4.metric("⚠️ Omesse", final_omesse)
 
