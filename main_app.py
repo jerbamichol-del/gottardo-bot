@@ -592,18 +592,22 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     
                     # Parsing data principale (che sappiamo funzionare: '01 feb - 28 feb 2026')
                     try:
-                        y_match = re.search(r'20\d{2}', current_title_text)
+                        # Assicuriamoci che sia UPPER
+                        current_title_upper = current_title_text.upper()
+                        
+                        y_match = re.search(r'20\d{2}', current_title_upper)
                         if y_match: start_y = int(y_match.group(0))
                         
                         mesi = [m.upper() for m in MESI_IT]
                         for i, m in enumerate(mesi):
-                            if m in current_title_text or (len(m)>4 and m[:-1] in current_title_text):
+                            if m in current_title_upper or (len(m)>4 and m[:-1] in current_title_upper):
                                 start_m = i + 1; break
                         if start_m == -1: # Try short
-                             for i, m3 in enumerate([m[:3] for m in mesi_list]):
-                                 if re.search(r'\b' + m3 + r'\b', current_title_text):
+                             for i, m3 in enumerate([m[:3] for m in mesi]):
+                                 if re.search(r'\b' + m3 + r'\b', current_title_upper):
                                      start_m = i + 1; break
-                    except: pass
+                    except Exception as e_delta: 
+                        result["debug"].append(f"    ⚠️ Errore calcolo delta: {e_delta}")
                     
                     if start_y != -1 and start_m != -1:
                         target_val = anno * 12 + mese_num
