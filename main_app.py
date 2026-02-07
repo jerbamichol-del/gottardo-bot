@@ -271,8 +271,8 @@ def parse_busta_dettagliata(path):
 Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 
 **1. DATI GENERALI:**
-- NETTO: riga "PROGRESSIVI" colonna finale
-- GIORNI PAGATI: riga "GG. INPS"
+- NETTO: riga "PROGRESSIVI" colonna finale (es. 788,61)
+- GIORNI PAGATI: riga "GG. INPS" (es. 26)
 - ORE ORDINARIE: "ORE INAIL" o giorni×8
 
 **2. COMPETENZE:**
@@ -290,10 +290,16 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 **4. FERIE/PAR (tabella in alto a destra):**
 - Formato: RES.PREC / SPETTANTI / FRUITE / SALDO
 
-**5. TREDICESIMA:**
+**5. ASSENZE DEL MESE (IMPORTANTE!):**
+Cerca nella lista delle voci (colonna centrale):
+- ore_ferie_mese: voce 4521 "FERIE GODUTE" → colonna ORE (es. 37,67)
+- ore_permessi_mese: voce 4529 "PERMESSI GODUTI" → colonna ORE (es. 42,33)
+- ore_malattia_mese: voce con "MALATTIA" → colonna ORE
+
+**6. TREDICESIMA:**
 - e_tredicesima=true se trovi "TREDICESIMA"/"13MA"
 
-IMPORTANTE: Estrai i valori numerici con TUTTI i decimali presenti nel documento (es. 10,46 non deve diventare 10,5). Non arrotondare mai.
+IMPORTANTE: Estrai i valori numerici con TUTTI i decimali presenti nel documento. Non arrotondare mai.
 
 Output SOLO JSON:
 {
@@ -302,7 +308,8 @@ Output SOLO JSON:
   "competenze": {"base": 0.00, "anzianita": 0.00, "straordinari": 0.00, "festivita": 0.00, "lordo_totale": 0.00},
   "trattenute": {"inps": 0.00, "irpef_netta": 0.00, "addizionali": 0.00},
   "ferie": {"residue_ap": 0.00, "maturate": 0.00, "godute": 0.00, "saldo": 0.00},
-  "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00}
+  "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00},
+  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "ore_malattia": 0.00}
 }
 """.strip()
 
@@ -321,8 +328,11 @@ Output SOLO JSON:
             "trattenute": {"inps": 0, "irpef_netta": 0, "addizionali": 0},
             "ferie": {"residue_ap": 0, "maturate": 0, "godute": 0, "saldo": 0},
             "par": {"residue_ap": 0, "spettanti": 0, "fruite": 0, "saldo": 0},
+            "assenze_mese": {"ore_ferie": 0, "ore_permessi": 0, "ore_malattia": 0},
         }
     return result
+
+
 
 
 def parse_cartellino_dettagliato(path):
@@ -330,22 +340,30 @@ def parse_cartellino_dettagliato(path):
     prompt = """
 Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
 
-Conta:
-1. giorni_lavorati: giorni con almeno una timbratura (es 08:00-17:00)
-2. ferie: FE, FERIE
-3. malattia: MAL, MALATTIA
-4. permessi: PERMESSO, PAR, ROL
-5. riposi: RIPOSO, RIP, RECUPERO, riposo compensativo (NON sono giorni retribuiti INPS)
-6. omesse_timbrature: ANOMALIA, OMESSA, OMT, MANCATA o timbrature marcate con lettera 'I' finale (es. E13,58I indica inserimento manuale per badge mancante). NOTA: sono giorni LAVORATI.
-7. festivita: FESTIVO, FES
+**PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER DEL DOCUMENTO:**
+In fondo al cartellino c'è una riga con i totali. Cerca:
+- "GG PRESENZA" o "0265 GG PRESENZA" → questo è il numero ESATTO di giorni lavorati (es. 16,00)
+- "ORE LAVORATE" o "0253 ORE LAVORATE" → ore totali lavorate (es. 115,15)
+- "ORE ORDINARIE" → ore ordinarie (es. 115,00)
 
-IMPORTANTE: 
-- Le "omesse timbrature" sono giorni in cui si è lavorato ma manca la timbratura (badge dimenticato)
-- I "riposi compensativi" NON contano come giorni INPS pagati
+**POI CONTA I GIORNI PER TIPO guardando i codici a sinistra di ogni riga:**
+- ferie: righe con codice FER, FERIE, FE (conta quante righe hanno questo codice)
+- malattia: righe con MAL, MALATTIA
+- permessi: righe con PAR, PER, PERMESSO, ROL
+- riposi: righe con RCS, RIC, RIP, RIPOSO, RDD (riposi compensativi e domenicali)
+- festivita: righe con FES, FESTIVO
+- omesse_timbrature: conta le righe dove le timbrature hanno la lettera 'I' finale 
+  (es. "E13,58I" indica inserimento manuale = omessa timbratura)
+
+IMPORTANTE:
+- Il valore "GG PRESENZA" dal footer è la fonte più affidabile per i giorni lavorati
+- Le omesse timbrature sono giorni LAVORATI (contati in GG PRESENZA) ma con badge mancante
+- I riposi (RCS, RIC, RDD) NON sono giorni INPS
 
 Output JSON:
 {
   "giorni_lavorati": 0,
+  "ore_lavorate": 0.00,
   "ferie": 0,
   "malattia": 0,
   "permessi": 0,
@@ -360,6 +378,7 @@ Output JSON:
     if not result:
         return {
             "giorni_lavorati": 0,
+            "ore_lavorate": 0,
             "ferie": 0,
             "malattia": 0,
             "permessi": 0,
@@ -1604,20 +1623,49 @@ if "res" in st.session_state:
         # DATI DAL CARTELLINO (AI parsing)
         # =====================================================================
         c_lavorati = c.get("giorni_lavorati", 0)
-        c_ferie = c.get("ferie", 0)
-        c_malattia = c.get("malattia", 0)
-        c_permessi = c.get("permessi", 0)
+        c_ore_lavorate = c.get("ore_lavorate", 0)
         c_omesse = c.get("omesse_timbrature", 0)
         c_riposi = c.get("riposi", 0)
         c_festivita = c.get("festivita", 0)
+        c_malattia = c.get("malattia", 0)
 
         # =====================================================================
-        # DATI DALL'AGENDA (scraping live)
+        # DATI DALLA BUSTA (ore ferie/permessi)
         # =====================================================================
+        assenze_busta = b.get("assenze_mese", {})
+        ore_ferie_busta = assenze_busta.get("ore_ferie", 0)
+        ore_permessi_busta = assenze_busta.get("ore_permessi", 0)
+        ore_malattia_busta = assenze_busta.get("ore_malattia", 0)
+        
+        # Converti ore in giorni (ore totali / 7 per ottenere giorni)
+        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
+        gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
+        gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
+
+        # =====================================================================
+        # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
+        # L'agenda mostra i giorni REALI di ferie (linee gialle)
+        # L'azienda permette di usare permessi come ferie, quindi:
+        # FERIE_AGENDA = FERIE_BUSTA + PERMESSI_BUSTA
+        # =====================================================================
+        a_ferie = a_evs.get("FERIE", 0)  # Giorni con linea gialla nell'agenda
         a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
-        a_ferie = a_evs.get("FERIE", 0)
-        a_malattia = a_evs.get("MALATTIA", 0)
         a_riposi = a_evs.get("RIPOSO", 0)
+        a_malattia = a_evs.get("MALATTIA", 0)
+
+        # Se l'agenda ha dati, usa quelli come fonte primaria per le assenze
+        if agenda.get("success") and a_ferie > 0:
+            gg_ferie_effettive = a_ferie  # Giorni reali di ferie (linee gialle)
+            
+            # Verifica incrociata: ferie_agenda dovrebbe ≈ (ferie_busta + permessi_busta) in giorni
+            if gg_assenze_busta > 0 and abs(gg_ferie_effettive - gg_assenze_busta) > 1:
+                st.info(
+                    f"ℹ️ **Verifica Ferie**: Agenda mostra {gg_ferie_effettive} giorni, "
+                    f"Busta indica {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = {gg_assenze_busta} giorni"
+                )
+        else:
+            # Fallback: usa dati busta
+            gg_ferie_effettive = gg_assenze_busta
 
         # =====================================================================
         # CONSOLIDAMENTO OMESSE TIMBRATURE
@@ -1634,18 +1682,21 @@ if "res" in st.session_state:
 
         # =====================================================================
         # CALCOLO GG INPS (VERIFICA PRINCIPALE)
-        # GG INPS = Lavorati + Ferie + Permessi + Malattia + Festività lavorate
+        # GG INPS = Lavorati + Ferie (da agenda) + Malattia + Festività
+        # NOTA: Le ferie da agenda includono già i permessi usati come ferie!
         # NOTA: Riposi (domeniche, RCS, RIC) NON contano come GG INPS
-        # NOTA: Le omesse sono GIÀ INCLUSE nei giorni lavorati
         # =====================================================================
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
-        # Totale calcolato dal cartellino
-        tot_calcolato = c_lavorati + c_ferie + c_permessi + c_malattia + c_festivita
+        # Totale calcolato usando le ferie dall'agenda
+        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
         diff_gg = tot_calcolato - gg_pagati_busta
 
+
+        # =====================================================================
+        # VISUALIZZAZIONE RIEPILOGO
         # =====================================================================
         # VISUALIZZAZIONE RIEPILOGO
         # =====================================================================
@@ -1659,12 +1710,23 @@ if "res" in st.session_state:
         col3.metric("👔 Lavorati", c_lavorati)
         col4.metric("⚠️ Omesse", final_omesse)
 
-        # Dettaglio assenze
+        # Dettaglio assenze - usa ferie effettive (da agenda = ferie + permessi usati come ferie)
         col5, col6, col7, col8 = st.columns(4)
-        col5.metric("🏖️ Ferie", c_ferie)
-        col6.metric("📋 Permessi", c_permessi)
-        col7.metric("🤒 Malattia", c_malattia)
-        col8.metric("💤 Riposi", c_riposi)
+        
+        lbl_ferie = "🏖️ Ferie (Agenda)" if agenda.get("success") and a_ferie > 0 else "🏖️ Ferie (Busta)"
+        help_ferie = "Dati rilevati dal calendario" if "Agenda" in lbl_ferie else "Calcolato dalle ore in busta (diviso 7)"
+        
+        col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
+        col6.metric("🤒 Malattia", gg_malattia)
+        col7.metric("💤 Riposi", c_riposi)
+        col8.metric("🎉 Festività", c_festivita)
+
+        # Mostra dettaglio ore dalla busta se disponibile
+        if ore_ferie_busta > 0 or ore_permessi_busta > 0:
+            st.caption(
+                f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
+                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
+            )
 
         st.markdown("---")
 
@@ -1675,7 +1737,7 @@ if "res" in st.session_state:
             if abs(diff_gg) == 0:
                 st.success(
                     f"✅ **DATI COERENTI** — GG INPS dalla busta ({gg_pagati_busta}) = "
-                    f"Lavorati ({c_lavorati}) + Ferie ({c_ferie}) + Permessi ({c_permessi}) + Malattia ({c_malattia})"
+                    f"Lavorati ({c_lavorati}) + Ferie/Permessi ({gg_ferie_effettive}) + Malattia ({gg_malattia})"
                 )
             elif abs(diff_gg) == 1:
                 st.success(
@@ -1766,7 +1828,7 @@ if "res" in st.session_state:
             v_festivita = c.get("festivita", 0)
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", v_lavorati)
+            k1.metric("👔 Lavorati", v_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
             k2.metric("🏖️ Ferie", v_ferie)
             k3.metric("🤒 Malattia", v_malattia)
             k4.metric("⚠️ Omesse", v_omesse)
