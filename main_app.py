@@ -1214,38 +1214,55 @@ if "res" in st.session_state:
     ferie = b.get("ferie", {})
     par = b.get("par", {})
     
-    # === CONTROLLO INCROCIATO ===
-    if not is_13 and c:
-        gg_lavorati = c.get("giorni_lavorati", 0)
-        gg_ferie = c.get("ferie", 0)
-        gg_malattia = c.get("malattia", 0)
-        gg_permessi = c.get("permessi", 0)
-        gg_riposi = c.get("riposi", 0)  # NON contano come giorni INPS pagati!
-        gg_omesse = c.get("omesse_timbrature", 0)  # Sono giorni LAVORATI!
+    # === CONTROLLO INCROCIATO AVANZATO (BUSTA vs CARTELLINO vs AGENDA) ===
+    if not is_13:
+        if not c: c = {}
+
+        # 1. Dati Cartellino (Fonte: PDF/Utente)
+        c_lavorati = c.get("giorni_lavorati", 0)
+        c_ferie = c.get("ferie", 0)
+        c_malattia = c.get("malattia", 0)
+        c_permessi = c.get("permessi", 0)
+        c_omesse = c.get("omesse_timbrature", 0)
+        c_riposi = c.get("riposi", 0)
         
-        # Aggiungi eventi agenda
-        agenda_events = agenda.get("events_by_type", {})
-        agenda_omesse = agenda_events.get("OMESSA TIMBRATURA", 0)
-        agenda_ferie = agenda_events.get("FERIE", 0) or agenda_events.get("FERIE PIANIFICATE", 0)
-        agenda_malattia = agenda_events.get("MALATTIA", 0)
-        agenda_riposi = agenda_events.get("RIPOSO", 0)
+        # 2. Dati Agenda (Fonte: Scraper Web)
+        a_evs = agenda.get("events_by_type", {})
+        a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
+        a_ferie = a_evs.get("FERIE", 0)
+        a_malattia = a_evs.get("MALATTIA", 0)
+        a_riposi = a_evs.get("RIPOSO", 0)
         
-        # CALCOLO CORRETTO:
-        # Le OMESSE TIMBRATURE sono giorni LAVORATI (hai lavorato ma dimenticato il badge)
-        # I RIPOSI COMPENSATIVI NON sono giorni pagati INPS
-        tot_lavorati_effettivi = gg_lavorati + gg_omesse  # Omesse = lavorato senza timbratura
-        tot_retribuiti = tot_lavorati_effettivi + gg_ferie + gg_malattia + gg_permessi
+        # 3. Check Discrepanze e Consolidamento
+        # Usiamo il valore MAX come "Best Guess" se le fonti discordano
+        final_omesse = max(c_omesse, a_omesse)
+        final_ferie = max(c_ferie, a_ferie)
+        final_malattia = max(c_malattia, a_malattia)
+        final_riposi = max(c_riposi, a_riposi)
+        
+        # Avvisi Discrepanze
+        if c_omesse != a_omesse:
+             st.warning(f"⚠️ **Discrepanza Omesse Timbrature**: Cartellino ({c_omesse}) vs Agenda ({a_omesse}). Utilizzo {final_omesse}.")
+        if c_ferie != a_ferie and a_ferie > 0 and c_ferie > 0: # Avvisa solo se entrambi hanno dati ma diversi
+             st.info(f"ℹ️ **Nota Ferie**: Cartellino ({c_ferie}) vs Agenda ({a_ferie}).")
+
+        # 4. Calcolo Totali Retributivi
+        # Omesse = lavorato senza timbratura -> vanno pagati come lavorati
+        # Riposi = non pagati INPS (spesso)
+        
+        tot_lavorati_effettivi = c_lavorati + final_omesse 
+        tot_retribuiti = tot_lavorati_effettivi + final_ferie + final_malattia + c_permessi
+        
         gg_pagati = dg.get("giorni_pagati", 0)
         diff = tot_retribuiti - gg_pagati
         
-        # Mostra info dettagliata
+        # Mostra Riepilogo
         st.info(f"""
-        📊 **Riepilogo Giorni**:
-        - Lavorati con badge: **{gg_lavorati}** | Omesse timbrature: **{gg_omesse}** (= lavorati senza badge)
-        - **Totale giorni lavorati**: {tot_lavorati_effettivi}
-        - Ferie: **{gg_ferie}** | Malattia: **{gg_malattia}** | Permessi: **{gg_permessi}**
-        - Riposi compensativi: **{gg_riposi}** (non contano GG.INPS)
-        - **Totale retribuiti**: {tot_retribuiti} vs **Giorni INPS pagati**: {gg_pagati}
+        📊 **Riepilogo Giorni Consolidato**:
+        - Lavorati (Badge): **{c_lavorati}** | Omesse: **{final_omesse}**
+        - Ferie: **{final_ferie}** | Malattia: **{final_malattia}** | Permessi: **{c_permessi}**
+        - Riposi: **{final_riposi}**
+        - **TOTALE CALCOLATO**: {tot_retribuiti} vs **PAGATI INPS**: {gg_pagati}
         """)
         
         if abs(diff) <= 1:
