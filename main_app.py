@@ -517,6 +517,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                  # Deve essere breve (< 30 caratteri) per essere un titolo
                                  if len(txt) < 30 and re.search(r'[A-Za-z]+\s+20\d{2}', txt):
                                      title_el = el
+                                     current_title_text = txt
                                      found_title = True
                                      result["debug"].append(f"  ✅ Titolo trovato per euristica testo: '{txt}'")
                                      break
