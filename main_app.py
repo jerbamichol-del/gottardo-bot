@@ -1633,9 +1633,17 @@ if "res" in st.session_state:
         # DATI DALLA BUSTA (ore ferie/permessi)
         # =====================================================================
         assenze_busta = b.get("assenze_mese", {})
-        ore_ferie_busta = assenze_busta.get("ore_ferie", 0)
-        ore_permessi_busta = assenze_busta.get("ore_permessi", 0)
-        ore_malattia_busta = assenze_busta.get("ore_malattia", 0)
+        def safe_float(val):
+            try:
+                if isinstance(val, str):
+                    val = val.replace(",", ".")
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
+        ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
+        ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
+        ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
         # Converti ore in giorni (ore totali / 7 per ottenere giorni)
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
