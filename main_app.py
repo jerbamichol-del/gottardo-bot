@@ -1318,18 +1318,32 @@ if "res" in st.session_state:
     
     with tab2:
         if c:
+            # Usa i dati consolidati (MAX tra Cartellino e Agenda) se disponibili
+            v_lavorati = c.get("giorni_lavorati", 0)
+            v_ferie = final_ferie if 'final_ferie' in locals() else c.get("ferie", 0)
+            v_malattia = final_malattia if 'final_malattia' in locals() else c.get("malattia", 0)
+            v_omesse = final_omesse if 'final_omesse' in locals() else c.get("omesse_timbrature", 0)
+            v_permessi = c.get("permessi", 0)
+            v_riposi = final_riposi if 'final_riposi' in locals() else c.get("riposi", 0)
+            v_festivita = c.get("festivita", 0)
+            
+            # Calcola delta per mostrare correzioni agenda
+            d_ferie = v_ferie - c.get("ferie", 0)
+            d_omesse = v_omesse - c.get("omesse_timbrature", 0)
+            d_riposi = v_riposi - c.get("riposi", 0)
+
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", c.get("giorni_lavorati", 0))
-            k2.metric("🏖️ Ferie", c.get("ferie", 0))
-            k3.metric("🤒 Malattia", c.get("malattia", 0))
-            k4.metric("⚠️ Omesse", c.get("omesse_timbrature", 0))
+            k1.metric("👔 Lavorati", v_lavorati)
+            k2.metric("🏖️ Ferie", v_ferie, delta=d_ferie if d_ferie != 0 else None)
+            k3.metric("🤒 Malattia", v_malattia)
+            k4.metric("⚠️ Omesse", v_omesse, delta=d_omesse if d_omesse != 0 else None, delta_color="inverse")
             
             st.markdown("---")
             
             k5, k6, k7 = st.columns(3)
-            k5.metric("📋 Permessi", c.get("permessi", 0))
-            k6.metric("💤 Riposi", c.get("riposi", 0))
-            k7.metric("🎉 Festività", c.get("festivita", 0))
+            k5.metric("📋 Permessi", v_permessi)
+            k6.metric("💤 Riposi", v_riposi, delta=d_riposi if d_riposi != 0 else None)
+            k7.metric("🎉 Festività", v_festivita)
             
             if c.get("note"):
                 st.info(f"📝 {c['note']}")
