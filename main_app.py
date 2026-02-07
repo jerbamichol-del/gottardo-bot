@@ -824,6 +824,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         )
 
         dom_events = []
+        found_any = False  # Inizializza flag PRIMA del loop
 
         if calendar_frame:
             try:
@@ -1064,9 +1065,19 @@ def read_agenda_api(context, mese_num, anno):
         "total_events": 0,
         "items": [],
         "debug": ["📡 Tentativo API dirette..."],
+        "success": False,
     }
 
     base_url = "https://selfservice.gottardospa.it/js_rev/JSipert2"
+    
+    # Mappa codici API -> chiavi normalizzate (coerenti con il resto del codice)
+    CODE_TO_NORMALIZED = {
+        "FEP": "FERIE",
+        "OMT": "OMESSA TIMBRATURA",
+        "RCS": "RIPOSO",
+        "RIC": "RIPOSO",
+        "MAL": "MALATTIA",
+    }
 
     for code, name in CALENDAR_CODES.items():
         try:
@@ -1096,7 +1107,11 @@ def read_agenda_api(context, mese_num, anno):
                                     pass
 
                         if month_events:
-                            result["events_by_type"][name] = len(month_events)
+                            # Usa chiave normalizzata
+                            normalized_key = CODE_TO_NORMALIZED.get(code, name)
+                            result["events_by_type"][normalized_key] = (
+                                result["events_by_type"].get(normalized_key, 0) + len(month_events)
+                            )
                             result["total_events"] += len(month_events)
                             result["debug"].append(
                                 f"  ✅ {code}: {len(month_events)} eventi"
@@ -1106,6 +1121,9 @@ def read_agenda_api(context, mese_num, anno):
         except Exception as e:
             result["debug"].append(f"  ⚠️ {code}: {type(e).__name__}")
 
+    if result["total_events"] > 0:
+        result["success"] = True
+    
     return result
 
 
@@ -1537,7 +1555,7 @@ if "res" in st.session_state:
     from datetime import date
 
     # 0. Recupero e calcolo parametri del mese (Universale)
-    anno = data.get("anno", anno_globale if "anno_globale" in locals() else 2025)
+    anno = data.get("anno", 2025)  # Usa valore salvato in sessione, fallback 2025
     mese_nome = data.get("mese", "Ottobre")
     mese_num = MESI_IT.index(mese_nome) + 1
 
@@ -1613,10 +1631,9 @@ if "res" in st.session_state:
             final_riposi = max(0, final_riposi - delta_quadratura)
             total_accounted_days = total_days_month
 
-        # Se siamo sotto il totale (es. 30/31), mancano giorni di assenza o ferie
-        elif delta_quadratura < 0:
-            final_ferie += abs(delta_quadratura)
-            total_accounted_days = total_days_month
+        # Se siamo sotto il totale (es. 30/31), mancano giorni di assenza o festività
+        # NON aggiungiamo artificialmente giorni alle ferie - segnaliamo solo
+        giorni_mancanti = abs(delta_quadratura) if delta_quadratura < 0 else 0
 
         # 7. Calcolo Totale Retribuito vs Busta Paga
         tot_retribuiti = c_lavorati + final_ferie + final_malattia + c_permessi
@@ -1624,12 +1641,19 @@ if "res" in st.session_state:
         diff_busta = tot_retribuiti - gg_pagati_busta
 
         # Mostra Riepilogo
+        assenze_totali = final_ferie + final_malattia + c_permessi
+        
+        # Nota: giorni_mancanti potrebbe includere festività nazionali non tracciate
+        msg_mancanti = ""
+        if giorni_mancanti > 0:
+            msg_mancanti = f"\n        - ⚠️ Giorni non identificati (possibili festività): **{giorni_mancanti}**"
+        
         st.info(f"""
         📊 **Riepilogo Dinamico: {nome_mese} {anno}**
         - Giorni nel mese: **{total_days_month}**
         - Lavorati (effettivi): **{c_lavorati}** | Omesse: **{final_omesse}**
-        - Assenze pagate (Ferie/Malattia/Permessi): **{final_ferie + final_malattia + c_permessi}**
-        - Riposi domenicali: **{final_riposi}**
+        - Assenze pagate (Ferie/Malattia/Permessi): **{assenze_totali}**
+        - Riposi domenicali: **{final_riposi}**{msg_mancanti}
         
         📌 **Stato Quadratura**: {total_accounted_days}/{total_days_month} giorni verificati.
         """)
@@ -1637,6 +1661,11 @@ if "res" in st.session_state:
         if total_accounted_days == total_days_month:
             st.success(
                 f"✅ **Dati Corretti**: Ogni giorno di {nome_mese} è stato identificato e categorizzato."
+            )
+        elif giorni_mancanti > 0 and giorni_mancanti <= 3:
+            # Probabile che siano festività (1 Nov, 25-26 Dic, 1 Gen, etc.)
+            st.warning(
+                f"⚠️ **{giorni_mancanti} giorni non categorizzati**: potrebbero essere festività nazionali (es. 1° Novembre, Natale, Capodanno)."
             )
         else:
             st.error(
