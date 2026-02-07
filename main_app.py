@@ -300,7 +300,7 @@ Conta:
 3. malattia: MAL, MALATTIA
 4. permessi: PERMESSO, PAR, ROL
 5. riposi: RIPOSO, RIP, RECUPERO, riposo compensativo (NON sono giorni retribuiti INPS)
-6. omesse_timbrature: ANOMALIA, OMESSA, OMT (NOTA: sono comunque giorni LAVORATI, solo senza timbratura registrata)
+6. omesse_timbrature: ANOMALIA, OMESSA, OMT, MANCATA o timbrature marcate con lettera 'I' finale (es. E13,58I indica inserimento manuale per badge mancante). NOTA: sono giorni LAVORATI.
 7. festivita: FESTIVO, FES
 
 IMPORTANTE: 
@@ -351,12 +351,12 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
     def capture_calendar_response(response):
         try:
             url = response.url
-            if "events" in url.lower() or "calendar" in url.lower() or "time" in url.lower():
+            if "events" in url.lower() or "calendar" in url.lower() or "time" in url.lower() or "anomalies" in url.lower():
                 if response.status == 200:
                     try:
                         data = response.json()
                         if data:
-                            result["debug"].append(f"📡 Catturato: {url[:80]}...")
+                            result["debug"].append(f"📡 Catturato ({'JSON' if isinstance(data, (list, dict)) else 'TEXT'}): {url[:70]}...")
                             if isinstance(data, list):
                                 captured_events.extend(data)
                             elif isinstance(data, dict) and "items" in data:
@@ -709,23 +709,22 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # Dizionario per evitare duplicati (stesso evento letto più volte)
                 # Chiave = testo + posizione approx? No, conteggio semplice per ora.
                 
-                found_any = False
-                
-                # PRE-CALCOLO ZONE PROIBITE (MESE PRECEDENTE/SUCCESSIVO)
-                # Cerca celle "dijitCalendarPreviousMonth" e simili
-                forbidden_boxes = []
+                # STRATEGIA GEOMETRICA WHITELIST
+                # Invece di cercare le celle "bad", cerchiamo le celle "GOOD" (mese corrente)
+                # e accettiamo SOLO gli eventi che cadono sopra di esse.
+                allowed_boxes = []
                 try:
-                    bad_cells = search_area.locator(".dijitCalendarPreviousMonth, .dijitCalendarNextMonth, .dijitCalendarOtherMonth").all()
-                    for c in bad_cells:
+                    good_cells = search_area.locator(".dijitCalendarCurrentMonth").all()
+                    for c in good_cells:
                         if c.is_visible():
                             b = c.bounding_box()
-                            if b: forbidden_boxes.append(b)
-                    if forbidden_boxes:
-                        result["debug"].append(f"  🚫 Mappate {len(forbidden_boxes)} celle giorni altro mese")
+                            if b: allowed_boxes.append(b)
+                    
+                    result["debug"].append(f"  ✅ Mappate {len(allowed_boxes)} celle giorni mese corrente")
                 except: pass
 
-                # Loop completo keywords
-                all_kws = ["OMESSA", "OMT", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS"]
+                # Loop completo keywords (esteso con MANCATA/ANOMALIA)
+                all_kws = ["OMESSA", "OMT", "MANCATA", "ANOMALIA", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS", "REC"]
                 for kw in all_kws:
                     # text=KW è case-insensitive
                     matches = search_area.locator(f"text={kw}")
@@ -749,16 +748,21 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                             # a) Sidebar a sinistra
                             if box['x'] < 300: continue
                             
-                            # b) Overlap con mese precedente/successivo
-                            is_forbidden = False
-                            cx = box['x'] + box['width']/2
-                            cy = box['y'] + box['height']/2
-                            for fbox in forbidden_boxes:
-                                if (fbox['x'] <= cx <= fbox['x'] + fbox['width']) and \
-                                   (fbox['y'] <= cy <= fbox['y'] + fbox['height']):
-                                    is_forbidden = True
-                                    break
-                            if is_forbidden: continue
+                            # b) WHITELIST CHECK: Deve sovrapporsi a una cella del mese corrente
+                            # Se allowed_boxes è vuoto (es. scraping body fallback senza griglia), disabilitiamo il filtro per sicurezza
+                            # Ma se ne abbiamo trovate (es. 31), allora il filtro è ATTIVO.
+                            if allowed_boxes:
+                                is_good = False
+                                cx = box['x'] + box['width']/2
+                                cy = box['y'] + box['height']/2
+                                for gbox in allowed_boxes:
+                                    if (gbox['x'] <= cx <= gbox['x'] + gbox['width']) and \
+                                       (gbox['y'] <= cy <= gbox['y'] + gbox['height']):
+                                        is_good = True
+                                        break
+                                if not is_good:
+                                    # result["debug"].append(f"    Scartato '{kw}' fuori dai giorni del mese")
+                                    continue
 
                             real_matches += 1
                             if "OMESSA" in kw or "OMT" in kw: dom_events.append("OMESSA TIMBRATURA")
@@ -818,13 +822,15 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
             except:
                 pass
         
-        # Categorizza
-        if "OMESSA" in summary or "OMT" in summary:
-            # Evita duplicati se lo stesso evento viene da API e DOM
-            # Semplice euristica: non contare troppo? No, lasciamo così per ora.
+        # Categorizza (supporto per logica Anomaly Zucchetti)
+        summary_norm = summary.upper()
+        is_omessa = any(k in summary_norm for k in ["OMESSA", "OMT", "MANCATA", "ANOMALIA"]) or \
+                    ev.get("isAnomaly") == True or ev.get("warning") or ev.get("type") == "Anomaly"
+
+        if is_omessa:
             result["events_by_type"]["OMESSA TIMBRATURA"] = result["events_by_type"].get("OMESSA TIMBRATURA", 0) + 1
             result["items"].append(f"⚠️ OMESSA: {summary[:50]}")
-        elif "FERIE" in summary or "FEP" in summary:
+        elif "FERIE" in summary_norm or "FEP" in summary_norm:
             result["events_by_type"]["FERIE"] = result["events_by_type"].get("FERIE", 0) + 1
             result["items"].append(f"🏖️ FERIE: {summary[:50]}")
         elif "MALATTIA" in summary or "MAL" in summary:
@@ -836,6 +842,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
     
     result["total_events"] = sum(result["events_by_type"].values())
     result["debug"].append(f"📊 Totale categorizzati: {result['total_events']}")
+    result["success"] = True # Flag Esplicito di Successo
     
     return result
 
@@ -1261,15 +1268,25 @@ if "res" in st.session_state:
         a_riposi = a_evs.get("RIPOSO", 0)
         
         # 3. Check Discrepanze e Consolidamento
-        # Usiamo il valore MAX come "Best Guess" se le fonti discordano
-        final_omesse = max(c_omesse, a_omesse)
+        # POLICY UTENTE: Agenda vince su Cartellino per le Omesse Timbrature (se lo scraping ha avuto successo)
+        if agenda.get("success"):
+            final_omesse = a_omesse
+            # Avviso se abbiamo corretto il dato del cartellino
+            if c_omesse != a_omesse:
+                if c_omesse > a_omesse:
+                    st.success(f"✅ **Omesse Verificate**: L'Agenda conferma {a_omesse} omesse (il Cartellino ne riportava {c_omesse}, probabilmente rimasugli di mesi diversi).")
+                else:
+                    st.warning(f"⚠️ **Nuove Omesse rilevate**: L'Agenda segnala {a_omesse} omesse non ancora presenti nel Cartellino PDF.")
+        else:
+            final_omesse = c_omesse
+            if agenda: # Se c'è l'oggetto ma success è False
+                st.error("⚠️ **Errore Scraping Agenda**: Non è stato possibile verificare le omesse in tempo reale. Utilizzo i dati del Cartellino PDF.")
+        
+        # Per gli altri, usiamo MAX come sicurezza (spesso Cartellino>Agenda per ferie a giorni singoli)
         final_ferie = max(c_ferie, a_ferie)
         final_malattia = max(c_malattia, a_malattia)
         final_riposi = max(c_riposi, a_riposi)
         
-        # Avvisi Discrepanze
-        if c_omesse != a_omesse:
-             st.warning(f"⚠️ **Discrepanza Omesse Timbrature**: Cartellino ({c_omesse}) vs Agenda ({a_omesse}). Utilizzo {final_omesse}.")
         if c_ferie != a_ferie and a_ferie > 0 and c_ferie > 0: # Avvisa solo se entrambi hanno dati ma diversi
              st.info(f"ℹ️ **Nota Ferie**: Cartellino ({c_ferie}) vs Agenda ({a_ferie}).")
 
