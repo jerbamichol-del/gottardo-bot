@@ -777,6 +777,10 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
     for ev in all_events:
         summary = str(ev.get("summary", "") or ev.get("title", "") or ev.get("description", "")).upper()
         
+        # FILTRO ANTI-SIDEBAR/FOOTER (anche per API events)
+        if "SALDO" in summary or "RESIDUO" in summary or "TOTALE" in summary: continue
+        if "PERMESSI DEL" in summary: continue
+        
         # Filtra per mese (se c'è data)
         start = ev.get("startTime", "") or ev.get("start", "") or ev.get("date", "")
         if start and len(str(start)) >= 7:
@@ -789,6 +793,8 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         
         # Categorizza
         if "OMESSA" in summary or "OMT" in summary:
+            # Evita duplicati se lo stesso evento viene da API e DOM
+            # Semplice euristica: non contare troppo? No, lasciamo così per ora.
             result["events_by_type"]["OMESSA TIMBRATURA"] = result["events_by_type"].get("OMESSA TIMBRATURA", 0) + 1
             result["items"].append(f"⚠️ OMESSA: {summary[:50]}")
         elif "FERIE" in summary or "FEP" in summary:
@@ -797,7 +803,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
         elif "MALATTIA" in summary or "MAL" in summary:
             result["events_by_type"]["MALATTIA"] = result["events_by_type"].get("MALATTIA", 0) + 1
             result["items"].append(f"🤒 MALATTIA: {summary[:50]}")
-        elif "RIPOSO" in summary or "RCS" in summary or "RIC" in summary:
+        elif "RIPOSO" in summary or "RCS" in summary or "RIC" in summary or "RPS" in summary or "REC" in summary:
             result["events_by_type"]["RIPOSO"] = result["events_by_type"].get("RIPOSO", 0) + 1
             result["items"].append(f"💤 RIPOSO: {summary[:50]}")
     
