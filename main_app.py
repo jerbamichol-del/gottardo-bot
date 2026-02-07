@@ -1584,7 +1584,7 @@ def update_step(step_num):
 
 
 def render_step_indicator():
-    """Renderizza l'indicatore di step"""
+    """Renderizza l'indicatore di step semplificato"""
     steps = [
         ("1", "🔐 Login", st.session_state.get("u") and st.session_state.get("p")),
         ("2", "📅 Selezione", st.session_state.get("step", 1) >= 2),
@@ -1592,18 +1592,19 @@ def render_step_indicator():
         ("4", "📊 Analisi", st.session_state.get("step", 1) >= 4),
     ]
 
-    step_html = '<div class="step-container">'
-    for i, (num, label, completed) in enumerate(steps, 1):
-        current = st.session_state.step == i
-        status_class = "active" if current else ("completed" if completed else "")
-        step_html += f"""
-            <div class="step {status_class}">
-                <div class="step-number">{num}</div>
-                <span class="step-label">{label}</span>
-            </div>
-        """
-    step_html += "</div>"
-    st.markdown(step_html, unsafe_allow_html=True)
+    # Crea le colonne per gli step
+    cols = st.columns(4)
+    for i, (num, label, completed) in enumerate(steps):
+        with cols[i]:
+            current = st.session_state.step == i + 1
+            if current:
+                st.metric(label=f"Step {num}", value=label, delta="●")
+            elif completed:
+                st.metric(
+                    label=f"Step {num}", value=label, delta="✓", delta_color="normal"
+                )
+            else:
+                st.metric(label=f"Step {num}", value=label)
 
 
 # Header con wizard
