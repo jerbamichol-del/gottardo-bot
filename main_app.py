@@ -721,8 +721,13 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                         el = matches.nth(i)
                         if el.is_visible():
                             # MEGA FIX: scarta se elemento è "LeftColumn" (Sidebar)
-                            # Cerca antenati con classe LeftColumn
-                            # Playwright non ha "has_parent" facile nei locators a cascata inversa senza xpath
+                            # FILTRI TESTUALI (ANTI-SIDEBAR/FOOTER)
+                            try:
+                                txt_upper = el.inner_text().upper()
+                                if "SALDO" in txt_upper or "RESIDUO" in txt_upper: continue
+                                if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper: continue
+                            except: pass
+
                             # Usiamo bounding box? 
                             # Se x < 300 (sidebar solitamente a sx), ignoralo.
                             box = el.bounding_box()
@@ -731,10 +736,10 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 continue
                             
                             real_matches += 1
-                            if kw == "OMESSA": dom_events.append("OMESSA TIMBRATURA")
-                            elif kw == "FERIE": dom_events.append("FERIE")
-                            elif kw == "MALATTIA": dom_events.append("MALATTIA")
-                            elif kw == "RIPOSO": dom_events.append("RIPOSO")
+                            if "OMESSA" in kw: dom_events.append("OMESSA TIMBRATURA")
+                            elif "FERIE" in kw: dom_events.append("FERIE")
+                            elif "MALATTIA" in kw: dom_events.append("MALATTIA")
+                            elif "RIPOSO" in kw: dom_events.append("RIPOSO")
                     
                     if real_matches > 0:
                         result["debug"].append(f"  📝 Trovati {real_matches} x '{kw}'")
