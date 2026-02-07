@@ -1274,13 +1274,11 @@ if "res" in st.session_state:
                 st.error(f"❌ **ATTENZIONE**: Mancano {abs(diff)} giorni! Retribuiti: {tot_retribuiti} vs Pagati: {gg_pagati}")
         
         # Info sulle omesse timbrature (reminder, non errore)
-        if gg_omesse > 0 or agenda_omesse > 0:
-            tot_omesse = max(gg_omesse, agenda_omesse)
-            st.caption(f"ℹ️ **Reminder**: {tot_omesse} omesse timbrature da regolarizzare (hai lavorato ma manca il badge)")
+        if c_omesse > 0 or a_omesse > 0:
+            st.caption(f"ℹ️ **Reminder**: {final_omesse} omesse timbrature da regolarizzare (hai lavorato ma manca il badge)")
         
-        if agenda_riposi > 0 or gg_riposi > 0:
-            tot_riposi = max(agenda_riposi, gg_riposi)
-            st.caption(f"💤 {tot_riposi} riposi compensativi (non contano come GG.INPS pagati)")
+        if a_riposi > 0 or c_riposi > 0:
+            st.caption(f"💤 {final_riposi} riposi compensativi (non contano come GG.INPS pagati)")
     elif is_13:
         if b.get("e_tredicesima"):
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
