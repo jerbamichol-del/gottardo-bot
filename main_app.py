@@ -45,6 +45,32 @@ except Exception:
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 os.system("playwright install chromium")
 
+# CSS minimal per UI migliorata
+st.markdown(
+    """
+<style>
+    .metric-card {
+        background: white;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        text-align: center;
+        border-left: 4px solid #667eea;
+    }
+    .metric-value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #667eea;
+    }
+    .metric-label {
+        color: #666;
+        font-size: 12px;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
@@ -1456,262 +1482,65 @@ def cleanup_files(*paths):
 
 
 # ==============================================================================
-# UI - VERSIONE MIGLIORATA
+# UI
 # ==============================================================================
-st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
-
-# CSS Personalizzato per UI moderna
-st.markdown(
-    """
-<style>
-    /* Step indicator */
-    .step-container {
-        display: flex;
-        justify-content: space-between;
-        margin-bottom: 30px;
-        padding: 20px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .step {
-        text-align: center;
-        flex: 1;
-        position: relative;
-    }
-    .step:not(:last-child)::after {
-        content: '';
-        position: absolute;
-        top: 20px;
-        right: -50%;
-        width: 100%;
-        height: 3px;
-        background: rgba(255,255,255,0.3);
-    }
-    .step.active .step-number {
-        background: #fff;
-        color: #667eea;
-        transform: scale(1.1);
-    }
-    .step.completed .step-number {
-        background: #28a745;
-        color: white;
-    }
-    .step-number {
-        width: 40px;
-        height: 40px;
-        border-radius: 50%;
-        background: rgba(255,255,255,0.3);
-        color: white;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: bold;
-        font-size: 18px;
-        transition: all 0.3s ease;
-    }
-    .step-label {
-        color: white;
-        font-size: 12px;
-        margin-top: 8px;
-        display: block;
-    }
-    
-    /* Card layout */
-    .metric-card {
-        background: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        text-align: center;
-        border-left: 4px solid #667eea;
-        transition: transform 0.2s;
-    }
-    .metric-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-    .metric-value {
-        font-size: 28px;
-        font-weight: bold;
-        color: #667eea;
-    }
-    .metric-label {
-        color: #666;
-        font-size: 14px;
-        margin-top: 5px;
-    }
-    
-    /* Status banners */
-    .status-banner {
-        padding: 15px;
-        border-radius: 8px;
-        margin: 10px 0;
-        font-weight: 500;
-    }
-    .status-success {
-        background: #d4edda;
-        border-left: 5px solid #28a745;
-        color: #155724;
-    }
-    .status-warning {
-        background: #fff3cd;
-        border-left: 5px solid #ffc107;
-        color: #856404;
-    }
-    .status-error {
-        background: #f8d7da;
-        border-left: 5px solid #dc3545;
-        color: #721c24;
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# Inizializza stato wizard
-if "step" not in st.session_state:
-    st.session_state.step = 1
-if "max_step" not in st.session_state:
-    st.session_state.max_step = 1
-
-
-def update_step(step_num):
-    """Aggiorna lo step corrente"""
-    st.session_state.step = step_num
-    if step_num > st.session_state.max_step:
-        st.session_state.max_step = step_num
-
-
-def render_step_indicator():
-    """Renderizza l'indicatore di step semplificato"""
-    steps = [
-        ("1", "🔐 Login", st.session_state.get("u") and st.session_state.get("p")),
-        ("2", "📅 Selezione", st.session_state.get("step", 1) >= 2),
-        ("3", "⬇️ Download", "res" in st.session_state),
-        ("4", "📊 Analisi", st.session_state.get("step", 1) >= 4),
-    ]
-
-    # Crea le colonne per gli step
-    cols = st.columns(4)
-    for i, (num, label, completed) in enumerate(steps):
-        with cols[i]:
-            current = st.session_state.step == i + 1
-            if current:
-                st.metric(label=f"Step {num}", value=label, delta="●")
-            elif completed:
-                st.metric(
-                    label=f"Step {num}", value=label, delta="✓", delta_color="normal"
-                )
-            else:
-                st.metric(label=f"Step {num}", value=label)
-
-
-# Header con wizard
 st.title("💶 Gottardo Payroll Analyzer")
-st.markdown("*Analisi automatica buste paga e presenze*")
-
-render_step_indicator()
-
-# ==============================================================================
-# UI - SEZIONE PRINCIPALE MIGLIORATA
-# ==============================================================================
-st.markdown(
-    "<div style='background: #f8f9fa; padding: 20px; border-radius: 10px; margin-bottom: 20px;'>",
-    unsafe_allow_html=True,
-)
 
 # Credenziali
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
 pw = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
 
 if not u or not pw:
-    st.subheader("🔐 Accesso al Portale")
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        u_in = st.text_input("👤 Username", placeholder="Inserisci username")
-    with col2:
-        p_in = st.text_input(
-            "🔒 Password", type="password", placeholder="Inserisci password"
-        )
-    with col3:
-        st.write("")
-        st.write("")
-        if st.button("✅ Accedi", type="primary", use_container_width=True):
-            if u_in and p_in:
-                st.session_state["u"] = u_in
-                st.session_state["p"] = p_in
-                update_step(2)
-                st.success("🎉 Accesso effettuato!")
-                st.rerun()
-            else:
-                st.error("⚠️ Inserisci entrambi i campi")
+    c1, c2, c3 = st.columns([2, 2, 1])
+    u_in = c1.text_input("👤 Username")
+    p_in = c2.text_input("🔒 Password", type="password")
+    if c3.button("Login", type="primary"):
+        st.session_state["u"] = u_in
+        st.session_state["p"] = p_in
+        st.rerun()
 else:
-    st.subheader("📅 Parametri Analisi")
+    # Barra azioni
+    col_u, col_m, col_a, col_btn, col_rst = st.columns([1, 1.5, 1, 1.5, 0.5])
+    col_u.markdown(f"**👤 {u}**")
+    m = col_m.selectbox("Mese", MESI_IT, index=9)  # Ottobre default
+    a = col_a.selectbox("Anno", [2024, 2025, 2026], index=1)
 
-    # Barra azioni migliorata
-    col_u, col_m, col_a, col_btn, col_rst = st.columns([1.2, 1.5, 1, 1.5, 0.5])
+    tipo = "Cedolino"
+    if m == "Dicembre":
+        tipo = col_m.radio("Tipo", ["Cedolino", "Tredicesima"], horizontal=True)
 
-    with col_u:
-        st.markdown(f"**👤 {u}**")
-        st.caption("✅ Autenticato")
+    if col_btn.button("🚀 ANALIZZA", type="primary"):
+        is_13 = tipo == "Tredicesima"
 
-    with col_m:
-        m = st.selectbox("📅 Mese", MESI_IT, index=9)
-        tipo = "Cedolino"
-        if m == "Dicembre":
-            tipo = st.segmented_control(
-                "Tipo", ["Cedolino", "Tredicesima"], default="Cedolino"
+        with st.status("🔄 Elaborazione...", expanded=True):
+            # Download
+            paths = execute_download(m, a, u, pw, is_13)
+
+            # Analisi AI
+            st.write("🧠 Analisi AI...")
+            res_b = parse_busta_dettagliata(paths["busta"])
+            res_c = (
+                parse_cartellino_dettagliato(paths["cart"])
+                if not is_13 and paths["cart"]
+                else {}
             )
 
-    with col_a:
-        a = st.selectbox("📆 Anno", [2024, 2025, 2026], index=1)
+            # Salva risultati
+            st.session_state["res"] = {
+                "busta": res_b,
+                "cart": res_c,
+                "agenda": paths.get("agenda", {}),
+                "is_13": is_13,
+                "mese": m,
+                "anno": a,
+            }
 
-    with col_btn:
-        st.write("")
-        st.write("")
-        if st.button("🚀 AVVIA ANALISI", type="primary", use_container_width=True):
-            is_13 = tipo == "Tredicesima"
-            update_step(3)
+            # Pulizia
+            cleanup_files(paths.get("busta"), paths.get("cart"))
 
-            with st.status("🔄 Elaborazione in corso...", expanded=True) as status:
-                # Download
-                status.write("📡 Download documenti...")
-                paths = execute_download(m, a, u, pw, is_13)
-
-                # Analisi AI
-                status.write("🧠 Analisi AI dei documenti...")
-                res_b = parse_busta_dettagliata(paths["busta"])
-                res_c = (
-                    parse_cartellino_dettagliato(paths["cart"])
-                    if not is_13 and paths["cart"]
-                    else {}
-                )
-
-                # Salva risultati
-                st.session_state["res"] = {
-                    "busta": res_b,
-                    "cart": res_c,
-                    "agenda": paths.get("agenda", {}),
-                    "is_13": is_13,
-                    "mese": m,
-                    "anno": a,
-                }
-
-                # Pulizia
-                cleanup_files(paths.get("busta"), paths.get("cart"))
-                update_step(4)
-                status.update(label="✅ Analisi completata!", state="complete")
-                st.rerun()
-
-    with col_rst:
-        st.write("")
-        st.write("")
-        if st.button("🔄", help="Logout e reset"):
-            st.session_state.clear()
-            st.rerun()
-
-st.markdown("</div>", unsafe_allow_html=True)
+    if col_rst.button("🔄"):
+        st.session_state.clear()
+        st.rerun()
 
 # ==============================================================================
 # RISULTATI
@@ -1731,23 +1560,9 @@ if "res" in st.session_state:
 
     # Banner risultato
     if is_13:
-        st.markdown(
-            """
-            <div class='status-banner status-success'>
-                🎄 <strong>Cedolino TREDICESIMA</strong> - Analisi completata
-            </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        st.success("🎄 Cedolino TREDICESIMA - Analisi completata")
     else:
-        st.markdown(
-            """
-            <div class='status-banner status-success'>
-                ✅ <strong>Analisi completata</strong> - Dati estratti con successo
-            </div>
-        """,
-            unsafe_allow_html=True,
-        )
+        st.success("✅ Analisi completata - Dati estratti con successo")
 
     st.divider()
 
