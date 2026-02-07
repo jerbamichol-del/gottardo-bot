@@ -866,18 +866,36 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # e accettiamo SOLO gli eventi che cadono sopra di esse.
                 allowed_boxes = []
                 try:
-                    good_cells = search_area.locator(".dijitCalendarCurrentMonth").all()
-                    for c in good_cells:
-                        if c.is_visible():
-                            b = c.bounding_box()
-                            if b:
-                                allowed_boxes.append(b)
+                    # Prova diversi selettori per le celle del mese corrente
+                    cell_selectors = [
+                        ".dijitCalendarCurrentMonth",
+                        "td:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth)",
+                        "td[style*='background']:not([style*='gray'])",
+                    ]
+                    
+                    for sel in cell_selectors:
+                        try:
+                            cells = search_area.locator(sel).all()
+                            for c in cells:
+                                if c.is_visible():
+                                    b = c.bounding_box()
+                                    if b:
+                                        allowed_boxes.append(b)
+                            if len(allowed_boxes) >= 28:  # Minimo 28 giorni in un mese
+                                break
+                        except:
+                            continue
 
                     result["debug"].append(
                         f"  ✅ Mappate {len(allowed_boxes)} celle giorni mese corrente"
                     )
                 except:
                     pass
+
+                # Nomi dei mesi per il filtro testuale (escludere eventi che menzionano altri mesi)
+                mese_nome_corrente = MESI_IT[mese_num - 1]  # es: "Ottobre" per mese_num=10
+                altri_mesi = [m.lower()[:3] for m in MESI_IT if m.lower()[:3] != mese_nome_corrente.lower()[:3]]
+                mese_corrente_short = mese_nome_corrente.lower()[:3]  # es: "ott" per Ottobre
 
                 # Loop completo keywords (esteso con MANCATA/ANOMALIA)
                 all_kws = [
@@ -909,10 +927,23 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
 
                             # 1. FILTRI TESTUALI (ANTI-SIDEBAR)
                             txt_upper = el.inner_text().upper()
+                            txt_lower = el.inner_text().lower()
                             if "SALDO" in txt_upper or "RESIDUO" in txt_upper:
                                 continue
                             if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper:
                                 continue
+                            
+                            # 1b. FILTRO DATE ALTRI MESI
+                            # Escludi eventi che contengono date di altri mesi (es. "29 set", "1 nov")
+                            skip_wrong_month = False
+                            for altro_mese in altri_mesi:
+                                if altro_mese in txt_lower:
+                                    skip_wrong_month = True
+                                    break
+                            if skip_wrong_month:
+                                result["debug"].append(f"    Scartato evento fuori mese: {txt_lower[:40]}...")
+                                continue
+
 
                             # 2. FILTRI GEOMETRICI
                             box = el.bounding_box()
@@ -967,15 +998,11 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                         found_any = True
 
                 if not found_any:
-                    # Check testo grezzo se locator fallisce
-                    full = search_area.inner_text().upper()
-                    if "OMESSA" in full:
-                        cnt = full.count("OMESSA")
-                        result["debug"].append(
-                            f"  📝 Trovati {cnt} 'OMESSA' nel testo grezzo"
-                        )
-                        for _ in range(cnt):
-                            dom_events.append("OMESSA TIMBRATURA")
+                    # Se il filtro geometrico ha fallito, NON fare fallback sul testo grezzo
+                    # perché potrebbe includere eventi di mesi precedenti/successivi
+                    result["debug"].append(
+                        "  ⚠️ Nessun evento valido trovato (il filtro geometrico potrebbe aver escluso giorni fuori mese)"
+                    )
 
             except Exception as e:
                 result["debug"].append(f"  ❌ Errore scraping globale: {e}")
@@ -1573,133 +1600,119 @@ if "res" in st.session_state:
         if not c:
             c = {}
 
-        # 1. Dati Cartellino (Fonte: PDF/Utente)
+        # =====================================================================
+        # DATI DAL CARTELLINO (AI parsing)
+        # =====================================================================
         c_lavorati = c.get("giorni_lavorati", 0)
         c_ferie = c.get("ferie", 0)
         c_malattia = c.get("malattia", 0)
         c_permessi = c.get("permessi", 0)
         c_omesse = c.get("omesse_timbrature", 0)
         c_riposi = c.get("riposi", 0)
+        c_festivita = c.get("festivita", 0)
 
-        # 3. Consolidamento Omesse (Agenda = Verità primaria come richiesto)
-        if agenda.get("success"):
+        # =====================================================================
+        # DATI DALL'AGENDA (scraping live)
+        # =====================================================================
+        a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
+        a_ferie = a_evs.get("FERIE", 0)
+        a_malattia = a_evs.get("MALATTIA", 0)
+        a_riposi = a_evs.get("RIPOSO", 0)
+
+        # =====================================================================
+        # CONSOLIDAMENTO OMESSE TIMBRATURE
+        # Le omesse vanno SEMPRE segnalate (anche se regolarizzate con "I")
+        # =====================================================================
+        if agenda.get("success") and a_omesse > 0:
             final_omesse = a_omesse
             if c_omesse != a_omesse:
-                if c_omesse > a_omesse:
-                    st.success(
-                        f"✅ **Omesse Verificate**: L'Agenda conferma {a_omesse} omesse (corretta discrepanza del PDF)."
-                    )
-                else:
-                    st.warning(
-                        f"⚠️ **Anomalia Agenda**: Trovate {a_omesse} omesse timbrature (non presenti nel PDF)."
-                    )
+                st.info(
+                    f"ℹ️ **Omesse Timbrature**: Agenda riporta {a_omesse}, Cartellino riporta {c_omesse}"
+                )
         else:
             final_omesse = c_omesse
-            if agenda:
-                st.error(
-                    "⚠️ **Scraping fallito**: Non è stato possibile verificare le omesse in tempo reale."
-                )
 
-        # 4. Consolidamento Riposi (Domeniche)
-        # Identifichiamo le domeniche reali dal calendario per il mese/anno corrente
-        sundays_in_month = [
-            d
-            for d in range(1, total_days_month + 1)
-            if date(anno, mese_num, d).weekday() == 6
-        ]
-        count_sundays = len(sundays_in_month)
-
-        # I riposi effettivi sono le domeniche in cui non si è lavorato.
-        # Spesso il cartellino somma tutti i giorni non lavorati compresi i riposi.
-        # Usiamo il dato più alto tra le fonti ma limitandolo al perimetro del calendario.
-        final_riposi = min(count_sundays, max(c_riposi, a_riposi))
-
-        # 5. Consolidamento Ferie e Malattia
-        final_ferie = max(c_ferie, a_ferie)
-        final_malattia = max(c_malattia, a_malattia)
-
-        # 6. Quadratura Matematica Rigorosa
-        # Controlliamo che la somma dei giorni (Lav + Assenze + Riposi) quadri con il mese.
-        total_accounted_days = (
-            c_lavorati + final_ferie + final_malattia + c_permessi + final_riposi
-        )
-        delta_quadratura = total_accounted_days - total_days_month
-
-        # Se siamo sopra il totale (es. 32/31), significa che abbiamo lavorato una domenica (overlap Lav/Riposo)
-        if delta_quadratura > 0:
-            # Togliamo l'eccedenza dai riposi (perché i lavorati sono reali)
-            final_riposi = max(0, final_riposi - delta_quadratura)
-            total_accounted_days = total_days_month
-
-        # Se siamo sotto il totale (es. 30/31), mancano giorni di assenza o festività
-        # NON aggiungiamo artificialmente giorni alle ferie - segnaliamo solo
-        giorni_mancanti = abs(delta_quadratura) if delta_quadratura < 0 else 0
-
-        # 7. Calcolo Totale Retribuito vs Busta Paga
-        tot_retribuiti = c_lavorati + final_ferie + final_malattia + c_permessi
-        gg_pagati_busta = dg.get("giorni_pagati", 0)
-        diff_busta = tot_retribuiti - gg_pagati_busta
-
-        # Mostra Riepilogo
-        assenze_totali = final_ferie + final_malattia + c_permessi
+        # =====================================================================
+        # CALCOLO GG INPS (VERIFICA PRINCIPALE)
+        # GG INPS = Lavorati + Ferie + Permessi + Malattia + Festività lavorate
+        # NOTA: Riposi (domeniche, RCS, RIC) NON contano come GG INPS
+        # NOTA: Le omesse sono GIÀ INCLUSE nei giorni lavorati
+        # =====================================================================
+        gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
-        # Nota: giorni_mancanti potrebbe includere festività nazionali non tracciate
-        msg_mancanti = ""
-        if giorni_mancanti > 0:
-            msg_mancanti = f"\n        - ⚠️ Giorni non identificati (possibili festività): **{giorni_mancanti}**"
+        # Totale calcolato dal cartellino
+        tot_calcolato = c_lavorati + c_ferie + c_permessi + c_malattia + c_festivita
         
-        st.info(f"""
-        📊 **Riepilogo Dinamico: {nome_mese} {anno}**
-        - Giorni nel mese: **{total_days_month}**
-        - Lavorati (effettivi): **{c_lavorati}** | Omesse: **{final_omesse}**
-        - Assenze pagate (Ferie/Malattia/Permessi): **{assenze_totali}**
-        - Riposi domenicali: **{final_riposi}**{msg_mancanti}
+        # Differenza
+        diff_gg = tot_calcolato - gg_pagati_busta
+
+        # =====================================================================
+        # VISUALIZZAZIONE RIEPILOGO
+        # =====================================================================
+        st.markdown("---")
+        st.subheader(f"📊 Verifica {nome_mese} {anno}")
         
-        📌 **Stato Quadratura**: {total_accounted_days}/{total_days_month} giorni verificati.
-        """)
+        # Metriche principali
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
+        col2.metric("📋 GG Calcolati", tot_calcolato, delta=f"{diff_gg:+d}" if diff_gg != 0 else None)
+        col3.metric("👔 Lavorati", c_lavorati)
+        col4.metric("⚠️ Omesse", final_omesse)
 
-        if total_accounted_days == total_days_month:
-            st.success(
-                f"✅ **Dati Corretti**: Ogni giorno di {nome_mese} è stato identificato e categorizzato."
-            )
-        elif giorni_mancanti > 0 and giorni_mancanti <= 3:
-            # Probabile che siano festività (1 Nov, 25-26 Dic, 1 Gen, etc.)
-            st.warning(
-                f"⚠️ **{giorni_mancanti} giorni non categorizzati**: potrebbero essere festività nazionali (es. 1° Novembre, Natale, Capodanno)."
-            )
-        else:
-            st.error(
-                f"❌ **Discrepanza**: Mancano o avanzano {abs(total_accounted_days - total_days_month)} giorni nel conteggio."
-            )
+        # Dettaglio assenze
+        col5, col6, col7, col8 = st.columns(4)
+        col5.metric("🏖️ Ferie", c_ferie)
+        col6.metric("📋 Permessi", c_permessi)
+        col7.metric("🤒 Malattia", c_malattia)
+        col8.metric("💤 Riposi", c_riposi)
 
-        # Nota tecnica busta paga
+        st.markdown("---")
+
+        # =====================================================================
+        # VERIFICA COERENZA GG INPS
+        # =====================================================================
         if gg_pagati_busta > 0:
-            st.caption(
-                f"ℹ️ **Nota Busta**: Totale retribuito {tot_retribuiti} gg vs liquidati in busta {gg_pagati_busta} gg. (Scostamento: {diff_busta} gg)."
-            )
-
-        if abs(diff_busta) <= 1:
-            st.success(
-                f"✅ **DATI COERENTI** — Retribuiti: {tot_retribuiti} vs Pagati INPS: {gg_pagati_busta}"
-            )
-        else:
-            if diff_busta > 0:
+            if abs(diff_gg) == 0:
+                st.success(
+                    f"✅ **DATI COERENTI** — GG INPS dalla busta ({gg_pagati_busta}) = "
+                    f"Lavorati ({c_lavorati}) + Ferie ({c_ferie}) + Permessi ({c_permessi}) + Malattia ({c_malattia})"
+                )
+            elif abs(diff_gg) == 1:
+                st.success(
+                    f"✅ **DATI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
+                    f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato}"
+                )
+            elif diff_gg > 0:
                 st.warning(
-                    f"⚠️ **DIFFERENZA**: {diff_busta} giorni in più nel cartellino (verifica i dati)"
+                    f"⚠️ **DISCREPANZA**: Il cartellino indica {diff_gg} giorni IN PIÙ rispetto "
+                    f"ai {gg_pagati_busta} GG INPS della busta. Verifica i dati."
                 )
             else:
                 st.error(
-                    f"❌ **ATTENZIONE**: Mancano {abs(diff_busta)} giorni! Retribuiti: {tot_retribuiti} vs Pagati: {gg_pagati_busta}"
+                    f"❌ **DISCREPANZA**: Mancano {abs(diff_gg)} giorni! "
+                    f"Busta: {gg_pagati_busta} GG INPS, Calcolato: {tot_calcolato}"
                 )
+        else:
+            st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
-        # Info sulle omesse timbrature (reminder, non errore)
-        if c_omesse > 0 or a_omesse > 0:
-            st.caption(
-                f"ℹ️ **Reminder**: {final_omesse} omesse timbrature da regolarizzare (hai lavorato ma manca il badge)"
+        # =====================================================================
+        # SEGNALAZIONE OMESSE TIMBRATURE
+        # =====================================================================
+        if final_omesse > 0:
+            st.warning(
+                f"⚠️ **{final_omesse} Omesse Timbrature** rilevate. "
+                f"Sono giorni lavorati ma con badge mancante (da regolarizzare)."
             )
 
-        if a_riposi > 0 or c_riposi > 0:
-            st.caption(f"💤 **{final_riposi}** riposi domenicali goduti.")
+        # =====================================================================
+        # INFO RIPOSI (non contano come GG INPS)
+        # =====================================================================
+        if c_riposi > 0 or a_riposi > 0:
+            riposi_totali = max(c_riposi, a_riposi)
+            st.caption(
+                f"💤 {riposi_totali} riposi (domeniche + compensativi) — non contano come GG INPS"
+            )
+
     elif is_13:
         if b.get("e_tredicesima"):
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
