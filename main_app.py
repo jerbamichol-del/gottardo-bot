@@ -1358,7 +1358,7 @@ if "res" in st.session_state:
             st.caption(f"ℹ️ **Reminder**: {final_omesse} omesse timbrature da regolarizzare (hai lavorato ma manca il badge)")
         
         if a_riposi > 0 or c_riposi > 0:
-            st.caption(f"💤 {final_riposi} riposi compensativi (non contano come GG.INPS pagati)")
+            st.caption(f"💤 **{final_riposi}** riposi domenicali goduti.")
     elif is_13:
         if b.get("e_tredicesima"):
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
@@ -1368,13 +1368,15 @@ if "res" in st.session_state:
     st.divider()
     
     # === TABS ===
-    tab1, tab2, tab3, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🗓️ Agenda", "🏖️ Ferie/PAR"])
+    tab1, tab2, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
     
     with tab1:
-        k1, k2, k3 = st.columns(3)
+        # Paga, Giorni e Ore in una riga
+        k1, k2, k3, k4 = st.columns(4)
         k1.metric("💵 NETTO", f"€ {dg.get('netto', 0):,.2f}")
         k2.metric("📊 Lordo", f"€ {comp.get('lordo_totale', 0):,.2f}")
         k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
+        k4.metric("⏱️ Ore Lavorate", dg.get("ore_ordinarie", 0))
         
         st.markdown("---")
         
@@ -1430,27 +1432,8 @@ if "res" in st.session_state:
         else:
             st.info("Cartellino non disponibile" if not is_13 else "Non applicabile per Tredicesima")
     
-    with tab3:
-        if agenda and agenda.get("total_events", 0) > 0:
-            st.subheader(f"🗓️ Eventi Agenda: {agenda['total_events']} nel mese")
-            
-            for tipo_ev, count in agenda.get("events_by_type", {}).items():
-                if "OMESSA" in tipo_ev:
-                    st.error(f"⚠️ **{tipo_ev}**: {count}")
-                elif "MALATTIA" in tipo_ev:
-                    st.warning(f"🤒 **{tipo_ev}**: {count}")
-                elif "FERIE" in tipo_ev:
-                    st.info(f"🏖️ **{tipo_ev}**: {count}")
-                else:
-                    st.write(f"📌 **{tipo_ev}**: {count}")
-            
-            with st.expander("🔍 Debug Agenda"):
-                for line in agenda.get("debug", []):
-                    st.text(line)
-                for item in agenda.get("items", [])[:20]:
-                    st.text(f"• {item}")
-        else:
-            st.info("ℹ️ Nessun evento agenda per questo mese")
+    # Tab 3 (Agenda) rimosso su richiesta utente (confluito in Cartellino)
+
     
     with tab4:
         c1, c2 = st.columns(2)
