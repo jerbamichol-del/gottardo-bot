@@ -1309,15 +1309,21 @@ if "res" in st.session_state:
         total_accounted_days = c_lavorati + final_ferie + final_malattia + c_permessi + final_riposi
         delta_quadratura = total_accounted_days - total_days_month
         
-        # Se c'è uno scostamento e siamo sicuri dei lavorati/riposi, le ferie/permessi potrebbero essere sottostimati
-        if delta_quadratura < 0:
-             # Tentativo di recupero quadratura: se mancano giorni, sono probabilmente assenze non taggate
+        # Se siamo sopra il totale (es. 32/31), significa che abbiamo lavorato una domenica (overlap Lav/Riposo)
+        if delta_quadratura > 0:
+             # Togliamo l'eccedenza dai riposi (perché i lavorati sono reali)
+             final_riposi = max(0, final_riposi - delta_quadratura)
+             total_accounted_days = total_days_month
+        
+        # Se siamo sotto il totale (es. 30/31), mancano giorni di assenza o ferie
+        elif delta_quadratura < 0:
              final_ferie += abs(delta_quadratura)
-             total_accounted_days = total_days_month # Forza quadratura
+             total_accounted_days = total_days_month
         
         # 7. Calcolo Totale Retribuito vs Busta Paga
         tot_retribuiti = c_lavorati + final_ferie + final_malattia + c_permessi
         gg_pagati_busta = dg.get("giorni_pagati", 0)
+        diff_busta = tot_retribuiti - gg_pagati_busta
         
         # Mostra Riepilogo
         st.info(f"""
@@ -1337,16 +1343,15 @@ if "res" in st.session_state:
 
         # Nota tecnica busta paga
         if gg_pagati_busta > 0:
-            diff_busta = tot_retribuiti - gg_pagati_busta
             st.caption(f"ℹ️ **Nota Busta**: Totale retribuito {tot_retribuiti} gg vs liquidati in busta {gg_pagati_busta} gg. (Scostamento: {diff_busta} gg).")
         
-        if abs(diff) <= 1:
-            st.success(f"✅ **DATI COERENTI** — Retribuiti: {tot_retribuiti} vs Pagati INPS: {gg_pagati}")
+        if abs(diff_busta) <= 1:
+            st.success(f"✅ **DATI COERENTI** — Retribuiti: {tot_retribuiti} vs Pagati INPS: {gg_pagati_busta}")
         else:
-            if diff > 0:
-                st.warning(f"⚠️ **DIFFERENZA**: {diff} giorni in più nel cartellino (verifica i dati)")
+            if diff_busta > 0:
+                st.warning(f"⚠️ **DIFFERENZA**: {diff_busta} giorni in più nel cartellino (verifica i dati)")
             else:
-                st.error(f"❌ **ATTENZIONE**: Mancano {abs(diff)} giorni! Retribuiti: {tot_retribuiti} vs Pagati: {gg_pagati}")
+                st.error(f"❌ **ATTENZIONE**: Mancano {abs(diff_busta)} giorni! Retribuiti: {tot_retribuiti} vs Pagati: {gg_pagati_busta}")
         
         # Info sulle omesse timbrature (reminder, non errore)
         if c_omesse > 0 or a_omesse > 0:
