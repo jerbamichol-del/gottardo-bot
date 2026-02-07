@@ -1566,6 +1566,19 @@ if "res" in st.session_state:
 
     st.divider()
 
+    # Step indicator semplice
+    step_cols = st.columns(4)
+    with step_cols[0]:
+        st.metric("Step 1", "🔐 Login", "✓")
+    with step_cols[1]:
+        st.metric("Step 2", "📅 Selezione", "✓")
+    with step_cols[2]:
+        st.metric("Step 3", "⬇️ Download", "✓")
+    with step_cols[3]:
+        st.metric("Step 4", "📊 Analisi", "●")
+
+    st.divider()
+
     # Card riepilogo principali
     st.subheader("📊 Riepilogo Principale")
     col1, col2, col3, col4 = st.columns(4)
@@ -1775,6 +1788,37 @@ if "res" in st.session_state:
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
         else:
             st.info("📄 Cedolino analizzato")
+
+    st.divider()
+
+    # Riepilogo Sintetico
+    st.subheader("📋 Sintesi Rapida")
+    riepilogo_col1, riepilogo_col2, riepilogo_col3 = st.columns(3)
+
+    with riepilogo_col1:
+        st.markdown("**💰 Busta Paga**")
+        st.write(f"Netto: €{dg.get('netto', 0):,.2f}")
+        st.write(f"Giorni pagati: {int(dg.get('giorni_pagati', 0))}")
+
+    with riepilogo_col2:
+        st.markdown("**📅 Presenze**")
+        if c:
+            st.write(f"Giorni lavorati: {c.get('giorni_lavorati', 0)}")
+            st.write(f"Ferie: {c.get('ferie', 0)} | Malattia: {c.get('malattia', 0)}")
+        else:
+            st.write("Cartellino non disponibile")
+
+    with riepilogo_col3:
+        st.markdown("**🗓️ Agenda**")
+        if isinstance(agenda, dict) and agenda.get("total_events", 0) > 0:
+            events = agenda.get("events_by_type", {})
+            st.write(f"Eventi totali: {agenda.get('total_events', 0)}")
+            if events.get("OMESSA TIMBRATURA", 0) > 0:
+                st.write(f"⚠️ Omesse: {events.get('OMESSA TIMBRATURA', 0)}")
+            if events.get("FERIE", 0) > 0:
+                st.write(f"🏖️ Ferie: {events.get('FERIE', 0)}")
+        else:
+            st.write("Nessun evento registrato")
 
     st.divider()
 
