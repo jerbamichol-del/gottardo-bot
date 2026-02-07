@@ -265,14 +265,16 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 **5. TREDICESIMA:**
 - e_tredicesima=true se trovi "TREDICESIMA"/"13MA"
 
+IMPORTANTE: Estrai i valori numerici con TUTTI i decimali presenti nel documento (es. 10,46 non deve diventare 10,5). Non arrotondare mai.
+
 Output SOLO JSON:
 {
   "e_tredicesima": false,
-  "dati_generali": {"netto": 0.0, "giorni_pagati": 0, "ore_ordinarie": 0.0},
-  "competenze": {"base": 0.0, "anzianita": 0.0, "straordinari": 0.0, "festivita": 0.0, "lordo_totale": 0.0},
-  "trattenute": {"inps": 0.0, "irpef_netta": 0.0, "addizionali": 0.0},
-  "ferie": {"residue_ap": 0.0, "maturate": 0.0, "godute": 0.0, "saldo": 0.0},
-  "par": {"residue_ap": 0.0, "spettanti": 0.0, "fruite": 0.0, "saldo": 0.0}
+  "dati_generali": {"netto": 0.00, "giorni_pagati": 0, "ore_ordinarie": 0.00},
+  "competenze": {"base": 0.00, "anzianita": 0.00, "straordinari": 0.00, "festivita": 0.00, "lordo_totale": 0.00},
+  "trattenute": {"inps": 0.00, "irpef_netta": 0.00, "addizionali": 0.00},
+  "ferie": {"residue_ap": 0.00, "maturate": 0.00, "godute": 0.00, "saldo": 0.00},
+  "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00}
 }
 """.strip()
     
@@ -1441,17 +1443,17 @@ if "res" in st.session_state:
         with c1:
             st.subheader("🏖️ Ferie")
             f1, f2 = st.columns(2)
-            f1.metric("Residue AP", f"{ferie.get('residue_ap', 0):.1f}")
-            f2.metric("Maturate", f"{ferie.get('maturate', 0):.1f}")
+            f1.metric("Residue AP", f"{ferie.get('residue_ap', 0):.2f}")
+            f2.metric("Maturate", f"{ferie.get('maturate', 0):.2f}")
             f3, f4 = st.columns(2)
-            f3.metric("Godute", f"{ferie.get('godute', 0):.1f}")
-            f4.metric("Saldo", f"{ferie.get('saldo', 0):.1f}")
+            f3.metric("Godute", f"{ferie.get('godute', 0):.2f}")
+            f4.metric("Saldo", f"{ferie.get('saldo', 0):.2f}")
         
         with c2:
             st.subheader("⏱️ Permessi (PAR)")
             p1, p2 = st.columns(2)
-            p1.metric("Residue AP", f"{par.get('residue_ap', 0):.1f}")
-            p2.metric("Spettanti", f"{par.get('spettanti', 0):.1f}")
+            p1.metric("Residue AP", f"{par.get('residue_ap', 0):.2f}")
+            p2.metric("Spettanti", f"{par.get('spettanti', 0):.2f}")
             p3, p4 = st.columns(2)
-            p3.metric("Fruite", f"{par.get('fruite', 0):.1f}")
-            p4.metric("Saldo", f"{par.get('saldo', 0):.1f}")
+            p3.metric("Fruite", f"{par.get('fruite', 0):.2f}")
+            p4.metric("Saldo", f"{par.get('saldo', 0):.2f}")
