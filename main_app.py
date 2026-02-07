@@ -710,39 +710,66 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # Chiave = testo + posizione approx? No, conteggio semplice per ora.
                 
                 found_any = False
-                for kw in ["OMESSA", "FERIE", "MALATTIA", "RIPOSO"]:
-                    # Cerca elementi visibili contenenti il testo
-                    # text=KW è case-insensitive e smart
+                
+                # PRE-CALCOLO ZONE PROIBITE (MESE PRECEDENTE/SUCCESSIVO)
+                # Cerca celle "dijitCalendarPreviousMonth" e simili
+                forbidden_boxes = []
+                try:
+                    bad_cells = search_area.locator(".dijitCalendarPreviousMonth, .dijitCalendarNextMonth, .dijitCalendarOtherMonth").all()
+                    for c in bad_cells:
+                        if c.is_visible():
+                            b = c.bounding_box()
+                            if b: forbidden_boxes.append(b)
+                    if forbidden_boxes:
+                        result["debug"].append(f"  🚫 Mappate {len(forbidden_boxes)} celle giorni altro mese")
+                except: pass
+
+                # Loop completo keywords
+                all_kws = ["OMESSA", "OMT", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS"]
+                for kw in all_kws:
+                    # text=KW è case-insensitive
                     matches = search_area.locator(f"text={kw}")
                     count = matches.count()
                     
                     real_matches = 0
                     for i in range(count):
-                        el = matches.nth(i)
-                        if el.is_visible():
-                            # MEGA FIX: scarta se elemento è "LeftColumn" (Sidebar)
-                            # FILTRI TESTUALI (ANTI-SIDEBAR/FOOTER)
-                            try:
-                                txt_upper = el.inner_text().upper()
-                                if "SALDO" in txt_upper or "RESIDUO" in txt_upper: continue
-                                if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper: continue
-                            except: pass
+                        try:
+                            el = matches.nth(i)
+                            if not el.is_visible(): continue
 
-                            # Usiamo bounding box? 
-                            # Se x < 300 (sidebar solitamente a sx), ignoralo.
-                            box = el.bounding_box()
-                            if box and box['x'] < 300:
-                                # result["debug"].append(f"    Scartato '{kw}' in sidebar (x={box['x']})")
-                                continue
+                            # 1. FILTRI TESTUALI (ANTI-SIDEBAR)
+                            txt_upper = el.inner_text().upper()
+                            if "SALDO" in txt_upper or "RESIDUO" in txt_upper: continue
+                            if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper: continue
                             
+                            # 2. FILTRI GEOMETRICI
+                            box = el.bounding_box()
+                            if not box: continue
+                            
+                            # a) Sidebar a sinistra
+                            if box['x'] < 300: continue
+                            
+                            # b) Overlap con mese precedente/successivo
+                            is_forbidden = False
+                            cx = box['x'] + box['width']/2
+                            cy = box['y'] + box['height']/2
+                            for fbox in forbidden_boxes:
+                                if (fbox['x'] <= cx <= fbox['x'] + fbox['width']) and \
+                                   (fbox['y'] <= cy <= fbox['y'] + fbox['height']):
+                                    is_forbidden = True
+                                    break
+                            if is_forbidden: continue
+
                             real_matches += 1
-                            if "OMESSA" in kw: dom_events.append("OMESSA TIMBRATURA")
-                            elif "FERIE" in kw: dom_events.append("FERIE")
-                            elif "MALATTIA" in kw: dom_events.append("MALATTIA")
-                            elif "RIPOSO" in kw: dom_events.append("RIPOSO")
+                            if "OMESSA" in kw or "OMT" in kw: dom_events.append("OMESSA TIMBRATURA")
+                            elif "FERIE" in kw or "FEP" in kw: dom_events.append("FERIE")
+                            elif "MALATTIA" in kw or "MAL" in kw: dom_events.append("MALATTIA")
+                            elif "RIPOSO" in kw or "RCS" in kw or "RIC" in kw or "RPS" in kw: dom_events.append("RIPOSO")
+                        
+                        except: pass
                     
                     if real_matches > 0:
-                        result["debug"].append(f"  📝 Trovati {real_matches} x '{kw}'")
+                        result["debug"].append(f"  📝 Trovati {real_matches} x '{kw}' validi")
                         found_any = True
                 
                 if not found_any:
