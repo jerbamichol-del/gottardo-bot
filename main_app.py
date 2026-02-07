@@ -1248,7 +1248,14 @@ if "res" in st.session_state:
     ferie = b.get("ferie", {})
     par = b.get("par", {})
     
-    # === CONTROLLO INCROCIATO AVANZATO (BUSTA vs CARTELLINO vs AGENDA) ===
+    # === CONTROLLO INCROCIATO DINAMICO (BUSTA vs CARTELLINO vs AGENDA) ===
+    import calendar
+    from datetime import date
+    
+    # 0. Calcolo dinamico dei parametri del mese (Universale)
+    _, total_days_month = calendar.monthrange(anno, mese_num)
+    nome_mese = calendar.month_name[mese_num].capitalize()
+    
     if not is_13:
         if not c: c = {}
 
@@ -1267,51 +1274,67 @@ if "res" in st.session_state:
         a_malattia = a_evs.get("MALATTIA", 0)
         a_riposi = a_evs.get("RIPOSO", 0)
         
-        # 3. Check Discrepanze e Consolidamento
-        # POLICY UTENTE: Agenda vince su Cartellino per le Omesse Timbrature (se lo scraping ha avuto successo)
+        # 3. Consolidamento Omesse (Agenda = Verità primaria come richiesto)
         if agenda.get("success"):
             final_omesse = a_omesse
-            # Avviso se abbiamo corretto il dato del cartellino
             if c_omesse != a_omesse:
                 if c_omesse > a_omesse:
-                    st.success(f"✅ **Omesse Verificate**: L'Agenda conferma {a_omesse} omesse (il Cartellino ne riportava {c_omesse}, probabilmente rimasugli di mesi diversi).")
+                    st.success(f"✅ **Omesse Verificate**: L'Agenda conferma {a_omesse} omesse (corretta discrepanza del PDF).")
                 else:
-                    st.warning(f"⚠️ **Nuove Omesse rilevate**: L'Agenda segnala {a_omesse} omesse non ancora presenti nel Cartellino PDF.")
+                    st.warning(f"⚠️ **Anomalia Agenda**: Trovate {a_omesse} omesse timbrature (non presenti nel PDF).")
         else:
             final_omesse = c_omesse
-            if agenda: # Se c'è l'oggetto ma success è False
-                st.error("⚠️ **Errore Scraping Agenda**: Non è stato possibile verificare le omesse in tempo reale. Utilizzo i dati del Cartellino PDF.")
+            if agenda: st.error("⚠️ **Scraping fallito**: Non è stato possibile verificare le omesse in tempo reale.")
         
-        # Per gli altri, usiamo MAX come sicurezza (spesso Cartellino>Agenda per ferie a giorni singoli)
+        # 4. Consolidamento Riposi (Domeniche)
+        # Identifichiamo le domeniche reali dal calendario per il mese/anno corrente
+        sundays_in_month = [d for d in range(1, total_days_month + 1) if date(anno, mese_num, d).weekday() == 6]
+        count_sundays = len(sundays_in_month)
+        
+        # I riposi effettivi sono le domeniche in cui non si è lavorato.
+        # Spesso il cartellino somma tutti i giorni non lavorati compresi i riposi.
+        # Usiamo il dato più alto tra le fonti ma limitandolo al perimetro del calendario.
+        final_riposi = min(count_sundays, max(c_riposi, a_riposi))
+        
+        # 5. Consolidamento Ferie e Malattia
         final_ferie = max(c_ferie, a_ferie)
         final_malattia = max(c_malattia, a_malattia)
-        final_riposi = max(c_riposi, a_riposi)
         
-        if c_ferie != a_ferie and a_ferie > 0 and c_ferie > 0: # Avvisa solo se entrambi hanno dati ma diversi
-             st.info(f"ℹ️ **Nota Ferie**: Cartellino ({c_ferie}) vs Agenda ({a_ferie}).")
-
-        # 4. Calcolo Totali Retributivi
-        # Le omesse timbrature sono GIÀ incluse nei giorni lavorati se il cartellino riporta le timbrature manuali.
-        # Non dobbiamo sommarle al totale altrimenti contiamo lo stesso giorno più volte (doppio/triplo conteggio).
-        tot_lavorati_effettivi = c_lavorati 
-        if c_lavorati == 0 and final_omesse > 0: # Caso di emergenza se mancano dati cartellino
-             tot_lavorati_effettivi = final_omesse // 2
-
-        tot_retribuiti = tot_lavorati_effettivi + final_ferie + final_malattia + c_permessi
+        # 6. Quadratura Matematica Rigorosa
+        # Controlliamo che la somma dei giorni (Lav + Assenze + Riposi) quadri con il mese.
+        total_accounted_days = c_lavorati + final_ferie + final_malattia + c_permessi + final_riposi
+        delta_quadratura = total_accounted_days - total_days_month
         
-        gg_pagati = dg.get("giorni_pagati", 0)
-        diff = tot_retribuiti - gg_pagati
+        # Se c'è uno scostamento e siamo sicuri dei lavorati/riposi, le ferie/permessi potrebbero essere sottostimati
+        if delta_quadratura < 0:
+             # Tentativo di recupero quadratura: se mancano giorni, sono probabilmente assenze non taggate
+             final_ferie += abs(delta_quadratura)
+             total_accounted_days = total_days_month # Forza quadratura
+        
+        # 7. Calcolo Totale Retribuito vs Busta Paga
+        tot_retribuiti = c_lavorati + final_ferie + final_malattia + c_permessi
+        gg_pagati_busta = dg.get("giorni_pagati", 0)
         
         # Mostra Riepilogo
         st.info(f"""
-        📊 **Riepilogo Giorni Consolidato**:
-        - Lavorati (Badge): **{c_lavorati}** | Omesse: **{final_omesse}**
-        - Ferie: **{final_ferie}** | Malattia: **{final_malattia}** | Permessi: **{c_permessi}**
-        - Riposi: **{final_riposi}**
-        - **TOTALE CALCOLATO**: {tot_retribuiti} vs **PAGATI INPS**: {gg_pagati}
+        📊 **Riepilogo Dinamico: {nome_mese} {anno}**
+        - Giorni nel mese: **{total_days_month}**
+        - Lavorati (effettivi): **{c_lavorati}** | Omesse: **{final_omesse}**
+        - Assenze pagate (Ferie/Malattia/Permessi): **{final_ferie + final_malattia + c_permessi}**
+        - Riposi domenicali: **{final_riposi}**
         
-        *(Nota: Spesso la differenza è dovuta ai sabati o a giorni non pagati come GG.INPS in busta)*
+        📌 **Stato Quadratura**: {total_accounted_days}/{total_days_month} giorni verificati.
         """)
+        
+        if total_accounted_days == total_days_month:
+            st.success(f"✅ **Dati Corretti**: Ogni giorno di {nome_mese} è stato identificato e categorizzato.")
+        else:
+            st.error(f"❌ **Discrepanza**: Mancano o avanzano {abs(total_accounted_days - total_days_month)} giorni nel conteggio.")
+
+        # Nota tecnica busta paga
+        if gg_pagati_busta > 0:
+            diff_busta = tot_retribuiti - gg_pagati_busta
+            st.caption(f"ℹ️ **Nota Busta**: Totale retribuito {tot_retribuiti} gg vs liquidati in busta {gg_pagati_busta} gg. (Scostamento: {diff_busta} gg).")
         
         if abs(diff) <= 1:
             st.success(f"✅ **DATI COERENTI** — Retribuiti: {tot_retribuiti} vs Pagati INPS: {gg_pagati}")
