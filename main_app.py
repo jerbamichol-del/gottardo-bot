@@ -1291,10 +1291,12 @@ if "res" in st.session_state:
              st.info(f"ℹ️ **Nota Ferie**: Cartellino ({c_ferie}) vs Agenda ({a_ferie}).")
 
         # 4. Calcolo Totali Retributivi
-        # Omesse = lavorato senza timbratura -> vanno pagati come lavorati
-        # Riposi = non pagati INPS (spesso)
-        
-        tot_lavorati_effettivi = c_lavorati + final_omesse 
+        # Le omesse timbrature sono GIÀ incluse nei giorni lavorati se il cartellino riporta le timbrature manuali.
+        # Non dobbiamo sommarle al totale altrimenti contiamo lo stesso giorno più volte (doppio/triplo conteggio).
+        tot_lavorati_effettivi = c_lavorati 
+        if c_lavorati == 0 and final_omesse > 0: # Caso di emergenza se mancano dati cartellino
+             tot_lavorati_effettivi = final_omesse // 2
+
         tot_retribuiti = tot_lavorati_effettivi + final_ferie + final_malattia + c_permessi
         
         gg_pagati = dg.get("giorni_pagati", 0)
@@ -1307,6 +1309,8 @@ if "res" in st.session_state:
         - Ferie: **{final_ferie}** | Malattia: **{final_malattia}** | Permessi: **{c_permessi}**
         - Riposi: **{final_riposi}**
         - **TOTALE CALCOLATO**: {tot_retribuiti} vs **PAGATI INPS**: {gg_pagati}
+        
+        *(Nota: Spesso la differenza è dovuta ai sabati o a giorni non pagati come GG.INPS in busta)*
         """)
         
         if abs(diff) <= 1:
