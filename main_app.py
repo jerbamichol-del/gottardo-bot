@@ -1252,7 +1252,11 @@ if "res" in st.session_state:
     import calendar
     from datetime import date
     
-    # 0. Calcolo dinamico dei parametri del mese (Universale)
+    # 0. Recupero e calcolo parametri del mese (Universale)
+    anno = data.get("anno", anno_globale if 'anno_globale' in locals() else 2025)
+    mese_nome = data.get("mese", "Ottobre")
+    mese_num = MESI_IT.index(mese_nome) + 1
+    
     _, total_days_month = calendar.monthrange(anno, mese_num)
     nome_mese = calendar.month_name[mese_num].capitalize()
     
