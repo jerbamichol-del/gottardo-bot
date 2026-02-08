@@ -42,7 +42,23 @@ except Exception:
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
+st.set_page_config(page_title="Busta paga analyzer", page_icon="💶", layout="wide")
+
+
+# ==============================================================================
+# HEADER (logo + titolo)
+# ==============================================================================
+LOGO_PATH = "assets/logo.jpg"
+
+h1, h2 = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
+with h1:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=100)
+with h2:
+    st.markdown(
+        "<h1 style='margin:0; padding:0'>Busta paga analyzer</h1>",
+        unsafe_allow_html=True,
+    )
 os.system("playwright install chromium")
 
 if sys.platform == "win32":
@@ -54,6 +70,8 @@ except Exception:
     pass
 
 # Costanti
+HOURS_PER_DAY = 8
+
 MESI_IT = [
     "Gennaio",
     "Febbraio",
@@ -1532,7 +1550,6 @@ def cleanup_files(*paths):
 # ==============================================================================
 # UI
 # ==============================================================================
-st.title("💶 Gottardo Payroll Analyzer")
 
 # Credenziali
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
@@ -1540,396 +1557,299 @@ pw = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
 
 if not u or not pw:
     c1, c2, c3 = st.columns([2, 2, 1])
-    u_in = c1.text_input("👤 Username")
-    p_in = c2.text_input("🔒 Password", type="password")
+    u_in = c1.text_input("👤 Username", value=u)
+    p_in = c2.text_input("🔒 Password", type="password", value=pw)
     if c3.button("Login", type="primary"):
         st.session_state["u"] = u_in
         st.session_state["p"] = p_in
         st.rerun()
 else:
-    # Barra azioni
-    col_u, col_m, col_a, col_btn, col_rst = st.columns([1, 1.5, 1, 1.5, 0.5])
+    col_u, col_m, col_a, col_btn, col_rst = st.columns([1, 1.7, 1, 1.8, 0.5])
     col_u.markdown(f"**👤 {u}**")
-    m = col_m.selectbox("Mese", MESI_IT, index=9)  # Ottobre default
-    a = col_a.selectbox("Anno", [2024, 2025, 2026], index=1)
+
+    mese_sel = col_m.selectbox("Mese", MESI_IT, index=9)  # Ottobre default
+    anno_sel = col_a.selectbox("Anno", [2024, 2025, 2026], index=1)
 
     tipo = "Cedolino"
-    if m == "Dicembre":
+    if mese_sel == "Dicembre":
         tipo = col_m.radio("Tipo", ["Cedolino", "Tredicesima"], horizontal=True)
 
     if col_btn.button("🚀 ANALIZZA", type="primary"):
         is_13 = tipo == "Tredicesima"
 
         with st.status("🔄 Elaborazione...", expanded=True):
-            # Download
-            paths = execute_download(m, a, u, pw, is_13)
+            paths = execute_download(mese_sel, anno_sel, u, pw, is_13)
 
-            # Analisi AI
             st.write("🧠 Analisi AI...")
-            res_b = parse_busta_dettagliata(paths["busta"])
+            res_b = parse_busta_dettagliata(paths.get("busta"))
             res_c = (
-                parse_cartellino_dettagliato(paths["cart"])
-                if not is_13 and paths["cart"]
+                parse_cartellino_dettagliato(paths.get("cart"))
+                if (not is_13 and paths.get("cart"))
                 else {}
             )
 
-            # Salva risultati
             st.session_state["res"] = {
                 "busta": res_b,
                 "cart": res_c,
                 "agenda": paths.get("agenda", {}),
                 "is_13": is_13,
-                "mese": m,
-                "anno": a,
+                "mese": mese_sel,
+                "anno": anno_sel,
             }
 
-            # Pulizia
             cleanup_files(paths.get("busta"), paths.get("cart"))
 
     if col_rst.button("🔄"):
         st.session_state.clear()
         st.rerun()
 
+
 # ==============================================================================
 # RISULTATI
 # ==============================================================================
+
+def _safe_float(val):
+    try:
+        if isinstance(val, str):
+            val = val.replace("€", "").replace(",", ".").strip()
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _fmt_days(x):
+    x = _safe_float(x)
+    if abs(x - round(x)) < 1e-6:
+        return str(int(round(x)))
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def _days_from_hours(hours):
+    h = _safe_float(hours)
+    if h <= 0:
+        return 0.0
+    return h / HOURS_PER_DAY
+
+
 if "res" in st.session_state:
     data = st.session_state["res"]
-    b = data["busta"]
-    c = data["cart"]
-    agenda = data.get("agenda", {})
-    is_13 = data["is_13"]
+    b = data.get("busta", {}) or {}
+    c = data.get("cart", {}) or {}
+    agenda = data.get("agenda", {}) or {}
+    is_13 = bool(data.get("is_13"))
 
-    dg = b.get("dati_generali", {})
-    comp = b.get("competenze", {})
-    tratt = b.get("trattenute", {})
-    ferie = b.get("ferie", {})
-    par = b.get("par", {})
+    dg = b.get("dati_generali", {}) or {}
+    comp = b.get("competenze", {}) or {}
+    tratt = b.get("trattenute", {}) or {}
+    ferie = b.get("ferie", {}) or {}
+    par = b.get("par", {}) or {}
 
-    # === CONTROLLO INCROCIATO DINAMICO (BUSTA vs CARTELLINO vs AGENDA) ===
-    import calendar
-    from datetime import date
-
-    # 0. Recupero e calcolo parametri del mese (Universale)
-    anno = data.get("anno", 2025)  # Usa valore salvato in sessione, fallback 2025
+    anno = int(data.get("anno", 2025))
     mese_nome = data.get("mese", "Ottobre")
     mese_num = MESI_IT.index(mese_nome) + 1
+    nome_mese_en = calendar.month_name[mese_num].capitalize()
 
-    _, total_days_month = calendar.monthrange(anno, mese_num)
-    nome_mese = calendar.month_name[mese_num].capitalize()
-
-    # Inizializza variabili agenda (disponibili sempre)
+    # Agenda (conteggi giorni)
     a_evs = agenda.get("events_by_type", {}) if isinstance(agenda, dict) else {}
-    a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
-    a_ferie = (
-    a_evs.get("FERIE", 0)
-    + a_evs.get("FERIE PIANIFICATE", 0)
-    + a_evs.get("FEP", 0)
-)
-    a_malattia = a_evs.get("MALATTIA", 0)
-    a_riposi = a_evs.get("RIPOSO", 0)
+    a_omesse = int(_safe_float(a_evs.get("OMESSA TIMBRATURA", 0)))
+    a_ferie = int(_safe_float(a_evs.get("FERIE", 0) + a_evs.get("FERIE PIANIFICATE", 0) + a_evs.get("FEP", 0)))
+    a_malattia = int(_safe_float(a_evs.get("MALATTIA", 0)))
+    a_riposi = int(_safe_float(a_evs.get("RIPOSO", 0)))
 
-    if not is_13:
-        if not c:
-            c = {}
+    st.markdown("---")
+    st.subheader(f"📊 Verifica {nome_mese_en} {anno}")
 
-        # =====================================================================
-        # DATI DAL CARTELLINO (AI parsing)
-        # =====================================================================
-        c_lavorati = c.get("giorni_lavorati", 0)
-        c_ore_lavorate = c.get("ore_lavorate", 0)
-        c_omesse = c.get("omesse_timbrature", 0)
-        c_riposi = c.get("riposi", 0)
-        c_festivita = c.get("festivita", 0)
-        c_malattia = c.get("malattia", 0)
-
-        c_ferie = c.get("ferie", 0)
-
-        # =====================================================================
-        # DATI DALLA BUSTA (ore ferie/permessi)
-        # =====================================================================
-        assenze_busta = b.get("assenze_mese", {})
-        def safe_float(val):
-            try:
-                if isinstance(val, str):
-                    val = val.replace(",", ".")
-                return float(val)
-            except (ValueError, TypeError):
-                return 0.0
-
-        ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
-        ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
-        ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
-        
-        # Converti ore in giorni (ore totali / 7 per ottenere giorni)
-        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta  # Totale ore assenze (ferie+permessi)
-        gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / 7) if ore_permessi_busta > 0 else 0
-
-        # =====================================================================
-        # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
-        # L'agenda mostra i giorni REALI di ferie (linee gialle)
-        # =====================================================================
-        a_ferie = a_evs.get("FERIE", 0)
-        a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
-        a_riposi = a_evs.get("RIPOSO", 0)
-        a_malattia = a_evs.get("MALATTIA", 0)
-
-        # PRIORITÀ FONTI SECONDO RICHIESTA UTENTE:
-        # 1. FERIE: Busta Paga (Documento Ufficiale)
-        # 2. OMESSE: Solo Agenda (Dato informativo)
-        
-        gg_ferie_effettive = 0
-        use_source_ferie = "Busta" # Label for UI
-
-        # LOGICA FERIE (giorni): Agenda > Cartellino > Busta (solo ferie)
-        # Nota: la Busta esprime ferie/permessi in ORE; qui convertiamo e separiamo.
-        if a_ferie > 0:
-            gg_ferie_effettive = a_ferie
-            use_source_ferie = "Agenda"
-        elif c_ferie > 0:
-            gg_ferie_effettive = c_ferie
-            use_source_ferie = "Cartellino"
-        elif gg_ferie_busta > 0:
-            gg_ferie_effettive = gg_ferie_busta
-            use_source_ferie = "Busta"
-
-
-
-        # =====================================================================
-        # CONSOLIDAMENTO OMESSE TIMBRATURE
-        # SOLO DALL'AGENDA. Il cartellino non fa testo per le omesse.
-        # =====================================================================
-        final_omesse = a_omesse
-
-        # =====================================================================
-        # CALCOLO GG INPS (VERIFICA PRINCIPALE)
-        # =====================================================================
-        gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
-        
-        # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
-        # L'agenda è solo informativa.
-        tot_calcolato = (
-    c_lavorati
-    + gg_ferie_effettive
-    + gg_permessi_effettivi
-    + gg_malattia
-    + c_festivita
-)
-        # Differenza
-        diff_gg = tot_calcolato - gg_pagati_busta
-
-        # =====================================================================
-        # VISUALIZZAZIONE RIEPILOGO
-        # =====================================================================
-        st.markdown("---")
-        st.subheader(f"📊 Verifica {nome_mese} {anno}")
-        
-        # Metriche principali
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività")
-        col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
-
-        # Dettaglio assenze
-        col5, col6, col7, col8 = st.columns(4)
-        
-        if use_source_ferie == "Agenda":
-            lbl_ferie = "🏖️ Ferie (Agenda)"
-            help_ferie = "Dati rilevati dal calendario"
-        elif use_source_ferie == "Cartellino":
-            lbl_ferie = "🏖️ Ferie (Cartellino)"
-            help_ferie = "Giorni 'FER' contati dal cartellino"
-        else:
-            lbl_ferie = "🏖️ Ferie (Busta)"
-            help_ferie = "Calcolato dalle ore in busta (Documento Ufficiale)"
-        
-        col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
-        col6.metric("🤒 Malattia", gg_malattia)
-        col7.metric("💤 Riposi", c_riposi)
-        col8.metric("🎉 Festività", c_festivita)
-
-        # Mostra dettaglio ore dalla busta se disponibile
-        if ore_ferie_busta > 0 or ore_permessi_busta > 0:
-            st.caption(
-                f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
-                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
-            )
-
-        st.markdown("---")
-
-        # =====================================================================
-        # VERIFICA COERENZA GG INPS
-        # =====================================================================
-        if gg_pagati_busta > 0:
-            if abs(diff_gg) == 0:
-                msg_parts = [f"Lavorati Cartellino ({c_lavorati})"]
-                if final_omesse > 0: msg_parts.append(f"Omesse ({final_omesse})")
-                if gg_ferie_effettive > 0: msg_parts.append(f"Ferie ({gg_ferie_effettive})")
-                if gg_malattia > 0: msg_parts.append(f"Malattia ({gg_malattia})")
-                if c_festivita > 0: msg_parts.append(f"Festività ({c_festivita})")
-                
-                st.success(
-                    f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) = {(' + '.join(msg_parts))}"
-                )
-            elif diff_gg > 0:
-                # Caso diff_gg > 0 (Es: Busta 24, Calcolato 28, Diff +4)
-                # Possibile SOVRAPPOSIZIONE: I giorni del cartellino (21) includono le "Omesse" (4) (i giorni Vxx),
-                # ma noi abbiamo aggiunto anche le Ferie Busta (6). Se le Vxx SONO Ferie, le abbiamo contate 2 volte.
-                sovrapposizione = abs(diff_gg)
-                if abs(sovrapposizione - final_omesse) <= 1:
-                     st.success(
-                        f"✅ **DATI COERENTI CON SOVRAPPOSIZIONE**: Il totale calcolato ({tot_calcolato}) supera la Busta di {sovrapposizione} giorni. "
-                        f"Questo accade perché i **{final_omesse} giorni di 'Omesse'** (Vxx nel cartellino) sono inclusi sia nei 'Lavorati' che nelle 'Ferie Busta'. "
-                        f"Eliminando il doppio conteggio, i conti tornano ({tot_calcolato} - {sovrapposizione} = {gg_pagati_busta})."
-                    )
-                else:
-                    st.warning(
-                        f"⚠️ **DISCREPANZA (ECCESSO)**: Il cartellino indica {diff_gg} giorni IN PIÙ rispetto "
-                        f"ai {gg_pagati_busta} GG INPS della busta. "
-                        f"Verifica se 'Lavorati' ({c_lavorati}) e 'Ferie' ({gg_ferie_effettive}) si sovrappongono."
-                    )
-            elif abs(diff_gg) == 1:
-                st.success(
-                    f"✅ **DATI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
-                    f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato}"
-                )
-            else: # This 'else' now covers diff_gg < 0
-                st.error(
-                    f"❌ **DISCREPANZA (DIFETTO)**: {diff_gg:+.0f} giorni! "
-                    f"Busta: {gg_pagati_busta} GG INPS vs Calcolato: {tot_calcolato} "
-                    f"(Lavorati {c_lavorati} + Ferie {gg_ferie_effettive} + Malattia {gg_malattia} + Fest {c_festivita})"
-                )
-
-                # Suggerimento Omesse (Difetto)
-                mancanti = abs(diff_gg)
-                if final_omesse >= mancanti:
-                     st.info(
-                        f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate in Agenda. "
-                        "Poiché le omesse sono giorni lavorati, i conti tornano."
-                    )
-        else:
-            st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
-
-        # Avviso solo informativo per le omesse (senza warning errori)
-        if final_omesse > 0:
-            st.info(
-                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni lavorati con 'Omessa Timbratura' (presi dall'Agenda). "
-                "Questi sono stati inclusi nel calcolo dei giorni lavorati totali."
-            )
-
-        # =====================================================================
-        # INFO RIPOSI (non contano come GG INPS)
-        # =====================================================================
-        if c_riposi > 0 or a_riposi > 0:
-            riposi_totali = max(c_riposi, a_riposi)
-            st.caption(
-                f"💤 {riposi_totali} riposi (domeniche + compensativi) — non contano come GG INPS"
-            )
-
-    elif is_13:
+    if is_13:
         if b.get("e_tredicesima"):
             st.success("🎄 **TREDICESIMA ANALIZZATA**")
         else:
             st.info("📄 Cedolino analizzato")
 
+    if not is_13:
+        # Cartellino
+        c_lavorati = _safe_float(c.get("giorni_lavorati", 0))
+        c_ore_lavorate = _safe_float(c.get("ore_lavorate", 0))
+        c_riposi = int(_safe_float(c.get("riposi", 0)))
+        c_festivita = _safe_float(c.get("festivita", 0))
+        c_malattia = _safe_float(c.get("malattia", 0))
+        c_ferie = _safe_float(c.get("ferie", 0))
+        c_permessi = _safe_float(c.get("permessi", 0))
+
+        # Busta (ore assenze mese)
+        assenze_busta = b.get("assenze_mese", {}) or {}
+        ore_ferie_busta = _safe_float(assenze_busta.get("ore_ferie", 0))
+        ore_permessi_busta = _safe_float(assenze_busta.get("ore_permessi", 0))
+        ore_malattia_busta = _safe_float(assenze_busta.get("ore_malattia", 0))
+
+        gg_ferie_busta = _days_from_hours(ore_ferie_busta)
+        gg_permessi_busta = _days_from_hours(ore_permessi_busta)
+        gg_malattia_busta = _days_from_hours(ore_malattia_busta)
+
+        # Ferie: preferisci Agenda, poi Cartellino, poi Busta
+        gg_ferie_eff = 0.0
+        fonte_ferie = "N/D"
+        if a_ferie > 0:
+            gg_ferie_eff = float(a_ferie)
+            fonte_ferie = "Agenda"
+        elif c_ferie > 0:
+            gg_ferie_eff = float(c_ferie)
+            fonte_ferie = "Cartellino"
+        elif gg_ferie_busta > 0:
+            gg_ferie_eff = float(gg_ferie_busta)
+            fonte_ferie = "Busta"
+
+        # Permessi: preferisci Busta (ore/8) se presente, altrimenti Cartellino
+        gg_permessi_eff = float(gg_permessi_busta) if gg_permessi_busta > 0 else float(c_permessi)
+
+        # Malattia: preferisci Busta se presente, altrimenti max(cartellino, agenda)
+        gg_malattia_eff = float(gg_malattia_busta) if gg_malattia_busta > 0 else float(max(c_malattia, a_malattia))
+
+        omesse_info = a_omesse
+
+        gg_inps = _safe_float(dg.get("giorni_pagati", 0))
+
+        tot_calcolato = (
+            c_lavorati
+            + gg_ferie_eff
+            + gg_permessi_eff
+            + gg_malattia_eff
+            + c_festivita
+        )
+        diff = tot_calcolato - gg_inps
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("📅 GG INPS (Busta)", _fmt_days(gg_inps))
+        col2.metric("📋 GG Calcolati", _fmt_days(tot_calcolato), delta=_fmt_days(diff) if abs(diff) > 1e-6 else None)
+        col3.metric("👔 Lavorati (Cartellino)", _fmt_days(c_lavorati), help=f"Ore Totali (Cartellino): {_fmt_days(c_ore_lavorate)}")
+        col4.metric("⚠️ Omesse (Agenda)", str(omesse_info), help="Informativo: anomalie/omesse timbrature in agenda")
+
+        col5, col6, col7, col8 = st.columns(4)
+        lbl_ferie = {
+            "Agenda": "🏖️ Ferie (Agenda)",
+            "Cartellino": "🏖️ Ferie (Cartellino)",
+            "Busta": "🏖️ Ferie (Busta)",
+            "N/D": "🏖️ Ferie",
+        }.get(fonte_ferie, "🏖️ Ferie")
+        col5.metric(lbl_ferie, _fmt_days(gg_ferie_eff))
+        col6.metric("📋 Permessi", _fmt_days(gg_permessi_eff))
+        col7.metric("🤒 Malattia", _fmt_days(gg_malattia_eff))
+        col8.metric("🎉 Festività", _fmt_days(c_festivita))
+
+        riposi_tot = max(c_riposi, a_riposi)
+        if riposi_tot > 0:
+            st.caption(f"💤 {riposi_tot} riposi (domeniche + compensativi) — non contano come GG INPS")
+
+        if ore_ferie_busta > 0 or ore_permessi_busta > 0 or ore_malattia_busta > 0:
+            st.caption(
+                "📋 Dettaglio Busta: "
+                f"{ore_ferie_busta:.2f}h ferie ({_fmt_days(gg_ferie_busta)} gg) + "
+                f"{ore_permessi_busta:.2f}h permessi ({_fmt_days(gg_permessi_busta)} gg) + "
+                f"{ore_malattia_busta:.2f}h malattia ({_fmt_days(gg_malattia_busta)} gg)"
+            )
+
+        st.markdown("---")
+
+        tol = 0.51  # mezze giornate
+        if gg_inps > 0:
+            if abs(diff) <= tol:
+                parts = [f"Lavorati ({_fmt_days(c_lavorati)})"]
+                if gg_ferie_eff > 0:
+                    parts.append(f"Ferie ({_fmt_days(gg_ferie_eff)})")
+                if gg_permessi_eff > 0:
+                    parts.append(f"Permessi ({_fmt_days(gg_permessi_eff)})")
+                if gg_malattia_eff > 0:
+                    parts.append(f"Malattia ({_fmt_days(gg_malattia_eff)})")
+                if c_festivita > 0:
+                    parts.append(f"Festività ({_fmt_days(c_festivita)})")
+                st.success(
+                    f"✅ **DATI COERENTI** — GG INPS ({_fmt_days(gg_inps)}) ≈ "
+                    + " + ".join(parts)
+                    + f" (di cui omesse {omesse_info})"
+                )
+            else:
+                st.error(
+                    f"❌ **DISCREPANZA**: GG INPS (Busta) {_fmt_days(gg_inps)} vs Calcolato {_fmt_days(tot_calcolato)} (diff {_fmt_days(diff)}). "
+                    f"Controlla estrazione ore (ferie/permessi/malattia) e conteggio cartellino."
+                )
+        else:
+            st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {_fmt_days(tot_calcolato)} giorni.")
+
     st.divider()
 
-    # === TABS ===
     tab1, tab2, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
 
-    # Helper per formattazione sicura
-    def safe_float_val(val):
-        try:
-            if isinstance(val, str):
-                val = val.replace(",", ".").replace("€", "").strip()
-            return float(val)
-        except (ValueError, TypeError):
-            return 0.0
-
-    # Sanitizza dati finanziari
-    netto = safe_float_val(dg.get("netto", 0))
-    lordo = safe_float_val(comp.get("lordo_totale", 0))
-    base = safe_float_val(comp.get("base", 0))
-    anzianita = safe_float_val(comp.get("anzianita", 0))
-    straordinari = safe_float_val(comp.get("straordinari", 0))
-    festivita_val = safe_float_val(comp.get("festivita", 0))
-    inps = safe_float_val(tratt.get("inps", 0))
-    irpef = safe_float_val(tratt.get("irpef_netta", 0))
-    addizionali = safe_float_val(tratt.get("addizionali", 0))
+    netto = _safe_float(dg.get("netto", 0))
+    lordo = _safe_float(comp.get("lordo_totale", 0))
+    base = _safe_float(comp.get("base", 0))
+    anzianita = _safe_float(comp.get("anzianita", 0))
+    straordinari = _safe_float(comp.get("straordinari", 0))
+    festivita_val = _safe_float(comp.get("festivita", 0))
+    inps = _safe_float(tratt.get("inps", 0))
+    irpef = _safe_float(tratt.get("irpef_netta", 0))
+    addizionali = _safe_float(tratt.get("addizionali", 0))
 
     with tab1:
-        # Paga, Giorni e Ore in una riga
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("💵 NETTO", f"€ {netto:,.2f}")
         k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
         k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
         k4.metric("⏱️ Ore Lavorate", dg.get("ore_ordinarie", 0))
 
-
         st.markdown("---")
-
         c1, c2 = st.columns(2)
+
         with c1:
             st.subheader("➕ Competenze")
-            st.write(f"**Paga Base:** € {base:,.2f}")
+            st.write(f"Paga Base: € {base:,.2f}")
             if anzianita > 0:
-                st.write(f"**Anzianità:** € {anzianita:,.2f}")
+                st.write(f"Anzianità: € {anzianita:,.2f}")
             if straordinari > 0:
-                st.write(f"**Straordinari:** € {straordinari:,.2f}")
+                st.write(f"Straordinari: € {straordinari:,.2f}")
             if festivita_val > 0:
-                st.write(f"**Festività:** € {festivita_val:,.2f}")
+                st.write(f"Festività: € {festivita_val:,.2f}")
 
         with c2:
             st.subheader("➖ Trattenute")
-            st.write(f"**INPS:** € {inps:,.2f}")
-            st.write(f"**IRPEF:** € {irpef:,.2f}")
+            st.write(f"INPS: € {inps:,.2f}")
+            st.write(f"IRPEF: € {irpef:,.2f}")
             if addizionali > 0:
-                st.write(f"**Addizionali:** € {addizionali:,.2f}")
+                st.write(f"Addizionali: € {addizionali:,.2f}")
 
     with tab2:
-        if c:
-            # Usa direttamente i dati CONSOLIDATI (come nel riepilogo in alto)
-            # c_lavorati, gg_ferie_effettive, gg_malattia, final_omesse, ecc.
-            
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
-            
-            # Label dinamico
-            if use_agenda:
-                label_ferie_tab = "🏖️ Ferie (Agenda)"
-            elif use_cartellino:
-                label_ferie_tab = "🏖️ Ferie (Cartellino)"
+        if not is_13:
+            if c:
+                # Usa gli stessi consolidati del riepilogo
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("👔 Lavorati", _fmt_days(_safe_float(c.get("giorni_lavorati", 0))), help=f"Ore Totali: {_fmt_days(_safe_float(c.get('ore_lavorate', 0)))}")
+
+                fonte = "Agenda" if a_ferie > 0 else ("Cartellino" if _safe_float(c.get("ferie", 0)) > 0 else "Busta")
+                lbl = {"Agenda":"🏖️ Ferie (Agenda)","Cartellino":"🏖️ Ferie (Cartellino)","Busta":"🏖️ Ferie (Busta)"}.get(fonte,"🏖️ Ferie")
+
+                # Recompute busta-derived days quickly
+                assenze_busta = b.get("assenze_mese", {}) or {}
+                gg_perm_b = _days_from_hours(_safe_float(assenze_busta.get("ore_permessi", 0)))
+                gg_mal_b = _days_from_hours(_safe_float(assenze_busta.get("ore_malattia", 0)))
+
+                gg_fer_eff = float(a_ferie) if a_ferie > 0 else (_safe_float(c.get("ferie", 0)) if _safe_float(c.get("ferie", 0)) > 0 else _days_from_hours(_safe_float(assenze_busta.get("ore_ferie", 0))))
+                gg_perm_eff = float(gg_perm_b) if gg_perm_b > 0 else _safe_float(c.get("permessi", 0))
+                gg_mal_eff = float(gg_mal_b) if gg_mal_b > 0 else float(max(_safe_float(c.get("malattia", 0)), a_malattia))
+
+                k2.metric(lbl, _fmt_days(gg_fer_eff))
+                k3.metric("📋 Permessi", _fmt_days(gg_perm_eff))
+                k4.metric("⚠️ Omesse", str(a_omesse))
+
+                st.markdown("---")
+                k5, k6, k7 = st.columns(3)
+                k5.metric("🤒 Malattia", _fmt_days(gg_mal_eff))
+                k6.metric("💤 Riposi", str(max(int(_safe_float(c.get("riposi", 0))), a_riposi)))
+                k7.metric("🎉 Festività", _fmt_days(_safe_float(c.get("festivita", 0))))
+
+                if c.get("note"):
+                    st.info(f"📝 {c['note']}")
             else:
-                label_ferie_tab = "🏖️ Ferie (Busta)"
-            
-            k2.metric(label_ferie_tab, gg_ferie_effettive)
-            
-            k3.metric("🤒 Malattia", gg_malattia)
-            k4.metric("⚠️ Omesse", final_omesse)
-
-            st.markdown("---")
-
-            k5, k6, k7 = st.columns(3)
-            # Mostra permessi (se non inglobati in Agenda) o 0
-            val_permessi = gg_permessi_effettivi_effettivi
-            k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
-            
-            k6.metric("💤 Riposi", c_riposi)
-            k7.metric("🎉 Festività", c_festivita)
-
-            if c.get("note"):
-                st.info(f"📝 {c['note']}")
+                st.info("ℹ️ Cartellino non disponibile")
         else:
-            st.info(
-                "Cartellino non disponibile"
-                if not is_13
-                else "Non applicabile per Tredicesima"
-            )
-
-    # Tab 3 (Agenda) rimosso su richiesta utente (confluito in Cartellino)
+            st.info("ℹ️ Non applicabile per Tredicesima")
 
     with tab4:
         c1, c2 = st.columns(2)
@@ -1937,17 +1857,17 @@ if "res" in st.session_state:
         with c1:
             st.subheader("🏖️ Ferie")
             f1, f2 = st.columns(2)
-            f1.metric("Residue AP", f"{safe_float_val(ferie.get('residue_ap', 0)):.2f}")
-            f2.metric("Maturate", f"{safe_float_val(ferie.get('maturate', 0)):.2f}")
+            f1.metric("Residue AP", f"{_safe_float(ferie.get('residue_ap', 0)):.2f}")
+            f2.metric("Maturate", f"{_safe_float(ferie.get('maturate', 0)):.2f}")
             f3, f4 = st.columns(2)
-            f3.metric("Godute", f"{safe_float_val(ferie.get('godute', 0)):.2f}")
-            f4.metric("Saldo", f"{safe_float_val(ferie.get('saldo', 0)):.2f}")
+            f3.metric("Godute", f"{_safe_float(ferie.get('godute', 0)):.2f}")
+            f4.metric("Saldo", f"{_safe_float(ferie.get('saldo', 0)):.2f}")
 
         with c2:
             st.subheader("⏱️ Permessi (PAR)")
             p1, p2 = st.columns(2)
-            p1.metric("Residui AP", f"{safe_float_val(par.get('residue_ap', 0)):.2f}")
-            p2.metric("Spettanti", f"{safe_float_val(par.get('spettanti', 0)):.2f}")
+            p1.metric("Residui AP", f"{_safe_float(par.get('residue_ap', 0)):.2f}")
+            p2.metric("Spettanti", f"{_safe_float(par.get('spettanti', 0)):.2f}")
             p3, p4 = st.columns(2)
-            p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
-            p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+            p3.metric("Fruite", f"{_safe_float(par.get('fruite', 0)):.2f}")
+            p4.metric("Saldo", f"{_safe_float(par.get('saldo', 0)):.2f}")
