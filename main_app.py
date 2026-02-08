@@ -43,6 +43,70 @@ except Exception:
 # CONFIG
 # ==============================================================================
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
+
+# ==============================================================================
+# UI HELPERS (responsive KPI grid + header logo)
+# ==============================================================================
+import html
+
+def kpi_grid(items, cols_desktop=4, cols_mobile=2):
+    """Render KPI cards in a responsive grid (2 columns on mobile)."""
+    def esc(x):
+        return html.escape("" if x is None else str(x))
+
+    cards = []
+    for it in items:
+        label = esc(it.get("label", ""))
+        value = esc(it.get("value", ""))
+        delta = it.get("delta", None)
+        delta_html = f'<div class="kpi-delta">{esc(delta)}</div>' if delta not in (None, "") else ""
+        cards.append(
+            f"""
+            <div class="kpi-card">
+              <div class="kpi-label">{label}</div>
+              <div class="kpi-value">{value}</div>
+              {delta_html}
+            </div>
+            """
+        )
+
+    st.markdown(
+        f"""
+        <style>
+          .app-header {{ display:flex; align-items:center; gap:12px; margin: 0 0 0.75rem 0; }}
+          .app-header .logo {{ width:36px; height:36px; flex:0 0 36px; border-radius: 6px; overflow:hidden; }}
+          .app-header .title {{ font-size:1.55rem; font-weight:700; line-height:1; }}
+          @media (max-width: 480px) {{ .app-header .title {{ font-size:1.30rem; }} }}
+
+          .kpi-grid {{
+            --kpi-cols-desktop: {int(cols_desktop)};
+            --kpi-cols-mobile: {int(cols_mobile)};
+            display: grid;
+            grid-template-columns: repeat(var(--kpi-cols-desktop), minmax(0, 1fr));
+            gap: 0.75rem;
+            margin-top: 0.25rem;
+          }}
+          @media (max-width: 700px) {{
+            .kpi-grid {{ grid-template-columns: repeat(var(--kpi-cols-mobile), minmax(0, 1fr)); }}
+          }}
+          .kpi-card {{
+            border: 1px solid rgba(49, 51, 63, 0.20);
+            border-radius: 12px;
+            padding: 0.75rem 0.9rem;
+            background: rgba(255,255,255,0.02);
+          }}
+          .kpi-label {{ font-size: 0.9rem; opacity: 0.75; margin-bottom: 0.25rem; }}
+          .kpi-value {{ font-size: 1.35rem; font-weight: 700; }}
+          .kpi-delta {{ margin-top: 0.15rem; font-size: 0.85rem; opacity: 0.75; }}
+        </style>
+
+        <div class="kpi-grid">
+          {''.join(cards)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 os.system("playwright install chromium")
 
 if sys.platform == "win32":
@@ -1532,7 +1596,16 @@ def cleanup_files(*paths):
 # ==============================================================================
 # UI
 # ==============================================================================
-st.title("💶 Gottardo Payroll Analyzer")
+# Header (logo + title)
+LOGO_PATH = "assets/logo.jpg"
+
+h1, h2 = st.columns([0.13, 0.87])
+with h1:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=44)
+with h2:
+    st.markdown("<h1 style='margin-bottom:0.2rem'>Gottardo Payroll Analyzer</h1>", unsafe_allow_html=True)
+
 
 # Credenziali
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
@@ -1657,11 +1730,11 @@ if "res" in st.session_state:
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
-        # Converti ore in giorni (ore totali / 8 per ottenere giorni)
+        # Converti ore in giorni (ore totali / 7 per ottenere giorni)
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / 7) if ore_permessi_busta > 0 else 0
+        gg_assenze_busta = round(ore_assenze_busta / 8) if ore_assenze_busta > 0 else 0
+        gg_malattia = round(ore_malattia_busta / 8) if ore_malattia_busta > 0 else c_malattia
+        gg_permessi = round(ore_permessi_busta / 8) if ore_permessi_busta > 0 else 0
 
         # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
@@ -1851,13 +1924,16 @@ if "res" in st.session_state:
     addizionali = safe_float_val(tratt.get("addizionali", 0))
 
     with tab1:
-        # Paga, Giorni e Ore in una riga
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("💵 NETTO", f"€ {netto:,.2f}")
-        k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
-        k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
-        k4.metric("⏱️ Ore Lavorate", dg.get("ore_ordinarie", 0))
-
+        kpi_grid(
+            [
+                {"label": "💵 NETTO", "value": f"€ {netto:,.2f}"},
+                {"label": "📊 Lordo", "value": f"€ {lordo:,.2f}"},
+                {"label": "📆 Giorni Pagati", "value": dg.get("giorni_pagati", 0)},
+                {"label": "⏱️ Ore Lavorate", "value": dg.get("ore_ordinarie", 0)},
+            ],
+            cols_desktop=4,
+            cols_mobile=2,
+        )
 
         st.markdown("---")
 
@@ -1885,17 +1961,14 @@ if "res" in st.session_state:
             # c_lavorati, gg_ferie_effettive, gg_malattia, final_omesse, ecc.
             
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
-            
-            # Label dinamico (basato sulla fonte ferie)
+            k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")            # Label dinamico (basato sulla fonte ferie)
             if use_source_ferie == "Agenda":
                 label_ferie_tab = "🏖️ Ferie (Agenda)"
             elif use_source_ferie == "Cartellino":
                 label_ferie_tab = "🏖️ Ferie (Cartellino)"
             else:
                 label_ferie_tab = "🏖️ Ferie (Busta)"
-            
-            k2.metric(label_ferie_tab, gg_ferie_effettive)
+k2.metric(label_ferie_tab, gg_ferie_effettive)
             
             k3.metric("🤒 Malattia", gg_malattia)
             k4.metric("⚠️ Omesse", final_omesse)
