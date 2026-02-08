@@ -1674,16 +1674,19 @@ if "res" in st.session_state:
                  st.warning(f"⚠️ Agenda ({a_ferie}) molto diversa da Busta ({gg_assenze_busta}gg stimati).")
 
         elif c:  # Cartellino disponibile
-            # Se Cartellino esiste, usiamo i suoi dati ANCHE SE SONO ZERO
+            # Caso standard: usa cartellino
             gg_ferie_effettive = c_ferie
             use_cartellino = True
             
-            # Se Ferie Cartellino = 0 ma Busta dice ferie > 0, avvisa ma NON sovrascrivere
+            # ECCEZIONE: Se Cartellino dice 0 Ferie ma Busta ne ha (es. 40h),
+            # è molto probabile che il Cartellino non le riporti nel footer.
+            # In questo caso, USIAMO IL DATO BUSTA come fallback affidabile.
             if c_ferie == 0 and gg_assenze_busta > 0:
+                 gg_ferie_effettive = gg_assenze_busta
+                 use_cartellino = False # Switch to Busta source for label
                  st.warning(
-                     f"⚠️ **Discrepanza Ferie**: Cartellino non indica ferie (0), "
-                     f"ma la Busta ha {ore_assenze_busta:.0f}h ({gg_assenze_busta}gg) godute. "
-                     f"Uso il dato del Cartellino (0) per il calcolo presenze."
+                     f"⚠️ **Override Ferie**: Il Cartellino indica 0 ferie, ma la Busta riporta {ore_assenze_busta:.0f}h ({gg_assenze_busta} gg). "
+                     f"Uso il dato della Busta per il calcolo."
                  )
             elif c_ferie > 0:
                  st.info(f"ℹ️ Ferie prese dal Cartellino ({c_ferie} gg)")
@@ -1712,10 +1715,9 @@ if "res" in st.session_state:
         # =====================================================================
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
-        # ORA INCLUDIAMO LE OMESSE TIMBRATURE NEL CALCOLO
-        # Perché sono giorni lavorati a tutti gli effetti (pagati in busta)
-        # ma che non risultano nel totale "Lavorati" del cartellino.
-        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita + final_omesse
+        # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
+        # L'agenda è solo informativa.
+        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
         diff_gg = tot_calcolato - gg_pagati_busta
@@ -1729,9 +1731,9 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività + Omesse")
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività")
         col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Giorni lavorati ma con timbratura mancante")
+        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
 
         # Dettaglio assenze
         col5, col6, col7, col8 = st.columns(4)
@@ -1782,9 +1784,17 @@ if "res" in st.session_state:
             else:
                 st.error(
                     f"❌ **DISCREPANZA**: {diff_gg:+.0f} giorni! "
-                    f"Busta: {gg_pagati_busta} GG INPS, Calcolato ({tot_calcolato}) = "
-                    f"Lavorati Cartellino ({c_lavorati}) + Omesse ({final_omesse}) + Ferie ({gg_ferie_effettive}) + Fest ({c_festivita}) + Mal ({gg_malattia})"
+                    f"Busta: {gg_pagati_busta} GG INPS vs Calcolato: {tot_calcolato} "
+                    f"(Lavorati {c_lavorati} + Ferie {gg_ferie_effettive} + Malattia {gg_malattia} + Fest {c_festivita})"
                 )
+
+                # Suggerimento Omesse solo se pertinente
+                mancanti = abs(diff_gg)
+                if diff_gg < 0 and final_omesse >= mancanti:
+                     st.info(
+                        f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate in Agenda. "
+                        "Poiché le omesse sono giorni lavorati, i conti tornano (24 GG INPS = 22 Calcolati + 2 Omesse)."
+                    )
         else:
             st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
