@@ -338,34 +338,35 @@ Output SOLO JSON:
 def parse_cartellino_dettagliato(path):
     """Parser completo cartellino presenze."""
     prompt = """
-Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
+    Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
+    
+    **PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER (sono i dati più attendibili):**
+    - "GG PRESENZA" o codice 0265: estrai il numero (es. 16,00). 
+    - "ORE LAVORATE" o codice 0253: estrai il valore (es. 115,15).
+    
+    **ANALISI RIGHE (CODICI SPECIFICI):**
+    - **LAVORO**: Righe che iniziano con 'V' (es. V70, V50, V29) o 'ORD' o hanno orari di timbratura (es. 08:30 13:00).
+    - **FESTIVITÀ**: Cerca codice "F70", "FST", "FES". Conta 1 per ogni giorno con questi codici. NON contare V70 o V50 come festività!
+    - **FERIE**: Righe con "FER", "FE", "FEP".
+    - **PERMESSI**: Righe con "PAR", "PER", "ROL".
+    - **MALATTIA**: Righe con "MAL".
+    - **RIPOSI**: Righe con "RDD", "RCS", "RIC", "RCO" che NON hanno ore lavorate. Se hanno timbrature, sono giorni lavorati.
+    
+    ATTENZIONE: V70, V50, Vxx sono codici di LAVORO/PRESENZA, NON Festività.
 
-**PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER (sono i dati più attendibili):**
-- "GG PRESENZA" o codice 0265: estrai il numero (es. 16,00)
-- "ORE LAVORATE" o codice 0253: estrai il valore (es. 115,15). NON prendere "ORE ORDINARIE" (0251) o valori teorici.
-
-**POI CONTA I GIORNI PER TIPO (Analisi Righe):**
-- **Riposi (IMPORTANTE)**: Conta solo le righe che hanno codici RIPOSO, RDD, RCS, RIC *MA CHE SONO VUOTE DI TIMBRATURE*.
-  - Esempio: "RDD D05" (senza orari) -> È UN RIPOSO (+1)
-  - Esempio: "RCS D19 E 09:54..." (con orari) -> È LAVORATO (NON contarlo come riposo)
-- **Omesse Timbrature**: Righe con codici ANOMALIA/OMESSA o timbrature che finiscono con 'I' (es. "13,58I")
-- **Ferie**: Righe con FER, FE
-- **Permessi**: Righe con PAR, PER, ROL
-- **Malattia**: Righe con MAL
-
-Output JSON:
-{
-  "giorni_lavorati": 0,
-  "ore_lavorate": 0.00,
-  "ferie": 0,
-  "malattia": 0,
-  "permessi": 0,
-  "riposi": 0,
-  "omesse_timbrature": 0,
-  "festivita": 0,
-  "note": ""
-}
-""".strip()
+    Output JSON:
+    {
+      "giorni_lavorati": 0,
+      "ore_lavorate": 0.00,
+      "ferie": 0,
+      "malattia": 0,
+      "permessi": 0,
+      "riposi": 0,
+      "omesse_timbrature": 0,
+      "festivita": 0,
+      "note": ""
+    }
+    """.strip()
 
     result = analyze_with_fallback(path, prompt, "Cartellino")
     if not result:
@@ -1668,18 +1669,27 @@ if "res" in st.session_state:
             gg_ferie_effettive = a_ferie
             use_agenda = True
             
-            # Check coerenza con busta (tolleranza alta perché busta può avere conguagli)
+            # Check coerenza con busta
             if gg_assenze_busta > 0 and abs(a_ferie - gg_assenze_busta) > 3:
                  st.warning(f"⚠️ Agenda ({a_ferie}) molto diversa da Busta ({gg_assenze_busta}gg stimati).")
 
-        elif c_ferie > 0:
-            # Fallback su Cartellino (parsing righe)
+        elif c:  # Cartellino disponibile
+            # Se Cartellino esiste, usiamo i suoi dati ANCHE SE SONO ZERO
             gg_ferie_effettive = c_ferie
             use_cartellino = True
-            st.info(f"ℹ️ Ferie prese dal Cartellino ({c_ferie} gg) - Agenda non disponibile/vuota")
+            
+            # Se Ferie Cartellino = 0 ma Busta dice ferie > 0, avvisa ma NON sovrascrivere
+            if c_ferie == 0 and gg_assenze_busta > 0:
+                 st.warning(
+                     f"⚠️ **Discrepanza Ferie**: Cartellino non indica ferie (0), "
+                     f"ma la Busta ha {ore_assenze_busta:.0f}h ({gg_assenze_busta}gg) godute. "
+                     f"Uso il dato del Cartellino (0) per il calcolo presenze."
+                 )
+            elif c_ferie > 0:
+                 st.info(f"ℹ️ Ferie prese dal Cartellino ({c_ferie} gg)")
 
         else:
-            # Fallback su Busta
+            # Fallback su Busta solo se mancano completamente Agenda e Cartellino
             gg_ferie_effettive = gg_assenze_busta
             if gg_ferie_effettive > 0:
                 st.caption(f"ℹ️ Ferie stimate dalle ore in busta ({gg_ferie_effettive} gg)")
