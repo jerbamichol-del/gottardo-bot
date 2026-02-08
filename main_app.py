@@ -1642,6 +1642,7 @@ if "res" in st.session_state:
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
         gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
+        gg_permessi = round(ore_permessi_busta / 7) if ore_permessi_busta > 0 else 0
 
         # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
