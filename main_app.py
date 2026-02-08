@@ -1767,6 +1767,9 @@ if "res" in st.session_state:
         # =====================================================================
         # VERIFICA COERENZA GG INPS
         # =====================================================================
+        # =====================================================================
+        # VERIFICA COERENZA GG INPS
+        # =====================================================================
         if gg_pagati_busta > 0:
             if abs(diff_gg) == 0:
                 msg_parts = [f"Lavorati ({c_lavorati})", f"Ferie ({gg_ferie_effettive})"]
@@ -1787,10 +1790,21 @@ if "res" in st.session_state:
                     f"ai {gg_pagati_busta} GG INPS della busta. Verifica i dati."
                 )
             else:
-                st.error(
-                    f"❌ **DISCREPANZA**: Mancano {abs(diff_gg)} giorni! "
-                    f"Busta: {gg_pagati_busta} GG INPS, Calcolato: {tot_calcolato}"
-                )
+                # Caso diff_gg < 0 (Es: Busta 24, Calcolato 22, Diff -2)
+                # Verifica se le omesse timbrature possono coprire la differenza
+                mancanti = abs(diff_gg)
+                cond_omesse = final_omesse >= mancanti  # Assumiamo 1 omessa <= 1 giorno (safe check)
+                
+                if cond_omesse:
+                     st.warning(
+                        f"✅ **GIUSTIFICABILE CON OMESSE**: Mancano {mancanti} giorni nel conteggio calcolato, "
+                        f"ma ci sono **{final_omesse} Omesse Timbrature** che contano come lavorati per l'INPS."
+                    )
+                else:
+                    st.error(
+                        f"❌ **DISCREPANZA**: Mancano {mancanti} giorni! "
+                        f"Busta: {gg_pagati_busta} GG INPS, Calcolato: {tot_calcolato}"
+                    )
         else:
             st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
