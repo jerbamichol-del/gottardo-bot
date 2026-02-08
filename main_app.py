@@ -276,11 +276,11 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 - ORE ORDINARIE: "ORE INAIL" o giorni×8
 
 **2. COMPETENZE:**
-- base: "RETRIBUZIONE ORDINARIA" (voce 1000)
+- base: Cerca "RETRIBUZIONE ORDINARIA" o "PAGA BASE" (voce 1000) -> valore nella colonna Competenze
 - straordinari: somma STRAORDINARIO/SUPPLEMENTARI/NOTTURNI
 - festivita: MAGG. FESTIVE/FESTIVITA GODUTA
 - anzianita: SCATTI/EDR/ANZ.
-- lordo_totale: TOTALE COMPETENZE
+- lordo_totale: Cerca "TOTALE COMPETENZE" in fondo alla colonna competenze
 
 **3. TRATTENUTE:**
 - inps: sezione I.N.P.S.
@@ -291,10 +291,10 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 - Formato: RES.PREC / SPETTANTI / FRUITE / SALDO
 
 **5. ASSENZE DEL MESE (IMPORTANTE!):**
-Cerca nella lista delle voci (colonna centrale):
-- ore_ferie_mese: voce 4521 "FERIE GODUTE" → colonna ORE (es. 37,67)
-- ore_permessi_mese: voce 4529 "PERMESSI GODUTI" → colonna ORE (es. 42,33)
-- ore_malattia_mese: voce con "MALATTIA" → colonna ORE
+Cerca nella colonna centrale le voci relative a ferie/permessi fruiti nel mese corrente:
+- ore_ferie_mese: Cerca "FERIE GODUTE" (spesso voce 4521) -> prendi valore colonna ORE
+- ore_permessi_mese: Cerca "PERMESSI GODUTI" o "ROL GODUTI" (spesso voce 4529) -> prendi valore colonna ORE
+- ore_malattia_mese: Cerca righe con "MALATTIA" -> prendi valore colonna ORE
 
 **6. TREDICESIMA:**
 - e_tredicesima=true se trovi "TREDICESIMA"/"13MA"
@@ -340,25 +340,18 @@ def parse_cartellino_dettagliato(path):
     prompt = """
 Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
 
-**PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER DEL DOCUMENTO:**
-In fondo al cartellino c'è una riga con i totali. Cerca:
-- "GG PRESENZA" o "0265 GG PRESENZA" → questo è il numero ESATTO di giorni lavorati (es. 16,00)
-- "ORE LAVORATE" o "0253 ORE LAVORATE" → ore totali lavorate (es. 115,15)
-- "ORE ORDINARIE" → ore ordinarie (es. 115,00)
+**PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER (sono i dati più attendibili):**
+- "GG PRESENZA" o codice 0265: estrai il numero (es. 16,00)
+- "ORE LAVORATE" o codice 0253: estrai il valore (es. 115,15). NON prendere "ORE ORDINARIE" (0251) o valori teorici.
 
-**POI CONTA I GIORNI PER TIPO guardando i codici a sinistra di ogni riga:**
-- ferie: righe con codice FER, FERIE, FE (conta quante righe hanno questo codice)
-- malattia: righe con MAL, MALATTIA
-- permessi: righe con PAR, PER, PERMESSO, ROL
-- riposi: righe con RCS, RIC, RIP, RIPOSO, RDD (riposi compensativi e domenicali)
-- festivita: righe con FES, FESTIVO
-- omesse_timbrature: conta le righe dove le timbrature hanno la lettera 'I' finale 
-  (es. "E13,58I" indica inserimento manuale = omessa timbratura)
-
-IMPORTANTE:
-- Il valore "GG PRESENZA" dal footer è la fonte più affidabile per i giorni lavorati
-- Le omesse timbrature sono giorni LAVORATI (contati in GG PRESENZA) ma con badge mancante
-- I riposi (RCS, RIC, RDD) NON sono giorni INPS
+**POI CONTA I GIORNI PER TIPO (Analisi Righe):**
+- **Riposi (IMPORTANTE)**: Conta solo le righe che hanno codici RIPOSO, RDD, RCS, RIC *MA CHE SONO VUOTE DI TIMBRATURE*.
+  - Esempio: "RDD D05" (senza orari) -> È UN RIPOSO (+1)
+  - Esempio: "RCS D19 E 09:54..." (con orari) -> È LAVORATO (NON contarlo come riposo)
+- **Omesse Timbrature**: Righe con codici ANOMALIA/OMESSA o timbrature che finiscono con 'I' (es. "13,58I")
+- **Ferie**: Righe con FER, FE
+- **Permessi**: Righe con PAR, PER, ROL
+- **Malattia**: Righe con MAL
 
 Output JSON:
 {
