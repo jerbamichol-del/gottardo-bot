@@ -1608,7 +1608,7 @@ def cleanup_files(*paths):
 # Header (logo + title)
 LOGO_PATH = "assets/logo.jpg"
 
-h1, h2 = st.columns([1.2, 8.8])
+h1, h2 = st.columns([0.75, 9.25])
 with h1:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=100)
@@ -2032,6 +2032,7 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
 
