@@ -74,7 +74,6 @@ def kpi_grid(items, cols_desktop=4, cols_mobile=2):
         f"""
         <style>
           .app-header {{ display:flex; align-items:center; gap:12px; margin: 0 0 0.75rem 0; }}
-          .app-header .logo {{ width:36px; height:36px; flex:0 0 36px; border-radius: 6px; overflow:hidden; }}
           .app-header .title {{ font-size:1.55rem; font-weight:700; line-height:1; }}
           @media (max-width: 480px) {{ .app-header .title {{ font-size:1.30rem; }} }}
 
@@ -413,7 +412,7 @@ def parse_cartellino_dettagliato(path):
       - Codici che iniziano con 'V' (V70, V50, V29, V01, ecc.)
       - Righe con orari di timbratura (es. 08:30 13:00)
       - Righe "ORD" o "STR"
-      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD (Riposo) SENZA timbrature.
+      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD/RCS/RIC/RPS/REC (Riposi) SENZA timbrature.
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
@@ -460,6 +459,16 @@ def parse_cartellino_dettagliato(path):
         result["giorni_lavorati"] = result["giorni_footer"]
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
+
+    # Normalizza riposi (domeniche + compensativi).
+    # Nota: i codici tipici sono RDD/RCO (settimanali) e RCS/RIC/RPS/REC (compensativi).
+    try:
+        r = result.get("riposi", 0)
+        if isinstance(r, str):
+            r = r.replace(',', '.').strip()
+        result["riposi"] = int(round(float(r))) if r is not None else 0
+    except Exception:
+        result["riposi"] = 0
         
     return result
 
@@ -1730,7 +1739,7 @@ if "res" in st.session_state:
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
-        # Converti ore in giorni (ore totali / 7 per ottenere giorni)
+        # Converti ore in giorni (ore totali / 8 per ottenere giorni)
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = round(ore_assenze_busta / 8) if ore_assenze_busta > 0 else 0
         gg_malattia = round(ore_malattia_busta / 8) if ore_malattia_busta > 0 else c_malattia
@@ -1960,28 +1969,37 @@ if "res" in st.session_state:
             # Usa direttamente i dati CONSOLIDATI (come nel riepilogo in alto)
             # c_lavorati, gg_ferie_effettive, gg_malattia, final_omesse, ecc.
             
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")            # Label dinamico (basato sulla fonte ferie)
+            # Label dinamico (basato sulla fonte ferie)
             if use_source_ferie == "Agenda":
                 label_ferie_tab = "🏖️ Ferie (Agenda)"
             elif use_source_ferie == "Cartellino":
                 label_ferie_tab = "🏖️ Ferie (Cartellino)"
             else:
                 label_ferie_tab = "🏖️ Ferie (Busta)"
-k2.metric(label_ferie_tab, gg_ferie_effettive)
-            
-            k3.metric("🤒 Malattia", gg_malattia)
-            k4.metric("⚠️ Omesse", final_omesse)
+
+            kpi_grid(
+                [
+                    {"label": "👔 Lavorati", "value": c_lavorati},
+                    {"label": label_ferie_tab, "value": gg_ferie_effettive},
+                    {"label": "🤒 Malattia", "value": gg_malattia},
+                    {"label": "⚠️ Omesse", "value": final_omesse},
+                ],
+                cols_desktop=4,
+                cols_mobile=2,
+            )
 
             st.markdown("---")
 
-            k5, k6, k7 = st.columns(3)
-            # Mostra permessi (se non inglobati in Agenda) o 0
             val_permessi = gg_permessi if not (agenda.get("success") and a_ferie > 0) else 0
-            k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
-            
-            k6.metric("💤 Riposi", c_riposi)
-            k7.metric("🎉 Festività", c_festivita)
+            kpi_grid(
+                [
+                    {"label": "📋 Permessi", "value": val_permessi},
+                    {"label": "💤 Riposi", "value": c_riposi},
+                    {"label": "🎉 Festività", "value": c_festivita},
+                ],
+                cols_desktop=3,
+                cols_mobile=2,
+            )
 
             if c.get("note"):
                 st.info(f"📝 {c['note']}")
