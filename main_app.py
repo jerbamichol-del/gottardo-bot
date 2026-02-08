@@ -1709,21 +1709,17 @@ if "res" in st.session_state:
 
         # =====================================================================
         # CALCOLO GG INPS (VERIFICA PRINCIPALE)
-        # GG INPS = Lavorati + Ferie (da agenda) + Malattia + Festività
-        # NOTA: Le ferie da agenda includono già i permessi usati come ferie!
-        # NOTA: Riposi (domeniche, RCS, RIC) NON contano come GG INPS
         # =====================================================================
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
-        # Totale calcolato usando le ferie dall'agenda
-        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
+        # ORA INCLUDIAMO LE OMESSE TIMBRATURE NEL CALCOLO
+        # Perché sono giorni lavorati a tutti gli effetti (pagati in busta)
+        # ma che non risultano nel totale "Lavorati" del cartellino.
+        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita + final_omesse
         
         # Differenza
         diff_gg = tot_calcolato - gg_pagati_busta
 
-
-        # =====================================================================
-        # VISUALIZZAZIONE RIEPILOGO
         # =====================================================================
         # VISUALIZZAZIONE RIEPILOGO
         # =====================================================================
@@ -1733,11 +1729,11 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None)
-        col3.metric("👔 Lavorati", c_lavorati)
-        col4.metric("⚠️ Omesse", final_omesse)
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività + Omesse")
+        col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
+        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Giorni lavorati ma con timbratura mancante")
 
-        # Dettaglio assenze - usa ferie effettive (da agenda = ferie + permessi usati come ferie)
+        # Dettaglio assenze
         col5, col6, col7, col8 = st.columns(4)
         
         if use_agenda:
@@ -1767,54 +1763,36 @@ if "res" in st.session_state:
         # =====================================================================
         # VERIFICA COERENZA GG INPS
         # =====================================================================
-        # =====================================================================
-        # VERIFICA COERENZA GG INPS
-        # =====================================================================
         if gg_pagati_busta > 0:
             if abs(diff_gg) == 0:
-                msg_parts = [f"Lavorati ({c_lavorati})", f"Ferie ({gg_ferie_effettive})"]
+                msg_parts = [f"Lavorati Cartellino ({c_lavorati})"]
+                if final_omesse > 0: msg_parts.append(f"Omesse ({final_omesse})")
+                if gg_ferie_effettive > 0: msg_parts.append(f"Ferie ({gg_ferie_effettive})")
                 if gg_malattia > 0: msg_parts.append(f"Malattia ({gg_malattia})")
                 if c_festivita > 0: msg_parts.append(f"Festività ({c_festivita})")
                 
                 st.success(
-                    f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) ≈ {(' + '.join(msg_parts))}"
+                    f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) = {(' + '.join(msg_parts))}"
                 )
             elif abs(diff_gg) == 1:
                 st.success(
                     f"✅ **DATI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
                     f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato}"
                 )
-            elif diff_gg > 0:
-                st.warning(
-                    f"⚠️ **DISCREPANZA**: Il cartellino indica {diff_gg} giorni IN PIÙ rispetto "
-                    f"ai {gg_pagati_busta} GG INPS della busta. Verifica i dati."
-                )
             else:
-                # Caso diff_gg < 0 (Es: Busta 24, Calcolato 22, Diff -2)
-                # Verifica se le omesse timbrature possono coprire la differenza
-                mancanti = abs(diff_gg)
-                cond_omesse = final_omesse >= mancanti  # Assumiamo 1 omessa <= 1 giorno (safe check)
-                
-                if cond_omesse:
-                     st.warning(
-                        f"✅ **GIUSTIFICABILE CON OMESSE**: Mancano {mancanti} giorni nel conteggio calcolato, "
-                        f"ma ci sono **{final_omesse} Omesse Timbrature** che contano come lavorati per l'INPS."
-                    )
-                else:
-                    st.error(
-                        f"❌ **DISCREPANZA**: Mancano {mancanti} giorni! "
-                        f"Busta: {gg_pagati_busta} GG INPS, Calcolato: {tot_calcolato}"
-                    )
+                st.error(
+                    f"❌ **DISCREPANZA**: {diff_gg:+.0f} giorni! "
+                    f"Busta: {gg_pagati_busta} GG INPS, Calcolato ({tot_calcolato}) = "
+                    f"Lavorati Cartellino ({c_lavorati}) + Omesse ({final_omesse}) + Ferie ({gg_ferie_effettive}) + Fest ({c_festivita}) + Mal ({gg_malattia})"
+                )
         else:
             st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
-        # =====================================================================
-        # SEGNALAZIONE OMESSE TIMBRATURE
-        # =====================================================================
+        # Avviso solo informativo per le omesse (senza warning errori)
         if final_omesse > 0:
-            st.warning(
-                f"⚠️ **{final_omesse} Omesse Timbrature** rilevate. "
-                f"Sono giorni lavorati ma con badge mancante (da regolarizzare)."
+            st.info(
+                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni lavorati con 'Omessa Timbratura' (presi dall'Agenda). "
+                "Questi sono stati inclusi nel calcolo dei giorni lavorati totali."
             )
 
         # =====================================================================
