@@ -349,7 +349,7 @@ def parse_cartellino_dettagliato(path):
       - Codici che iniziano con 'V' (V70, V50, V29, V01, ecc.)
       - Righe con orari di timbratura (es. 08:30 13:00)
       - Righe "ORD" o "STR"
-      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD (Riposo) SENZA timbrature.
+      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD/RCS/RIC/RPS/REC (Riposi) SENZA timbrature.
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
@@ -357,6 +357,7 @@ def parse_cartellino_dettagliato(path):
     - **FERIE**: Righe con FER, FE, FEP.
     - **PERMESSI**: Righe con PAR, PER, ROL.
     - **MALATTIA**: Righe con MAL.
+    - **RIPOSI (Domeniche + compensativi)**: conta 1 per ogni giorno con SOLO codice riposo SENZA timbrature; includi RDD, RCO (riposo settimanale) e anche RCS, RIC, RPS, REC (riposi compensativi).
     - **OMESSE TIMBRATURE**: Conta SOLO se trovi esplicitamente scritto "OMESSA", "ANOMALIA", "MANCATA TIMBRATURA". NON contare righe Vxx senza orario come omesse (possono essere giustificativi manuali).
 
     Output JSON:
@@ -396,6 +397,16 @@ def parse_cartellino_dettagliato(path):
         result["giorni_lavorati"] = result["giorni_footer"]
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
+
+    # Normalizza riposi (domeniche + compensativi).
+    # Nota: i codici tipici sono RDD/RCO (settimanali) e RCS/RIC/RPS/REC (compensativi).
+    try:
+        r = result.get("riposi", 0)
+        if isinstance(r, str):
+            r = r.replace(',', '.').strip()
+        result["riposi"] = int(round(float(r))) if r is not None else 0
+    except Exception:
+        result["riposi"] = 0
         
     return result
 
