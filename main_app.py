@@ -1622,6 +1622,8 @@ if "res" in st.session_state:
         c_festivita = c.get("festivita", 0)
         c_malattia = c.get("malattia", 0)
 
+        c_ferie = c.get("ferie", 0)
+
         # =====================================================================
         # DATI DALLA BUSTA (ore ferie/permessi)
         # =====================================================================
@@ -1647,40 +1649,40 @@ if "res" in st.session_state:
         # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
         # L'agenda mostra i giorni REALI di ferie (linee gialle)
-        # L'azienda permette di usare permessi come ferie, quindi:
-        # FERIE_AGENDA = FERIE_BUSTA + PERMESSI_BUSTA
         # =====================================================================
-        a_ferie = a_evs.get("FERIE", 0)  # Giorni con linea gialla nell'agenda
+        a_ferie = a_evs.get("FERIE", 0)
         a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
         a_riposi = a_evs.get("RIPOSO", 0)
         a_malattia = a_evs.get("MALATTIA", 0)
 
-        # Se l'agenda ha dati, usa quelli come fonte primaria per le assenze
-        # Se l'agenda ha dati, usa quelli come fonte primaria per le assenze...
-        # MA SOLO SE sono coerenti con la busta (tolleranza 2 giorni)
+        # PRIORITÀ FONTI:
+        # 1. Agenda (se disponibile e coerente)
+        # 2. Cartellino (se analizzato con successo)
+        # 3. Busta (fallback finale)
+        
+        gg_ferie_effettive = 0
+        use_agenda = False
+        use_cartellino = False
+
         if agenda.get("success") and a_ferie > 0:
-            gg_ferie_rilevate = a_ferie
+            gg_ferie_effettive = a_ferie
+            use_agenda = True
             
-            # Verifica incrociata: ferie_agenda dovrebbe ≈ (ferie_busta + permessi_busta) in giorni
-            if gg_assenze_busta > 0 and abs(gg_ferie_rilevate - gg_assenze_busta) > 2:
-                # Discrepanza troppo alta! Probabile errore di scraping agenda (es. ferie in blocco unico non rilevate)
-                # Usiamo la BUSTA come fonte più affidabile in questo caso
-                st.warning(
-                    f"⚠️ **Verifica Ferie**: L'Agenda ha rilevato solo {gg_ferie_rilevate} giorni, "
-                    f"ma la Busta indica {gg_assenze_busta} giorni totali (da ore). "
-                    f"Uso il dato della BUSTA per il calcolo finale."
-                )
-                gg_ferie_effettive = gg_assenze_busta
-            else:
-                # Dati coerenti o solo busta assente -> usa agenda
-                gg_ferie_effettive = gg_ferie_rilevate
-                if gg_assenze_busta > 0 and abs(gg_ferie_rilevate - gg_assenze_busta) > 0:
-                     st.info(
-                        f"ℹ️ **Verifica Ferie**: Agenda mostra {gg_ferie_rilevate} giorni, Busta {gg_assenze_busta} giorni. Uso Agenda."
-                    )
+            # Check coerenza con busta (tolleranza alta perché busta può avere conguagli)
+            if gg_assenze_busta > 0 and abs(a_ferie - gg_assenze_busta) > 3:
+                 st.warning(f"⚠️ Agenda ({a_ferie}) molto diversa da Busta ({gg_assenze_busta}gg stimati).")
+
+        elif c_ferie > 0:
+            # Fallback su Cartellino (parsing righe)
+            gg_ferie_effettive = c_ferie
+            use_cartellino = True
+            st.info(f"ℹ️ Ferie prese dal Cartellino ({c_ferie} gg) - Agenda non disponibile/vuota")
+
         else:
-            # Fallback: usa dati busta
+            # Fallback su Busta
             gg_ferie_effettive = gg_assenze_busta
+            if gg_ferie_effettive > 0:
+                st.caption(f"ℹ️ Ferie stimate dalle ore in busta ({gg_ferie_effettive} gg)")
 
         # =====================================================================
         # CONSOLIDAMENTO OMESSE TIMBRATURE
@@ -1728,9 +1730,15 @@ if "res" in st.session_state:
         # Dettaglio assenze - usa ferie effettive (da agenda = ferie + permessi usati come ferie)
         col5, col6, col7, col8 = st.columns(4)
         
-        is_using_agenda_summ = agenda.get("success") and a_ferie > 0 and (gg_ferie_effettive == a_ferie)
-        lbl_ferie = "🏖️ Ferie (Agenda)" if is_using_agenda_summ else "🏖️ Ferie (Busta)"
-        help_ferie = "Dati rilevati dal calendario" if "Agenda" in lbl_ferie else "Calcolato dalle ore in busta (diviso 7)"
+        if use_agenda:
+            lbl_ferie = "🏖️ Ferie (Agenda)"
+            help_ferie = "Dati rilevati dal calendario"
+        elif use_cartellino:
+            lbl_ferie = "🏖️ Ferie (Cartellino)"
+            help_ferie = "Giorni 'FER' contati dal cartellino"
+        else:
+            lbl_ferie = "🏖️ Ferie (Busta)"
+            help_ferie = "Calcolato dalle ore in busta (diviso 7)"
         
         col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
         col6.metric("🤒 Malattia", gg_malattia)
@@ -1751,9 +1759,12 @@ if "res" in st.session_state:
         # =====================================================================
         if gg_pagati_busta > 0:
             if abs(diff_gg) == 0:
+                msg_parts = [f"Lavorati ({c_lavorati})", f"Ferie ({gg_ferie_effettive})"]
+                if gg_malattia > 0: msg_parts.append(f"Malattia ({gg_malattia})")
+                if c_festivita > 0: msg_parts.append(f"Festività ({c_festivita})")
+                
                 st.success(
-                    f"✅ **DATI COERENTI** — GG INPS dalla busta ({gg_pagati_busta}) = "
-                    f"Lavorati ({c_lavorati}) + Ferie/Permessi ({gg_ferie_effettive}) + Malattia ({gg_malattia})"
+                    f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) ≈ {(' + '.join(msg_parts))}"
                 )
             elif abs(diff_gg) == 1:
                 st.success(
@@ -1860,8 +1871,13 @@ if "res" in st.session_state:
             k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
             
             # Label dinamico
-            is_using_agenda = agenda.get("success") and a_ferie > 0 and (gg_ferie_effettive == a_ferie)
-            label_ferie_tab = "🏖️ Ferie (Agenda)" if is_using_agenda else "🏖️ Ferie (Busta)"
+            if use_agenda:
+                label_ferie_tab = "🏖️ Ferie (Agenda)"
+            elif use_cartellino:
+                label_ferie_tab = "🏖️ Ferie (Cartellino)"
+            else:
+                label_ferie_tab = "🏖️ Ferie (Busta)"
+            
             k2.metric(label_ferie_tab, gg_ferie_effettive)
             
             k3.metric("🤒 Malattia", gg_malattia)
