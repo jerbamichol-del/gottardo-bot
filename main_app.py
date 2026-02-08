@@ -42,7 +42,7 @@ except Exception:
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
+st.set_page_config(page_title="Busta paga analyzer", page_icon="💶", layout="wide")
 
 # ==============================================================================
 # UI HELPERS (responsive KPI grid + header logo)
@@ -1613,7 +1613,7 @@ with h1:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=100)
 with h2:
-    st.markdown("<h1 style='margin-bottom:0.2rem'>Gottardo Payroll Analyzer</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='margin-bottom:0.2rem'>Busta paga analyzer</h1>", unsafe_allow_html=True)
 
 
 # Credenziali
@@ -2032,6 +2032,7 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
 
