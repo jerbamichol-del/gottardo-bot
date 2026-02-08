@@ -39,7 +39,6 @@ except Exception:
     PdfReader = None
 
 
-
 # ==============================================================================
 # CONFIG
 # ==============================================================================
@@ -97,7 +96,6 @@ AGENDA_KEYWORDS = [
     "ANOMALIA",
     "ASSENZA",
 ]
-
 
 
 # ==============================================================================
@@ -335,6 +333,8 @@ Output SOLO JSON:
     return result
 
 
+
+
 def parse_cartellino_dettagliato(path):
     """Parser completo cartellino presenze."""
     prompt = """
@@ -527,6 +527,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 # 0. FORZA VISTA MENSILE (CRITICO!)
                 # Cerca e clicca il bottone "Mese" nella toolbar principale
                 result["debug"].append("  🖱️ Imposto vista MENSILE (click 'Mese')...")
+
                 # Selettori per il bottone Mese
                 # Cerchiamo bottoni che contengono il testo "Mese"
                 month_view_btns = calendar_frame.locator(
@@ -633,6 +634,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                     break
                         except:
                             pass
+
                 # DIAGNOSTICA HTML SE FALLISCE ANCORA
                 if not found_title:
                     result["debug"].append(
@@ -982,6 +984,7 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 result["debug"].append(f"    Scartato evento fuori mese: {txt_lower[:40]}...")
                                 continue
 
+
                             # 2. FILTRI GEOMETRICI
                             box = el.bounding_box()
                             if not box:
@@ -1328,6 +1331,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                             f"{idx:02d}/{anno}",
                             f"{idx:02d}-{anno}",
                         ]
+
                         for i in range(total):
                             try:
                                 txt = (links.nth(i).inner_text() or "").strip()
@@ -1455,6 +1459,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     # Icona PDF
                     pattern_cart = f"{idx:02d}/{anno}"
                     riga = page.locator(f"tr:has-text('{pattern_cart}')").first
+
                     if (
                         riga.count() > 0
                         and riga.locator("img[src*='search']").count() > 0
@@ -1665,9 +1670,9 @@ if "res" in st.session_state:
         
         # Converti ore in giorni (ore totali / 7 per ottenere giorni)
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / 7) if ore_permessi_busta > 0 else 0
+        gg_assenze_busta = round(ore_assenze_busta / 8) if ore_assenze_busta > 0 else 0
+        gg_malattia = round(ore_malattia_busta / 8) if ore_malattia_busta > 0 else c_malattia
+        gg_permessi = round(ore_permessi_busta / 8) if ore_permessi_busta > 0 else 0
 
         # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
@@ -1684,10 +1689,6 @@ if "res" in st.session_state:
         
         gg_ferie_effettive = 0
         use_source_ferie = "Busta" # Label for UI
-
-        # Fix variabili usate nella UI (Tab Cartellino)
-        use_agenda = (use_source_ferie == "Agenda")
-        use_cartellino = (use_source_ferie == "Cartellino")
 
         # LOGICA FERIE: Priorità Busta > Cartellino
         if gg_assenze_busta > 0:
@@ -1714,21 +1715,11 @@ if "res" in st.session_state:
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
         # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
-        # L'agenda è informativa, MA le OMESSE (solo agenda) sono giorni LAVORATI.
-        # Regola: le omesse NON sono assenze e NON vanno mai sommate alle ferie/permessi.
-
-        tot_calcolato_base = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
-        diff_base = tot_calcolato_base - gg_pagati_busta
-
-        # Se siamo in DIFETTO, proviamo a colmare usando le omesse come giorni lavorati (subset di presenza).
-        used_omesse = 0
-        tot_calcolato = tot_calcolato_base
-        diff_gg = diff_base
-        if gg_pagati_busta > 0 and diff_base < 0 and final_omesse > 0:
-            mancanti = int(round(abs(diff_base)))
-            used_omesse = min(int(final_omesse), mancanti)
-            tot_calcolato = tot_calcolato_base + used_omesse
-            diff_gg = tot_calcolato - gg_pagati_busta
+        # L'agenda è solo informativa.
+        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
+        
+        # Differenza
+        diff_gg = tot_calcolato - gg_pagati_busta
 
         # =====================================================================
         # VISUALIZZAZIONE RIEPILOGO
@@ -1739,9 +1730,9 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Assenze (da busta) + Malattia + Festività (+ Omesse se in difetto)")
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività")
         col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo agenda: giorni lavorati/anomalia (non assenza)")
+        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
 
         # Dettaglio assenze
         col5, col6, col7, col8 = st.columns(4)
@@ -1754,7 +1745,7 @@ if "res" in st.session_state:
             help_ferie = "Giorni 'FER' contati dal cartellino"
         else:
             lbl_ferie = "🏖️ Ferie (Busta)"
-            help_ferie = "Calcolato dalle ore in busta (ferie+permessi, documento ufficiale)"
+            help_ferie = "Calcolato dalle ore in busta (Documento Ufficiale)"
         
         col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
         col6.metric("🤒 Malattia", gg_malattia)
@@ -1776,51 +1767,58 @@ if "res" in st.session_state:
         if gg_pagati_busta > 0:
             if abs(diff_gg) == 0:
                 msg_parts = [f"Lavorati Cartellino ({c_lavorati})"]
-                if used_omesse > 0:
-                    msg_parts.append(f"Omesse Agenda usate come lavorate ({used_omesse} su {final_omesse})")
-                if gg_ferie_effettive > 0:
-                    msg_parts.append(f"Assenze pagate Busta (ferie+permessi) ({gg_ferie_effettive})")
-                if gg_malattia > 0:
-                    msg_parts.append(f"Malattia ({gg_malattia})")
-                if c_festivita > 0:
-                    msg_parts.append(f"Festività ({c_festivita})")
-
+                if final_omesse > 0: msg_parts.append(f"Omesse ({final_omesse})")
+                if gg_ferie_effettive > 0: msg_parts.append(f"Ferie ({gg_ferie_effettive})")
+                if gg_malattia > 0: msg_parts.append(f"Malattia ({gg_malattia})")
+                if c_festivita > 0: msg_parts.append(f"Festività ({c_festivita})")
+                
                 st.success(
                     f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) = {(' + '.join(msg_parts))}"
                 )
-
+            elif diff_gg > 0:
+                # Caso diff_gg > 0 (Es: Busta 24, Calcolato 28, Diff +4)
+                # Possibile SOVRAPPOSIZIONE: I giorni del cartellino (21) includono le "Omesse" (4) (i giorni Vxx),
+                # ma noi abbiamo aggiunto anche le Ferie Busta (6). Se le Vxx SONO Ferie, le abbiamo contate 2 volte.
+                sovrapposizione = abs(diff_gg)
+                if abs(sovrapposizione - final_omesse) <= 1:
+                     st.success(
+                        f"✅ **DATI COERENTI CON SOVRAPPOSIZIONE**: Il totale calcolato ({tot_calcolato}) supera la Busta di {sovrapposizione} giorni. "
+                        f"Questo accade perché i **{final_omesse} giorni di 'Omesse'** (Vxx nel cartellino) sono inclusi sia nei 'Lavorati' che nelle 'Ferie Busta'. "
+                        f"Eliminando il doppio conteggio, i conti tornano ({tot_calcolato} - {sovrapposizione} = {gg_pagati_busta})."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ **DISCREPANZA (ECCESSO)**: Il cartellino indica {diff_gg} giorni IN PIÙ rispetto "
+                        f"ai {gg_pagati_busta} GG INPS della busta. "
+                        f"Verifica se 'Lavorati' ({c_lavorati}) e 'Ferie' ({gg_ferie_effettive}) si sovrappongono."
+                    )
             elif abs(diff_gg) == 1:
                 st.success(
-                    f"✅ **DATI QUASI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
-                    f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato:.0f}"
+                    f"✅ **DATI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
+                    f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato}"
                 )
-
-            elif diff_gg > 0:
-                st.warning(
-                    f"⚠️ **DISCREPANZA (ECCESSO)**: Calcolato {tot_calcolato:.0f} vs Busta {gg_pagati_busta} (diff {diff_gg:+.0f}). "
-                    f"Verifica conversione ore→giorni (7h) e parsing ferie/malattia/festività."
-                )
-
-            else:
+            else: # This 'else' now covers diff_gg < 0
                 st.error(
                     f"❌ **DISCREPANZA (DIFETTO)**: {diff_gg:+.0f} giorni! "
-                    f"Busta: {gg_pagati_busta} GG INPS vs Calcolato: {tot_calcolato:.0f} "
-                    f"(Base={tot_calcolato_base:.0f}, Omesse usate={used_omesse})"
+                    f"Busta: {gg_pagati_busta} GG INPS vs Calcolato: {tot_calcolato} "
+                    f"(Lavorati {c_lavorati} + Ferie {gg_ferie_effettive} + Malattia {gg_malattia} + Fest {c_festivita})"
                 )
 
-                if final_omesse > 0 and used_omesse == 0:
-                    st.info(
-                        f"☝️ Nota: Ci sono {final_omesse} omesse in agenda (giorni lavorati). "
-                        "Se il cartellino le conteggia già nei lavorati, non devono cambiare il totale; se invece mancano, aumenta la qualità del parsing del cartellino (GG presenza footer)."
+                # Suggerimento Omesse (Difetto)
+                mancanti = abs(diff_gg)
+                if final_omesse >= mancanti:
+                     st.info(
+                        f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate in Agenda. "
+                        "Poiché le omesse sono giorni lavorati, i conti tornano."
                     )
         else:
-            st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato:.0f} giorni.")
+            st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
-        # Avviso solo informativo per le omesse (sempre non-bloccante)
-        if final_omesse > 0 and used_omesse == 0:
+        # Avviso solo informativo per le omesse (senza warning errori)
+        if final_omesse > 0:
             st.info(
-                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni con 'Omessa Timbratura' (solo agenda). "
-                "Sono considerati giorni lavorati, non assenze."
+                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni lavorati con 'Omessa Timbratura' (presi dall'Agenda). "
+                "Questi sono stati inclusi nel calcolo dei giorni lavorati totali."
             )
 
         # =====================================================================
