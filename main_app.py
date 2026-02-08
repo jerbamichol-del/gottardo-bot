@@ -340,23 +340,30 @@ def parse_cartellino_dettagliato(path):
     prompt = """
     Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
     
-    **PRIMA DI TUTTO, LEGGI I TOTALI DAL FOOTER (sono i dati più attendibili):**
-    - "GG PRESENZA" o codice 0265: estrai il numero (es. 16,00). 
-    - "ORE LAVORATE" o codice 0253: estrai il valore (es. 115,15).
+    **1. DATI DAL FOOTER (UFFICIALI):**
+    - "GG PRESENZA" o codice 0265: estrai il numero esatto (es. 21,00). Assegnato a "giorni_footer".
+    - "ORE LAVORATE" o codice 0253: estrai il valore (es. 153,00).
     
-    **ANALISI RIGHE (CODICI SPECIFICI):**
-    - **LAVORO**: Righe che iniziano con 'V' (es. V70, V50, V29) o 'ORD' o hanno orari di timbratura (es. 08:30 13:00).
-    - **FESTIVITÀ**: Cerca codice "F70", "FST", "FES". Conta 1 per ogni giorno con questi codici. NON contare V70 o V50 come festività!
-    - **FERIE**: Righe con "FER", "FE", "FEP".
-    - **PERMESSI**: Righe con "PAR", "PER", "ROL".
-    - **MALATTIA**: Righe con "MAL".
-    - **RIPOSI**: Righe con "RDD", "RCS", "RIC", "RCO" che NON hanno ore lavorate. Se hanno timbrature, sono giorni lavorati.
+    **2. CONTEGGIO RIGHE (VERIFICA):**
+    - Conta manualmente tutte le righe che indicano PRESENZA/LAVORO:
+      - Codici che iniziano con 'V' (V70, V50, V29, V01, ecc.)
+      - Righe con orari di timbratura (es. 08:30 13:00)
+      - Righe "ORD" o "STR"
+      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD (Riposo) SENZA timbrature.
+    - Assegna questo conteggio manuale a "giorni_righe".
     
-    ATTENZIONE: V70, V50, Vxx sono codici di LAVORO/PRESENZA, NON Festività.
+    **3. ALTRI CODICI:**
+    - **FESTIVITÀ**: Codici F70, FST, FES. (Conta 1 per ogni giorno).
+    - **FERIE**: Righe con FER, FE, FEP.
+    - **PERMESSI**: Righe con PAR, PER, ROL.
+    - **MALATTIA**: Righe con MAL.
+    - **OMESSE TIMBRATURE**: Conta SOLO se trovi esplicitamente scritto "OMESSA", "ANOMALIA", "MANCATA TIMBRATURA". NON contare righe Vxx senza orario come omesse (possono essere giustificativi manuali).
 
     Output JSON:
     {
-      "giorni_lavorati": 0,
+      "giorni_lavorati": 0,  // Usa il valore del FOOTER
+      "giorni_footer": 0,    // Valore esplicito footer
+      "giorni_righe": 0,     // Conteggio manuale righe
       "ore_lavorate": 0.00,
       "ferie": 0,
       "malattia": 0,
@@ -364,7 +371,7 @@ def parse_cartellino_dettagliato(path):
       "riposi": 0,
       "omesse_timbrature": 0,
       "festivita": 0,
-      "note": ""
+      "note": "Descrivi eventuali discrepanze tra Footer e Righe"
     }
     """.strip()
 
@@ -372,6 +379,8 @@ def parse_cartellino_dettagliato(path):
     if not result:
         return {
             "giorni_lavorati": 0,
+            "giorni_footer": 0,
+            "giorni_righe": 0,
             "ore_lavorate": 0,
             "ferie": 0,
             "malattia": 0,
@@ -381,6 +390,13 @@ def parse_cartellino_dettagliato(path):
             "festivita": 0,
             "note": "",
         }
+    
+    # Normalizzazione finale
+    if result.get("giorni_footer", 0) > 0:
+        result["giorni_lavorati"] = result["giorni_footer"]
+    elif result.get("giorni_righe", 0) > 0:
+        result["giorni_lavorati"] = result["giorni_righe"]
+        
     return result
 
 
@@ -1656,59 +1672,31 @@ if "res" in st.session_state:
         a_riposi = a_evs.get("RIPOSO", 0)
         a_malattia = a_evs.get("MALATTIA", 0)
 
-        # PRIORITÀ FONTI:
-        # 1. Agenda (se disponibile e coerente)
-        # 2. Cartellino (se analizzato con successo)
-        # 3. Busta (fallback finale)
+        # PRIORITÀ FONTI SECONDO RICHIESTA UTENTE:
+        # 1. FERIE: Busta Paga (Documento Ufficiale)
+        # 2. OMESSE: Solo Agenda (Dato informativo)
         
         gg_ferie_effettive = 0
-        use_agenda = False
-        use_cartellino = False
+        use_source_ferie = "Busta" # Label for UI
 
-        if agenda.get("success") and a_ferie > 0:
-            gg_ferie_effettive = a_ferie
-            use_agenda = True
-            
-            # Check coerenza con busta
-            if gg_assenze_busta > 0 and abs(a_ferie - gg_assenze_busta) > 3:
-                 st.warning(f"⚠️ Agenda ({a_ferie}) molto diversa da Busta ({gg_assenze_busta}gg stimati).")
-
-        elif c:  # Cartellino disponibile
-            # Caso standard: usa cartellino
-            gg_ferie_effettive = c_ferie
-            use_cartellino = True
-            
-            # ECCEZIONE: Se Cartellino dice 0 Ferie ma Busta ne ha (es. 40h),
-            # è molto probabile che il Cartellino non le riporti nel footer.
-            # In questo caso, USIAMO IL DATO BUSTA come fallback affidabile.
-            if c_ferie == 0 and gg_assenze_busta > 0:
-                 gg_ferie_effettive = gg_assenze_busta
-                 use_cartellino = False # Switch to Busta source for label
-                 st.warning(
-                     f"⚠️ **Override Ferie**: Il Cartellino indica 0 ferie, ma la Busta riporta {ore_assenze_busta:.0f}h ({gg_assenze_busta} gg). "
-                     f"Uso il dato della Busta per il calcolo."
-                 )
-            elif c_ferie > 0:
-                 st.info(f"ℹ️ Ferie prese dal Cartellino ({c_ferie} gg)")
-
-        else:
-            # Fallback su Busta solo se mancano completamente Agenda e Cartellino
+        # LOGICA FERIE: Priorità Busta > Cartellino
+        if gg_assenze_busta > 0:
             gg_ferie_effettive = gg_assenze_busta
-            if gg_ferie_effettive > 0:
-                st.caption(f"ℹ️ Ferie stimate dalle ore in busta ({gg_ferie_effettive} gg)")
+            # Info se c'è discrepanza con Cartellino
+            if c_ferie != gg_ferie_effettive:
+                 st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive} gg) come da documento ufficiale (Cartellino indica {c_ferie}).")
+        elif c_ferie > 0:
+            gg_ferie_effettive = c_ferie
+            use_source_ferie = "Cartellino"
+        elif a_ferie > 0:
+            gg_ferie_effettive = a_ferie
+            use_source_ferie = "Agenda"
 
         # =====================================================================
         # CONSOLIDAMENTO OMESSE TIMBRATURE
-        # Le omesse vanno SEMPRE segnalate (anche se regolarizzate con "I")
+        # SOLO DALL'AGENDA. Il cartellino non fa testo per le omesse.
         # =====================================================================
-        if agenda.get("success") and a_omesse > 0:
-            final_omesse = a_omesse
-            if c_omesse != a_omesse:
-                st.info(
-                    f"ℹ️ **Omesse Timbrature**: Agenda riporta {a_omesse}, Cartellino riporta {c_omesse}"
-                )
-        else:
-            final_omesse = c_omesse
+        final_omesse = a_omesse
 
         # =====================================================================
         # CALCOLO GG INPS (VERIFICA PRINCIPALE)
@@ -1738,15 +1726,15 @@ if "res" in st.session_state:
         # Dettaglio assenze
         col5, col6, col7, col8 = st.columns(4)
         
-        if use_agenda:
+        if use_source_ferie == "Agenda":
             lbl_ferie = "🏖️ Ferie (Agenda)"
             help_ferie = "Dati rilevati dal calendario"
-        elif use_cartellino:
+        elif use_source_ferie == "Cartellino":
             lbl_ferie = "🏖️ Ferie (Cartellino)"
             help_ferie = "Giorni 'FER' contati dal cartellino"
         else:
             lbl_ferie = "🏖️ Ferie (Busta)"
-            help_ferie = "Calcolato dalle ore in busta (diviso 7)"
+            help_ferie = "Calcolato dalle ore in busta (Documento Ufficiale)"
         
         col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
         col6.metric("🤒 Malattia", gg_malattia)
