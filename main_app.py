@@ -1727,7 +1727,8 @@ if "res" in st.session_state:
         # Dettaglio assenze - usa ferie effettive (da agenda = ferie + permessi usati come ferie)
         col5, col6, col7, col8 = st.columns(4)
         
-        lbl_ferie = "🏖️ Ferie (Agenda)" if agenda.get("success") and a_ferie > 0 else "🏖️ Ferie (Busta)"
+        is_using_agenda_summ = agenda.get("success") and a_ferie > 0 and (gg_ferie_effettive == a_ferie)
+        lbl_ferie = "🏖️ Ferie (Agenda)" if is_using_agenda_summ else "🏖️ Ferie (Busta)"
         help_ferie = "Dati rilevati dal calendario" if "Agenda" in lbl_ferie else "Calcolato dalle ore in busta (diviso 7)"
         
         col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
@@ -1851,29 +1852,29 @@ if "res" in st.session_state:
 
     with tab2:
         if c:
-            # Usa i dati dal cartellino direttamente (come richiesto)
-            v_lavorati = c.get("giorni_lavorati", 0)
-            v_ferie = c.get("ferie", 0)
-            v_malattia = c.get("malattia", 0)
-            v_omesse = (
-                a_omesse if "a_omesse" in locals() else c.get("omesse_timbrature", 0)
-            )
-            v_permessi = c.get("permessi", 0)
-            v_riposi = c.get("riposi", 0)
-            v_festivita = c.get("festivita", 0)
-
+            # Usa direttamente i dati CONSOLIDATI (come nel riepilogo in alto)
+            # c_lavorati, gg_ferie_effettive, gg_malattia, final_omesse, ecc.
+            
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("👔 Lavorati", v_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
-            k2.metric("🏖️ Ferie", v_ferie)
-            k3.metric("🤒 Malattia", v_malattia)
-            k4.metric("⚠️ Omesse", v_omesse)
+            k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
+            
+            # Label dinamico
+            is_using_agenda = agenda.get("success") and a_ferie > 0 and (gg_ferie_effettive == a_ferie)
+            label_ferie_tab = "🏖️ Ferie (Agenda)" if is_using_agenda else "🏖️ Ferie (Busta)"
+            k2.metric(label_ferie_tab, gg_ferie_effettive)
+            
+            k3.metric("🤒 Malattia", gg_malattia)
+            k4.metric("⚠️ Omesse", final_omesse)
 
             st.markdown("---")
 
             k5, k6, k7 = st.columns(3)
-            k5.metric("📋 Permessi", v_permessi)
-            k6.metric("💤 Riposi", v_riposi)
-            k7.metric("🎉 Festività", v_festivita)
+            # Mostra permessi (se non inglobati in Agenda) o 0
+            val_permessi = gg_permessi if not (agenda.get("success") and a_ferie > 0) else 0
+            k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
+            
+            k6.metric("💤 Riposi", c_riposi)
+            k7.metric("🎉 Festività", c_festivita)
 
             if c.get("note"):
                 st.info(f"📝 {c['note']}")
