@@ -1776,24 +1776,41 @@ if "res" in st.session_state:
                 st.success(
                     f"✅ **DATI COERENTI** — GG INPS ({gg_pagati_busta}) = {(' + '.join(msg_parts))}"
                 )
+            elif diff_gg > 0:
+                # Caso diff_gg > 0 (Es: Busta 24, Calcolato 28, Diff +4)
+                # Possibile SOVRAPPOSIZIONE: I giorni del cartellino (21) includono le "Omesse" (4) (i giorni Vxx),
+                # ma noi abbiamo aggiunto anche le Ferie Busta (6). Se le Vxx SONO Ferie, le abbiamo contate 2 volte.
+                sovrapposizione = abs(diff_gg)
+                if abs(sovrapposizione - final_omesse) <= 1:
+                     st.success(
+                        f"✅ **DATI COERENTI CON SOVRAPPOSIZIONE**: Il totale calcolato ({tot_calcolato}) supera la Busta di {sovrapposizione} giorni. "
+                        f"Questo accade perché i **{final_omesse} giorni di 'Omesse'** (Vxx nel cartellino) sono inclusi sia nei 'Lavorati' che nelle 'Ferie Busta'. "
+                        f"Eliminando il doppio conteggio, i conti tornano ({tot_calcolato} - {sovrapposizione} = {gg_pagati_busta})."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ **DISCREPANZA (ECCESSO)**: Il cartellino indica {diff_gg} giorni IN PIÙ rispetto "
+                        f"ai {gg_pagati_busta} GG INPS della busta. "
+                        f"Verifica se 'Lavorati' ({c_lavorati}) e 'Ferie' ({gg_ferie_effettive}) si sovrappongono."
+                    )
             elif abs(diff_gg) == 1:
                 st.success(
                     f"✅ **DATI COERENTI** — Scostamento di 1 giorno (possibile arrotondamento): "
                     f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato}"
                 )
-            else:
+            else: # This 'else' now covers diff_gg < 0
                 st.error(
-                    f"❌ **DISCREPANZA**: {diff_gg:+.0f} giorni! "
+                    f"❌ **DISCREPANZA (DIFETTO)**: {diff_gg:+.0f} giorni! "
                     f"Busta: {gg_pagati_busta} GG INPS vs Calcolato: {tot_calcolato} "
                     f"(Lavorati {c_lavorati} + Ferie {gg_ferie_effettive} + Malattia {gg_malattia} + Fest {c_festivita})"
                 )
 
-                # Suggerimento Omesse solo se pertinente
+                # Suggerimento Omesse (Difetto)
                 mancanti = abs(diff_gg)
-                if diff_gg < 0 and final_omesse >= mancanti:
+                if final_omesse >= mancanti:
                      st.info(
                         f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate in Agenda. "
-                        "Poiché le omesse sono giorni lavorati, i conti tornano (24 GG INPS = 22 Calcolati + 2 Omesse)."
+                        "Poiché le omesse sono giorni lavorati, i conti tornano."
                     )
         else:
             st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
