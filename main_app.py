@@ -349,7 +349,7 @@ def parse_cartellino_dettagliato(path):
       - Codici che iniziano con 'V' (V70, V50, V29, V01, ecc.)
       - Righe con orari di timbratura (es. 08:30 13:00)
       - Righe "ORD" o "STR"
-      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD/RCS/RIC/RPS/REC (Riposi) SENZA timbrature.
+      - NON contare righe che hanno SOLO codici di assenza come F70 (Festività), FER (Ferie), MAL (Malattia), RCO/RDD (Riposo) SENZA timbrature.
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
@@ -357,7 +357,6 @@ def parse_cartellino_dettagliato(path):
     - **FERIE**: Righe con FER, FE, FEP.
     - **PERMESSI**: Righe con PAR, PER, ROL.
     - **MALATTIA**: Righe con MAL.
-    - **RIPOSI (Domeniche + compensativi)**: conta 1 per ogni giorno con SOLO codice riposo SENZA timbrature; includi RDD, RCO (riposo settimanale) e anche RCS, RIC, RPS, REC (riposi compensativi).
     - **OMESSE TIMBRATURE**: Conta SOLO se trovi esplicitamente scritto "OMESSA", "ANOMALIA", "MANCATA TIMBRATURA". NON contare righe Vxx senza orario come omesse (possono essere giustificativi manuali).
 
     Output JSON:
@@ -397,16 +396,6 @@ def parse_cartellino_dettagliato(path):
         result["giorni_lavorati"] = result["giorni_footer"]
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
-
-    # Normalizza riposi (domeniche + compensativi).
-    # Nota: i codici tipici sono RDD/RCO (settimanali) e RCS/RIC/RPS/REC (compensativi).
-    try:
-        r = result.get("riposi", 0)
-        if isinstance(r, str):
-            r = r.replace(',', '.').strip()
-        result["riposi"] = int(round(float(r))) if r is not None else 0
-    except Exception:
-        result["riposi"] = 0
         
     return result
 
@@ -1668,11 +1657,11 @@ if "res" in st.session_state:
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
-        # Converti ore in giorni (ore totali / 7 per ottenere giorni)
+        # Converti ore in giorni (ore totali / 8 per ottenere giorni)
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round(ore_assenze_busta / 8) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / 8) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / 8) if ore_permessi_busta > 0 else 0
+        gg_assenze_busta = round(ore_assenze_busta / 7) if ore_assenze_busta > 0 else 0
+        gg_malattia = round(ore_malattia_busta / 7) if ore_malattia_busta > 0 else c_malattia
+        gg_permessi = round(ore_permessi_busta / 7) if ore_permessi_busta > 0 else 0
 
         # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
@@ -1898,10 +1887,10 @@ if "res" in st.session_state:
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
             
-            # Label dinamico
-            if use_agenda:
+            # Label dinamico (basato sulla fonte ferie)
+            if use_source_ferie == "Agenda":
                 label_ferie_tab = "🏖️ Ferie (Agenda)"
-            elif use_cartellino:
+            elif use_source_ferie == "Cartellino":
                 label_ferie_tab = "🏖️ Ferie (Cartellino)"
             else:
                 label_ferie_tab = "🏖️ Ferie (Busta)"
