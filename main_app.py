@@ -1608,10 +1608,10 @@ def cleanup_files(*paths):
 # Header (logo + title)
 LOGO_PATH = "assets/logo.jpg"
 
-h1, h2 = st.columns([0.22, 0.78])
+h1, h2 = st.columns([1, 8])
 with h1:
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=80)
+        st.image(LOGO_PATH, width=90)
 with h2:
     st.markdown("<h1 style='margin-bottom:0.2rem'>Gottardo Payroll Analyzer</h1>", unsafe_allow_html=True)
 
@@ -2032,5 +2032,6 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
