@@ -1807,33 +1807,54 @@ if "res" in st.session_state:
     # === TABS ===
     tab1, tab2, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
 
+    # Helper per formattazione sicura
+    def safe_float_val(val):
+        try:
+            if isinstance(val, str):
+                val = val.replace(",", ".").replace("€", "").strip()
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    # Sanitizza dati finanziari
+    netto = safe_float_val(dg.get("netto", 0))
+    lordo = safe_float_val(comp.get("lordo_totale", 0))
+    base = safe_float_val(comp.get("base", 0))
+    anzianita = safe_float_val(comp.get("anzianita", 0))
+    straordinari = safe_float_val(comp.get("straordinari", 0))
+    festivita_val = safe_float_val(comp.get("festivita", 0))
+    inps = safe_float_val(tratt.get("inps", 0))
+    irpef = safe_float_val(tratt.get("irpef_netta", 0))
+    addizionali = safe_float_val(tratt.get("addizionali", 0))
+
     with tab1:
         # Paga, Giorni e Ore in una riga
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("💵 NETTO", f"€ {dg.get('netto', 0):,.2f}")
-        k2.metric("📊 Lordo", f"€ {comp.get('lordo_totale', 0):,.2f}")
+        k1.metric("💵 NETTO", f"€ {netto:,.2f}")
+        k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
         k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
         k4.metric("⏱️ Ore Lavorate", dg.get("ore_ordinarie", 0))
+
 
         st.markdown("---")
 
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("➕ Competenze")
-            st.write(f"**Paga Base:** € {comp.get('base', 0):,.2f}")
-            if comp.get("anzianita", 0) > 0:
-                st.write(f"**Anzianità:** € {comp.get('anzianita', 0):,.2f}")
-            if comp.get("straordinari", 0) > 0:
-                st.write(f"**Straordinari:** € {comp.get('straordinari', 0):,.2f}")
-            if comp.get("festivita", 0) > 0:
-                st.write(f"**Festività:** € {comp.get('festivita', 0):,.2f}")
+            st.write(f"**Paga Base:** € {base:,.2f}")
+            if anzianita > 0:
+                st.write(f"**Anzianità:** € {anzianita:,.2f}")
+            if straordinari > 0:
+                st.write(f"**Straordinari:** € {straordinari:,.2f}")
+            if festivita_val > 0:
+                st.write(f"**Festività:** € {festivita_val:,.2f}")
 
         with c2:
             st.subheader("➖ Trattenute")
-            st.write(f"**INPS:** € {tratt.get('inps', 0):,.2f}")
-            st.write(f"**IRPEF:** € {tratt.get('irpef_netta', 0):,.2f}")
-            if tratt.get("addizionali", 0) > 0:
-                st.write(f"**Addizionali:** € {tratt.get('addizionali', 0):,.2f}")
+            st.write(f"**INPS:** € {inps:,.2f}")
+            st.write(f"**IRPEF:** € {irpef:,.2f}")
+            if addizionali > 0:
+                st.write(f"**Addizionali:** € {addizionali:,.2f}")
 
     with tab2:
         if c:
