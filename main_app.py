@@ -1213,7 +1213,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
 
         try:
             # === LOGIN ===
-                        st.toast("🔐 Login...", icon="🔐")
+            st.toast("🔐 Login...", icon="🔐")
             page.goto(
                 "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y",
                 wait_until="domcontentloaded",
@@ -2001,4 +2001,5 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
