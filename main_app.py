@@ -490,8 +490,7 @@ def event_days_in_month(ev, mese_num, anno):
 
     if end:
         b = end.date()
-        # Tratta end esclusivo SOLO se end aveva un orario esplicito.
-        # Se end è solo una data (YYYY-MM-DD), considerala inclusiva.
+        # End esclusivo SOLO se end aveva orario esplicito.
         try:
             if _has_explicit_time(end_raw) and end.time() == datetime.min.time() and end > start:
                 b = b - timedelta(days=1)
@@ -545,7 +544,7 @@ def event_inps_days_in_month(ev, mese_num, anno):
     days = 0
     cur = a
     while cur <= b:
-        if cur.weekday() != 6:  # 6 = Sunday
+        if cur.weekday() != 6:  # Sunday
             days += 1
         cur += timedelta(days=1)
     return days
@@ -1681,7 +1680,17 @@ def cleanup_files(*paths):
 # ==============================================================================
 # UI
 # ==============================================================================
-st.title("💶 Gottardo Payroll Analyzer")
+# ==============================================================================
+# HEADER (logo + titolo)
+# ==============================================================================
+LOGO_PATH = "assets/logo.jpg"
+
+h1, h2 = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
+with h1:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=100)
+with h2:
+    st.markdown("<h1 style='margin:0; padding:0'>💶 Gottardo Payroll Analyzer</h1>", unsafe_allow_html=True)
 
 # Credenziali
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
@@ -1808,35 +1817,31 @@ if "res" in st.session_state:
 
         # =====================================================================
         # DATI DALL'AGENDA
-        # - FERIE: giorni di calendario (può includere domeniche)
-        # - FERIE_INPS: giorni lavorativi INPS (domeniche escluse)
+        # - FERIE: giorni calendario (include domeniche)
+        # - FERIE_INPS: giorni INPS (domeniche escluse)
         # =====================================================================
         a_omesse = int(round(parse_number(a_evs.get("OMESSA TIMBRATURA", 0))))
         a_ferie_cal = parse_number(a_evs.get("FERIE", 0))
         a_ferie_inps = parse_number(a_evs.get("FERIE_INPS", 0))
         a_malattia = parse_number(a_evs.get("MALATTIA", 0))
         a_riposi = parse_number(a_evs.get("RIPOSO", 0))
+        a_riposi_inps = parse_number(a_evs.get("RIPOSO_INPS", 0))
 
         # =====================================================================
         # CONSOLIDAMENTO FERIE/PERMESSI
-        # Se i permessi sono usati come ferie, l'agenda (ferie pianificate) tende a combaciare con:
-        #   ferie_busta + permessi_busta   (in giorni/8)
-        # Il confronto va fatto su giorni INPS (no domeniche), quindi usiamo a_ferie_inps.
+        # Permessi usati come ferie => confronta Agenda (FERIE_INPS) con (Ferie+Permessi busta)
         # =====================================================================
         gg_ferie_equivalenti_busta = gg_ferie_busta + gg_permessi_busta
 
-        # Default: tieni separati
         use_source_ferie = "Busta"
         gg_ferie_effettive = gg_ferie_busta
         gg_permessi_effettivi = gg_permessi_busta
 
-        # Se agenda ferie INPS è coerente con ferie+permessi, allora permessi -> ferie
         if a_ferie_inps > 0 and gg_ferie_equivalenti_busta > 0 and abs(a_ferie_inps - gg_ferie_equivalenti_busta) <= 1.01:
             gg_ferie_effettive = gg_ferie_equivalenti_busta
             gg_permessi_effettivi = 0.0
             use_source_ferie = "Busta (Ferie+Permessi)"
 
-        # Malattia: busta > cartellino > agenda
         gg_malattia = gg_malattia_busta if gg_malattia_busta > 0 else (
             parse_number(c_malattia) if parse_number(c_malattia) > 0 else a_malattia
         )
@@ -1894,7 +1899,7 @@ if "res" in st.session_state:
             st.caption(
                 f"📋 Dettaglio Busta: {ore_ferie_busta:.2f}h ferie ({gg_ferie_busta:.2f} gg) + "
                 f"{ore_permessi_busta:.2f}h permessi ({gg_permessi_busta:.2f} gg) + "
-                f"{ore_malattia_busta:.2f}h malattia ({gg_malattia_busta:.2f} gg) ⇒ Ferie equivalenti: {gg_ferie_equivalenti_busta:.2f} gg. Agenda ferie: {a_ferie_cal:.0f} gg (calendario), {a_ferie_inps:.0f} gg (INPS)."
+                f"{ore_malattia_busta:.2f}h malattia ({gg_malattia_busta:.2f} gg) ⇒ Ferie equivalenti: {gg_ferie_equivalenti_busta:.2f} gg. Agenda ferie: {a_ferie_cal:.0f} (cal), {a_ferie_inps:.0f} (INPS)."
             )
 
         st.markdown("---")
