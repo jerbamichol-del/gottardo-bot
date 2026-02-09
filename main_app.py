@@ -75,9 +75,6 @@ with c_logo:
 with c_title:
     st.markdown('<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>', unsafe_allow_html=True)
 
-st.title("💶 Analisi Stipendio & Presenze")
-
-
 # ==============================================================================
 # COSTANTI
 # ==============================================================================
@@ -915,4 +912,5 @@ if "res" in st.session_state:
         with f2:
             st.subheader("⏱️ PAR")
             st.write(par)
+
 
