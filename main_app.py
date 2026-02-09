@@ -13,986 +13,514 @@ import streamlit as st
 import google.generativeai as genai
 from playwright.sync_api import sync_playwright
 
-# --- OPTIONAL: DeepSeek + PDF extraction ---
+# --- OPTIONAL: DeepSeek ---
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-try:
-    import fitz  # PyMuPDF
-except Exception:
-    fitz = None
-
-try:
-    from pypdf import PdfReader
-except Exception:
-    PdfReader = None
-
-
-# ==============================================================================
-# CONFIG
-# ==============================================================================
+# --- CONFIG ---
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 
 @st.cache_resource
-def ensure_playwright_installed():
+def ensure_playwright():
     try:
         subprocess.run(["playwright", "install", "chromium"], check=False)
-    except Exception:
+    except:
         pass
     return True
 
-ensure_playwright_installed()
+ensure_playwright()
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 try:
     locale.setlocale(locale.LC_TIME, "it_IT.UTF-8")
-except Exception:
+except:
     pass
 
-
-# ==============================================================================
-# HEADER (LOGO + TITOLO)
-# ==============================================================================
+# --- HEADER LOGO ---
 LOGOPATH = Path(__file__).resolve().parent / "assets" / "logo.jpg"
 c_logo, c_title = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
-
 with c_logo:
     if LOGOPATH.exists():
         st.image(str(LOGOPATH), width=100)
-
 with c_title:
-    st.markdown(
-        '<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>', unsafe_allow_html=True)
 
 st.title("💶 Analisi Stipendio & Presenze")
 
-
-# ==============================================================================
-# COSTANTI
-# ==============================================================================
-BASE_HOME = "https://selfservice.gottardospa.it/js_rev/JSipert2"
-BASE_LOGIN = f"{BASE_HOME}?r=y"
-
-MESI_IT = [
-    "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
-    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre",
-]
-
+# --- CONST ---
+MESI_IT = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", 
+           "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+ORE_PER_GIORNO = 7.0
 CALENDAR_CODES = {
-    "FEP": "FERIE PIANIFICATE",
-    "OMT": "OMESSA TIMBRATURA",
-    "RCS": "RIPOSO COMPENSATIVO SUCC",
-    "RIC": "RIPOSO COMPENSATIVO FORZ",
-    "MAL": "MALATTIA",
+    "FEP": "FERIE PIANIFICATE", "OMT": "OMESSA TIMBRATURA",
+    "RCS": "RIPOSO COMPENSATIVO SUCC", "RIC": "RIPOSO COMPENSATIVO FORZ", "MAL": "MALATTIA"
 }
 
-ORE_PER_GIORNO = 7.0
-
-
-# ==============================================================================
-# HELPERS
-# ==============================================================================
-def safe_float(val) -> float:
+# --- HELPERS ---
+def safe_float(val):
     try:
-        if isinstance(val, str):
-            val = val.replace("€", "").replace(",", ".").strip()
-        return float(val)
-    except (ValueError, TypeError):
+        return float(str(val).replace("€","").replace(",",".").strip())
+    except:
         return 0.0
 
-
-def safe_int(val) -> int:
+def safe_int(val):
     try:
-        if isinstance(val, str):
-            val = val.strip().replace(",", ".")
-        return int(float(val))
-    except (ValueError, TypeError):
+        return int(float(str(val).replace(",",".").strip()))
+    except:
         return 0
 
-
-def clean_json_response(text: str):
+def clean_json(text):
     try:
-        if not text:
-            return None
+        if not text: return None
         text = re.sub(r"```json|```", "", text).strip()
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        payload = text[start:end] if start != -1 else text
-        return json.loads(payload)
-    except Exception:
+        s, e = text.find("{"), text.rfind("}") + 1
+        return json.loads(text[s:e]) if s != -1 else json.loads(text)
+    except:
         return None
 
-
-def extract_text_from_pdf(file_path: str):
-    if not file_path or not os.path.exists(file_path):
-        return None
-
-    if fitz:
-        try:
-            doc = fitz.open(file_path)
-            text = "\n".join([p.get_text() for p in doc])
-            if text.strip():
-                return text.strip()
-        except Exception:
-            pass
-
-    if PdfReader:
-        try:
-            reader = PdfReader(file_path)
-            text = "\n".join([p.extract_text() or "" for p in reader.pages])
-            if text.strip():
-                return text.strip()
-        except Exception:
-            pass
-
+def extract_text(path):
+    if not path or not os.path.exists(path): return None
+    try:
+        import fitz
+        with fitz.open(path) as doc:
+            return "\n".join([p.get_text() for p in doc]).strip()
+    except:
+        pass
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        return "\n".join([p.extract_text() or "" for p in reader.pages]).strip()
+    except:
+        pass
     return None
 
-
-def wait_portal_ready(page, timeout_ms: int = 60000) -> bool:
-    """
-    Attende che la SPA monti la navbar (anche se l'URL è /js_rev/index.html).
-    Condizione: esiste l'ID del menu Time o compare testo Time / I miei dati.
-    """
-    deadline = time.time() + (timeout_ms / 1000.0)
-
-    while time.time() < deadline:
-        try:
-            if page.locator("#revit_navigation_NavHoverItem_2_label").count() > 0:
-                try:
-                    if page.locator("#revit_navigation_NavHoverItem_2_label").first.is_visible(timeout=500):
-                        return True
-                except Exception:
-                    return True
-
-            if page.locator("text=Time").count() > 0:
-                return True
-            if page.locator("text=I miei dati").count() > 0:
-                return True
-            if page.locator("#ParametriLogin").count() > 0:
-                # siamo tornati al login: non è "ready" per il cartellino
-                return False
-        except Exception:
-            pass
-
-        time.sleep(0.5)
-
-    return False
-
-
-def safe_go_home(page):
-    """
-    Torna in home come nel tuo codice:
-    - prima prova click logo
-    - se non riesce, goto JSipert2
-    - poi aspetta che la navbar sia pronta
-    """
-    try:
-        logo = page.locator("img[src*='logo'], .logo").first
-        if logo.is_visible(timeout=2000):
-            logo.click()
-            time.sleep(2)
-        else:
-            raise Exception("logo non visibile")
-    except Exception:
-        page.goto(BASE_HOME, wait_until="domcontentloaded")
-        time.sleep(2)
-
-    try:
-        page.wait_for_load_state("networkidle", timeout=15000)
-    except Exception:
-        pass
-
-    # Se la SPA è lenta (e ti manda a index.html), aspetta davvero.
-    if not wait_portal_ready(page, timeout_ms=60000):
-        # Prova un secondo giro "pulito"
-        try:
-            page.goto(BASE_HOME, wait_until="domcontentloaded")
-            time.sleep(2)
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except Exception:
-            pass
-
-        if not wait_portal_ready(page, timeout_ms=60000):
-            raise Exception(f"Navbar non pronta dopo goto home (URL: {page.url})")
-
-
-# ==============================================================================
-# AI SETUP
-# ==============================================================================
-def get_api_keys():
-    google_key = st.secrets.get("GOOGLE_API_KEY")
-    deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
-    return google_key, deepseek_key
-
+def get_keys():
+    return st.secrets.get("GOOGLE_API_KEY"), st.secrets.get("DEEPSEEK_API_KEY")
 
 @st.cache_resource
-def init_gemini_models():
-    google_key, _ = get_api_keys()
-    if not google_key:
-        return []
-
-    genai.configure(api_key=google_key)
-
+def init_models():
+    k, _ = get_keys()
+    if not k: return []
+    genai.configure(api_key=k)
     try:
-        all_models = genai.list_models()
-        valid = [m for m in all_models if "generateContent" in m.supported_generation_methods]
-        models = []
-
-        for m in valid:
-            name = m.name.replace("models/", "")
-            if "gemini" in name.lower() and "embedding" not in name.lower():
-                try:
-                    models.append((name, genai.GenerativeModel(name)))
-                except Exception:
-                    continue
-
-        def prio(n: str) -> int:
-            n = n.lower()
-            if "flash" in n and "lite" not in n:
-                return 0
-            if "lite" in n:
-                return 1
-            if "pro" in n:
-                return 2
-            return 3
-
-        models.sort(key=lambda x: prio(x[0]))
-        return models
-    except Exception as e:
-        st.warning(f"Errore init modelli: {e}")
+        ms = []
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                n = m.name.replace("models/", "")
+                if "gemini" in n.lower() and "embedding" not in n.lower():
+                    ms.append((n, genai.GenerativeModel(n)))
+        ms.sort(key=lambda x: 0 if "flash" in x[0] else (1 if "lite" in x[0] else 2))
+        return ms
+    except:
         return []
 
+def analyze_ai(path, prompt, tipo="doc"):
+    if not path: return None
+    models = init_models()
+    _, dsk = get_keys()
+    
+    with open(path, "rb") as f: 
+        b = f.read()
+    if b[:4] != b"%PDF": return None
 
-def analyze_with_fallback(file_path, prompt, tipo="documento"):
-    if not file_path or not os.path.exists(file_path):
-        return None
+    prog = st.empty()
+    last_err = None
 
-    with open(file_path, "rb") as f:
-        pdf_bytes = f.read()
-
-    if pdf_bytes[:4] != b"%PDF":
-        st.error(f"❌ {tipo} non è un PDF valido")
-        return None
-
-    models = init_gemini_models()
-    _, deepseek_key = get_api_keys()
-
-    progress = st.empty()
-    last_error = None
-
-    for idx, (name, model) in enumerate(models, 1):
+    for i, (name, model) in enumerate(models):
         try:
-            progress.info(f"🔄 {tipo}: modello {idx}/{len(models)} ({name})...")
-            resp = model.generate_content([prompt, {"mime_type": "application/pdf", "data": pdf_bytes}])
-            result = clean_json_response(getattr(resp, "text", ""))
-            if result and isinstance(result, dict):
-                progress.success(f"✅ {tipo} analizzato!")
-                time.sleep(0.25)
-                progress.empty()
-                return result
+            prog.info(f"🔄 {tipo}: {name}...")
+            res = model.generate_content([prompt, {"mime_type": "application/pdf", "data": b}])
+            j = clean_json(res.text)
+            if j:
+                prog.success(f"✅ {tipo} analizzato!")
+                time.sleep(0.3)
+                prog.empty()
+                return j
         except Exception as e:
-            last_error = e
-
-    if deepseek_key and OpenAI:
+            last_err = e
+    
+    if dsk and OpenAI:
         try:
-            progress.warning(f"⚠️ Gemini esaurito. Fallback DeepSeek per {tipo}...")
-            text = extract_text_from_pdf(file_path)
-            if not text or len(text) < 50:
-                progress.error("❌ PDF non leggibile per DeepSeek")
-                return None
-
-            client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
-            full_prompt = prompt + "\n\n--- TESTO PDF ---\n" + text[:25000]
-
-            resp = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": "Rispondi solo JSON valido."},
-                    {"role": "user", "content": full_prompt},
-                ],
-                temperature=0.1,
-            )
-            result = clean_json_response(resp.choices[0].message.content)
-            if result:
-                progress.success(f"✅ {tipo} analizzato (DeepSeek)!")
-                time.sleep(0.25)
-                progress.empty()
-                return result
+            prog.warning(f"⚠️ Fallback DeepSeek per {tipo}...")
+            txt = extract_text(path)
+            if txt and len(txt) > 50:
+                client = OpenAI(api_key=dsk, base_url="https://api.deepseek.com")
+                r = client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role":"system","content":"JSON only"},{"role":"user","content":prompt+"\n\nTEXT:\n"+txt[:25000]}],
+                    temperature=0.1
+                )
+                j = clean_json(r.choices[0].message.content)
+                if j:
+                    prog.success("✅ DeepSeek OK")
+                    time.sleep(0.3)
+                    prog.empty()
+                    return j
         except Exception as e:
-            last_error = e
+            last_err = e
 
-    progress.error(f"❌ Analisi {tipo} fallita")
-    if last_error:
-        with st.expander("🔎 Errore"):
-            st.code(str(last_error)[:800])
+    prog.error(f"❌ Errore {tipo}")
     return None
 
+# --- PARSERS ---
+def parse_busta(path):
+    p = """ESTRAI DATI CEDOLINO GOTTARDO SPA:
+    1. DATI GENERALI: NETTO (Progressivi), GIORNI PAGATI (GG. INPS), ORE ORDINARIE (Ore Inail/x8)
+    2. COMPETENZE: BASE (v.1000), STRAORDINARI (somma), FESTIVITA, ANZIANITA, LORDO TOTALE
+    3. TRATTENUTE: INPS, IRPEF NETTA, ADDIZIONALI
+    4. FERIE/PAR (tabella alto dx): RES.PREC, SPETTANTI, FRUITE, SALDO
+    5. ASSENZE MESE (colonna centrale): ORE FERIE (v.4521), ORE PERMESSI (v.4529), ORE MALATTIA
+    6. TREDICESIMA: true se presente voce 13MA
+    Output JSON esatto."""
+    
+    def_val = {"e_tredicesima":False, "dati_generali":{}, "competenze":{}, "trattenute":{}, "ferie":{}, "par":{}, "assenze_mese":{}}
+    return analyze_ai(path, p, "Busta") or def_val
 
-# ==============================================================================
-# PARSERS
-# ==============================================================================
-def parse_busta_dettagliata(path):
-    prompt = """
-Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
+def parse_cart(path):
+    p = """ANALIZZA CARTELLINO PRESENZE GOTTARDO SPA:
+    1. FOOTER: GG PRESENZA (giorni_footer), ORE LAVORATE
+    2. CONTA RIGHE (giorni_righe): Conta righe con timbrature o codici Vxx/ORD/STR. Ignora righe solo assenza.
+    3. ASSENZE: FERIE (FER/FEP), MALATTIA (MAL), PERMESSI (PAR/ROL), RIPOSI (RCS/RIC), FESTIVITA (F70/FST)
+    4. OMESSE: Solo se scritto OMESSA/ANOMALIA.
+    Output JSON."""
+    
+    res = analyze_ai(path, p, "Cartellino")
+    if not res: return {}
+    
+    # Normalizza lavorati
+    gf = safe_int(res.get("giorni_footer", 0))
+    gr = safe_int(res.get("giorni_righe", 0))
+    res["giorni_lavorati"] = gf if gf > 0 else gr
+    return res
 
-1) DATI GENERALI:
-- NETTO: riga "PROGRESSIVI" colonna finale
-- GIORNI PAGATI: riga "GG. INPS"
-- ORE ORDINARIE: "ORE INAIL" o giorni×8
-
-2) COMPETENZE:
-- base: "RETRIBUZIONE ORDINARIA" o "PAGA BASE" (voce 1000) -> colonna Competenze
-- straordinari: somma STRAORDINARIO/SUPPLEMENTARI/NOTTURNI
-- festivita: MAGG. FESTIVE/FESTIVITA GODUTA
-- anzianita: SCATTI/EDR/ANZ.
-- lordo_totale: "TOTALE COMPETENZE"
-
-3) TRATTENUTE:
-- inps: sezione I.N.P.S.
-- irpef_netta: sezione FISCALI
-- addizionali: add.reg + add.com
-
-4) FERIE/PAR (tabella in alto a destra):
-- RES.PREC / SPETTANTI / FRUITE / SALDO
-
-5) ASSENZE DEL MESE:
-- ore_ferie: "FERIE GODUTE" (spesso 4521) -> colonna ORE
-- ore_permessi: "PERMESSI GODUTI"/"ROL GODUTI" (spesso 4529) -> colonna ORE
-- ore_malattia: righe "MALATTIA" -> colonna ORE
-
-6) TREDICESIMA:
-- e_tredicesima=true se trovi "TREDICESIMA"/"13MA"
-
-Output SOLO JSON:
-{
-  "e_tredicesima": false,
-  "dati_generali": {"netto": 0.00, "giorni_pagati": 0, "ore_ordinarie": 0.00},
-  "competenze": {"base": 0.00, "anzianita": 0.00, "straordinari": 0.00, "festivita": 0.00, "lordo_totale": 0.00},
-  "trattenute": {"inps": 0.00, "irpef_netta": 0.00, "addizionali": 0.00},
-  "ferie": {"residue_ap": 0.00, "maturate": 0.00, "godute": 0.00, "saldo": 0.00},
-  "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00},
-  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "ore_malattia": 0.00}
-}
-""".strip()
-
-    result = analyze_with_fallback(path, prompt, "Busta Paga")
-    if not result:
-        return {
-            "e_tredicesima": False,
-            "dati_generali": {"netto": 0, "giorni_pagati": 0, "ore_ordinarie": 0},
-            "competenze": {"base": 0, "anzianita": 0, "straordinari": 0, "festivita": 0, "lordo_totale": 0},
-            "trattenute": {"inps": 0, "irpef_netta": 0, "addizionali": 0},
-            "ferie": {"residue_ap": 0, "maturate": 0, "godute": 0, "saldo": 0},
-            "par": {"residue_ap": 0, "spettanti": 0, "fruite": 0, "saldo": 0},
-            "assenze_mese": {"ore_ferie": 0, "ore_permessi": 0, "ore_malattia": 0},
-        }
-    return result
-
-
-def parse_cartellino_dettagliato(path):
-    prompt = """
-Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
-
-1) DATI DAL FOOTER (UFFICIALI):
-- "GG PRESENZA" o codice 0265 -> giorni_footer
-- "ORE LAVORATE" o codice 0253 -> ore_lavorate
-
-2) CONTEGGIO RIGHE (VERIFICA):
-Conta righe di presenza/lavoro:
-- Codici che iniziano con 'V'
-- Righe con orari timbratura
-- Righe "ORD" o "STR"
-NON contare righe che hanno SOLO assenze senza timbrature.
--> giorni_righe
-
-3) ALTRI CODICI:
-- festivita: F70/FST/FES
-- ferie: FER/FE/FEP
-- permessi: PAR/PER/ROL
-- malattia: MAL
-- omesse_timbrature: SOLO se scritto OMESSA/ANOMALIA/MANCATA TIMBRATURA
-
-Output JSON:
-{
-  "giorni_lavorati": 0,
-  "giorni_footer": 0,
-  "giorni_righe": 0,
-  "ore_lavorate": 0.00,
-  "ferie": 0,
-  "malattia": 0,
-  "permessi": 0,
-  "riposi": 0,
-  "omesse_timbrature": 0,
-  "festivita": 0,
-  "note": ""
-}
-""".strip()
-
-    result = analyze_with_fallback(path, prompt, "Cartellino")
-    if not result:
-        return {
-            "giorni_lavorati": 0, "giorni_footer": 0, "giorni_righe": 0, "ore_lavorate": 0,
-            "ferie": 0, "malattia": 0, "permessi": 0, "riposi": 0, "omesse_timbrature": 0,
-            "festivita": 0, "note": ""
-        }
-
-    if safe_int(result.get("giorni_footer", 0)) > 0:
-        result["giorni_lavorati"] = safe_int(result.get("giorni_footer", 0))
-    elif safe_int(result.get("giorni_righe", 0)) > 0:
-        result["giorni_lavorati"] = safe_int(result.get("giorni_righe", 0))
-    return result
-
-
-# ==============================================================================
-# AGENDA (API semplice)
-# ==============================================================================
-def read_agenda_api(context, mese_num, anno):
-    result = {"events_by_type": {}, "total_events": 0, "success": False}
-
-    code_to_norm = {"FEP": "FERIE", "OMT": "OMESSA TIMBRATURA", "RCS": "RIPOSO", "RIC": "RIPOSO", "MAL": "MALATTIA"}
-
-    for code in CALENDAR_CODES.keys():
+# --- AGENDA API ---
+def read_agenda(ctx, m_num, anno):
+    base = "https://selfservice.gottardospa.it/js_rev/JSipert2"
+    res = {"events_by_type":{}, "total_events":0, "success":False}
+    norm = {"FEP":"FERIE","OMT":"OMESSA TIMBRATURA","RCS":"RIPOSO","RIC":"RIPOSO","MAL":"MALATTIA"}
+    
+    for c, name in CALENDAR_CODES.items():
         try:
-            url = f"{BASE_HOME}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
-            resp = context.request.get(url, timeout=10000)
-            if not resp.ok:
-                continue
-            data = resp.json()
-            events = data if isinstance(data, list) else [data]
+            u = f"{base}/api/time/v2/events?$filter_api=calendarCode={c},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
+            r = ctx.request.get(u, timeout=10000)
+            if r.ok:
+                evs = r.json()
+                if not isinstance(evs, list): evs = [evs]
+                cnt = 0
+                for e in evs:
+                    s = e.get("startTime","") or e.get("start","")
+                    if len(s)>=7 and int(s[5:7]) == m_num: cnt += 1
+                if cnt:
+                    k = norm.get(c, c)
+                    res["events_by_type"][k] = res["events_by_type"].get(k, 0) + cnt
+                    res["total_events"] += cnt
+        except: pass
+    
+    if res["total_events"] > 0: res["success"] = True
+    return res
 
-            month_events = 0
-            for ev in events:
-                start = ev.get("startTime", "") or ev.get("start", "")
-                if start and len(start) >= 7:
-                    try:
-                        if int(start[5:7]) == mese_num:
-                            month_events += 1
-                    except Exception:
-                        pass
-
-            if month_events:
-                k = code_to_norm.get(code, code)
-                result["events_by_type"][k] = result["events_by_type"].get(k, 0) + month_events
-                result["total_events"] += month_events
-        except Exception:
-            pass
-
-    if result["total_events"] > 0:
-        result["success"] = True
-
-    return result
-
-
-# ==============================================================================
-# DOWNLOAD
-# ==============================================================================
-def execute_download(mese_nome, anno, user, pwd, is_13ma):
-    results = {"busta": None, "cart": None, "agenda": None, "login_ok": None, "login_error": None}
-
-    try:
-        mese_num = MESI_IT.index(mese_nome) + 1
-    except Exception:
-        return results
-
-    anno = safe_int(anno)
-    suffix = "_13" if is_13ma else ""
-    local_busta = os.path.abspath(f"busta_{mese_num}_{anno}{suffix}.pdf")
-    local_cart = os.path.abspath(f"cartellino_{mese_num}_{anno}.pdf")
-
+# --- EXECUTE ---
+def execute(mnome, anno, user, pwd, is13):
+    res = {"busta":None,"cart":None,"agenda":None,"login_ok":None}
+    mnum = MESI_IT.index(mnome)+1
+    anno = int(anno)
+    suff = "_13" if is13 else ""
+    lbusta = os.path.abspath(f"busta_{mnum}_{anno}{suff}.pdf")
+    lcart = os.path.abspath(f"cartellino_{mnum}_{anno}.pdf")
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
         ctx = browser.new_context(accept_downloads=True, user_agent="Mozilla/5.0 Chrome/120.0.0.0")
-        ctx.set_default_timeout(45000)
-
         page = ctx.new_page()
-        page.set_viewport_size({"width": 1920, "height": 1080})
-
+        page.set_viewport_size({"width":1920,"height":1080})
+        
         try:
-            # LOGIN
+            # 1. LOGIN
             st.toast("🔐 Login...", icon="🔐")
-            page.goto(BASE_LOGIN, wait_until="domcontentloaded")
+            page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2?r=y", wait_until="domcontentloaded")
             page.wait_for_selector("#ParametriLogin input[name='username']", timeout=20000)
-
             page.locator("#ParametriLogin input[name='username']").first.fill(user)
-            pin = page.locator("#ParametriLogin input[name='password']").first
-            pin.fill(pwd)
-
-            submitted = False
+            page.locator("#ParametriLogin input[name='password']").first.fill(pwd)
+            
             try:
                 btn = page.get_by_role("button", name="Accedi")
-                if btn.count() > 0 and btn.first.is_visible():
-                    btn.first.click()
-                    submitted = True
-            except Exception:
-                pass
-
-            if not submitted:
-                try:
-                    pin.press("Enter")
-                except Exception:
-                    pass
-
+                if btn.count() > 0 and btn.first.is_visible(): btn.first.click()
+                else: page.locator("#ParametriLogin input[name='password']").first.press("Enter")
+            except: pass
+            
+            try: page.wait_for_load_state("networkidle", timeout=25000)
+            except: time.sleep(3)
+            
+            # Check login
+            lok = False
+            for s in ["text=I miei dati", "text=Time", "#revit_navigation_NavHoverItem_0_label"]:
+                if page.locator(s).count() > 0: 
+                    lok = True
+                    break
+            if not lok:
+                res["login_ok"] = False
+                res["login_error"] = "Login fallito"
+                return res
+            res["login_ok"] = True
+            
+            # 2. AGENDA API
+            st.toast("🗓️ Agenda...", icon="🗓️")
+            res["agenda"] = read_agenda(ctx, mnum, anno)
+            
+            # 3. BUSTA
+            st.toast("💰 Busta...", icon="💰")
             try:
-                page.wait_for_load_state("networkidle", timeout=25000)
-            except Exception:
-                time.sleep(3)
-
-            login_ok = False
-            for sel in ["text=I miei dati", "text=Time", "text=Documenti", "#revit_navigation_NavHoverItem_0_label", "#revit_navigation_NavHoverItem_2_label"]:
-                try:
-                    if page.locator(sel).first.is_visible(timeout=5000):
-                        login_ok = True
-                        break
-                except Exception:
-                    continue
-
-            if not login_ok:
-                results["login_ok"] = False
-                results["login_error"] = "Login fallito: elementi post-login non trovati."
-                return results
-
-            results["login_ok"] = True
-
-            # AGENDA (API)
-            st.toast("🗓️ Agenda (API)...", icon="🗓️")
-            results["agenda"] = read_agenda_api(ctx, mese_num, anno)
-
-            # BUSTA
-            st.toast("💰 Scarico Busta...", icon="💰")
-            try:
-                try:
-                    page.keyboard.press("Escape")
-                    time.sleep(0.3)
-                except Exception:
-                    pass
-
-                try:
-                    page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
-                except Exception:
-                    page.locator("text=I miei dati").first.click(force=True)
+                try: page.keyboard.press("Escape"); time.sleep(0.3)
+                except: pass
+                
+                try: page.evaluate("document.getElementById('revit_navigation_NavHoverItem_0_label')?.click()")
+                except: page.locator("text=I miei dati").first.click(force=True)
                 time.sleep(2)
-
-                for jsid in ["lnktab_2_label", "lnktab_2"]:
-                    try:
-                        page.evaluate(f"document.getElementById('{jsid}')?.click()")
-                        break
-                    except Exception:
-                        continue
+                
+                # Tab Documenti
+                try: page.evaluate("document.getElementById('lnktab_2_label')?.click()")
+                except: pass
                 time.sleep(2)
-
-                try:
-                    page.wait_for_selector("text=Cedolino", timeout=10000)
-                except Exception:
-                    pass
-
-                try:
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=6000)
-                except Exception:
-                    page.locator("text=Cedolino").first.click(force=True)
+                
+                # Cedolino
+                try: page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                except: page.locator("text=Cedolino").first.click(force=True)
                 time.sleep(4)
-
-                with page.expect_download(timeout=25000) as dl_info:
-                    if is_13ma:
+                
+                with page.expect_download(timeout=25000) as dl:
+                    if is13:
                         page.get_by_text(re.compile(f"Tredicesima.*{anno}", re.I)).first.click()
                     else:
-                        links = page.locator("a")
-                        total = links.count()
                         found = False
-                        patterns = [f"{mese_nome} {anno}", f"{mese_num:02d}/{anno}", f"{mese_num:02d}-{anno}"]
-
-                        for i in range(total):
-                            try:
-                                txt = (links.nth(i).inner_text() or "").strip()
-                                if not txt or len(txt) < 4:
-                                    continue
-                                if "Tredicesima" in txt or "13" in txt:
-                                    continue
-                                if any(pat.lower() in txt.lower() for pat in patterns):
-                                    links.nth(i).click()
-                                    found = True
-                                    break
-                            except Exception:
-                                continue
-
+                        # Link intelligenti
+                        links = page.locator("a").all()
+                        pats = [f"{mnome} {anno}", f"{mnum:02d}/{anno}", f"{mnum:02d}-{anno}"]
+                        for l in links:
+                            txt = l.inner_text().strip()
+                            if len(txt) < 4 or "13" in txt: continue
+                            if any(x.lower() in txt.lower() for x in pats):
+                                l.click()
+                                found = True
+                                break
                         if not found:
-                            for i in range(total):
-                                try:
-                                    txt = links.nth(i).inner_text() or ""
-                                    if mese_nome.lower() in txt.lower() and str(anno) in txt and "Tredicesima" not in txt:
-                                        links.nth(i).click()
-                                        found = True
-                                        break
-                                except Exception:
-                                    continue
-
-                        if not found:
-                            raise Exception("Link busta non trovato")
-
-                dl_info.value.save_as(local_busta)
-                if os.path.exists(local_busta) and os.path.getsize(local_busta) > 1000:
-                    results["busta"] = local_busta
-                    st.toast(f"✅ Busta: {os.path.getsize(local_busta):,} bytes", icon="📄")
-
+                             # Fallback: cerca mese e anno nel testo
+                             for l in links:
+                                 txt = l.inner_text().strip()
+                                 if mnome.lower() in txt.lower() and str(anno) in txt and "13" not in txt:
+                                     l.click()
+                                     found = True
+                                     break
+                        if not found: raise Exception("Link non trovato")
+                
+                dl.value.save_as(lbusta)
+                if os.path.exists(lbusta): 
+                    res["busta"] = lbusta
+                    st.toast("✅ Busta OK")
             except Exception as e:
-                st.warning(f"⚠️ Busta: {e}")
+                st.warning(f"Busta: {e}")
 
-            # CARTELLINO (ordine identico al tuo funzionante + wait navbar)
-            if not is_13ma:
-                st.toast("📅 Scarico Cartellino...", icon="📅")
+            # 4. CARTELLINO (LOGICA RESTAURATA DAL CODICE FUNZIONANTE)
+            if not is13:
+                st.toast("📅 Cartellino...", icon="📅")
                 try:
+                    # 4a. Escape
+                    try: page.keyboard.press("Escape"); time.sleep(0.3)
+                    except: pass
+                    
+                    # 4b. Torna HOME (Logo o Goto diretto - SENZA wait ossessivi)
                     try:
-                        page.keyboard.press("Escape")
-                        time.sleep(0.3)
-                    except Exception:
-                        pass
-
-                    # Torna home (logo/goto) e aspetta navbar
-                    safe_go_home(page)
-
-                    # Time menu (id -> testo) + attesa visibilità
+                        logo = page.locator("img[src*='logo'], .logo").first
+                        if logo.is_visible(timeout=2000):
+                            logo.click()
+                            time.sleep(2)
+                        else:
+                            raise Exception("no logo")
+                    except:
+                        page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
+                        time.sleep(3)
+                    
+                    # 4c. Click TIME (ID o Testo) - SENZA controlli URL
                     try:
                         page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-                    except Exception:
-                        pass
-
-                    # Se l'ID click non ha aperto, usa testo (ma aspetta che esista)
-                    if page.locator("text=Time").count() > 0:
-                        try:
-                            page.locator("text=Time").first.click(force=True, timeout=15000)
-                        except Exception:
-                            pass
-
+                    except:
+                        page.locator("text=Time").first.click(force=True)
                     time.sleep(3)
-
-                    # Tab Cartellino presenze (id -> testo)
+                    
+                    # 4d. Tab Cartellino
                     try:
                         page.evaluate("document.getElementById('lnktab_5_label')?.click()")
-                    except Exception:
+                    except:
                         page.locator("text=Cartellino").first.click(force=True)
                     time.sleep(5)
-
-                    # Date (prima selettore originale, fallback più permissivo)
-                    last_day = calendar.monthrange(anno, mese_num)[1]
-                    d1, d2 = f"01/{mese_num:02d}/{anno}", f"{last_day}/{mese_num:02d}/{anno}"
-
-                    dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
-                    al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
-
-                    if dal.count() == 0:
-                        dal = page.locator("input#CLRICHIE, input[id='CLRICHIE'], input[id*='CLRICHIE']").first
-                    if al.count() == 0:
-                        al = page.locator("input#CLRICHI2, input[id='CLRICHI2'], input[id*='CLRICHI2']").first
-
-                    dal.wait_for(state="visible", timeout=30000)
-                    al.wait_for(state="visible", timeout=30000)
-
-                    dal.click(force=True)
-                    page.keyboard.press("Control+A")
-                    dal.fill("")
-                    dal.type(d1, delay=80)
-                    dal.press("Tab")
-                    time.sleep(0.6)
-
-                    al.click(force=True)
-                    page.keyboard.press("Control+A")
-                    al.fill("")
-                    al.type(d2, delay=80)
-                    al.press("Tab")
-                    time.sleep(0.6)
-
-                    # Ricerca
+                    
+                    # 4e. Date
+                    ld = calendar.monthrange(anno, mnum)[1]
+                    d1, d2 = f"01/{mnum:02d}/{anno}", f"{ld}/{mnum:02d}/{anno}"
+                    
+                    # Selettore robusto
+                    dal = page.locator("input[id*='CLRICHIE']").first
+                    al = page.locator("input[id*='CLRICHI2']").first
+                    
+                    if dal.count()>0:
+                        dal.click(force=True); page.keyboard.press("Control+A"); dal.type(d1, delay=50); dal.press("Tab"); time.sleep(0.5)
+                        al.click(force=True); page.keyboard.press("Control+A"); al.type(d2, delay=50); al.press("Tab"); time.sleep(0.5)
+                    
+                    # 4f. Ricerca
                     try:
                         page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
-                    except Exception:
+                    except:
                         page.get_by_role("button", name=re.compile("ricerca|esegui", re.I)).last.click()
                     time.sleep(8)
-
-                    # Icona PDF
-                    pattern_cart = f"{mese_num:02d}/{anno}"
-                    riga = page.locator(f"tr:has-text('{pattern_cart}')").first
-
-                    if riga.count() > 0 and riga.locator("img[src*='search']").count() > 0:
-                        icona = riga.locator("img[src*='search']").first
-                    else:
-                        icona = page.locator("img[src*='search']").first
-
-                    if icona.count() == 0:
-                        raise Exception("Icona PDF cartellino non trovata")
-
-                    # Popup + fetch PDF (fallback popup.pdf)
-                    with ctx.expect_page(timeout=20000) as popupinfo:
-                        icona.click()
-                    popup = popupinfo.value
-
+                    
+                    # 4g. Icona PDF
+                    pat = f"{mnum:02d}/{anno}"
+                    row = page.locator(f"tr:has-text('{pat}')").first
+                    icon = row.locator("img[src*='search']").first if row.count()>0 else page.locator("img[src*='search']").first
+                    
+                    if icon.count()==0: raise Exception("Icona PDF non trovata")
+                    
+                    # 4h. Popup & Download
+                    with ctx.expect_page(timeout=20000) as pinfo:
+                        icon.click()
+                    popup = pinfo.value
+                    
                     t0 = time.time()
-                    lasturl = popup.url
-                    while time.time() - t0 < 15:
-                        u = popup.url
-                        if u and u != "about:blank":
-                            lasturl = u
-                            if "SERVIZIO=JPSC" in u:
-                                break
-                        time.sleep(0.25)
-
-                    popupurl = lasturl.replace("/js_rev//", "/js_rev/")
-                    if "EMBED" not in popupurl:
-                        popupurl += "&EMBED=y"
-
-                    body = b""
-                    try:
-                        resp = ctx.request.get(popupurl, timeout=60000)
-                        body = resp.body()
-                    except Exception:
-                        body = b""
-
-                    if body[:4] == b"%PDF":
-                        with open(local_cart, "wb") as f:
-                            f.write(body)
-                        if os.path.exists(local_cart) and os.path.getsize(local_cart) > 1000:
-                            results["cart"] = local_cart
-                            st.toast(f"✅ Cartellino: {os.path.getsize(local_cart):,} bytes", icon="📄")
+                    u_pdf = ""
+                    while time.time()-t0 < 15:
+                        if "SERVIZIO=JPSC" in popup.url: 
+                            u_pdf = popup.url.replace("/js_rev//", "/js_rev/") + ("&EMBED=y" if "EMBED" not in popup.url else "")
+                            break
+                        time.sleep(0.2)
+                    
+                    if u_pdf:
+                        body = ctx.request.get(u_pdf, timeout=60000).body()
+                        with open(lcart, "wb") as f: f.write(body)
+                        res["cart"] = lcart
+                        st.toast("✅ Cartellino OK")
                     else:
-                        try:
-                            popup.pdf(path=local_cart, format="A4")
-                            if os.path.exists(local_cart) and os.path.getsize(local_cart) > 5000:
-                                results["cart"] = local_cart
-                                st.toast(f"✅ Cartellino: {os.path.getsize(local_cart):,} bytes", icon="📄")
-                        except Exception:
-                            pass
+                        # Fallback
+                        popup.pdf(path=lcart, format="A4")
+                        if os.path.exists(lcart): res["cart"] = lcart
 
-                    try:
-                        popup.close()
-                    except Exception:
-                        pass
-
+                    try: popup.close()
+                    except: pass
+                    
                 except Exception as e:
+                    st.warning(f"Cartellino: {e}")
                     try:
-                        page.screenshot(path="debug_cartellino.png", full_page=True)
-                        with st.expander("🧩 Debug Cartellino (screenshot)"):
-                            st.image("debug_cartellino.png")
-                            st.caption(f"URL: {page.url}")
-                    except Exception:
-                        pass
-                    st.warning(f"⚠️ Cartellino: {e}")
+                        page.screenshot(path="debug_cartellino.png")
+                        with st.expander("Debug"): st.image("debug_cartellino.png")
+                    except: pass
 
         finally:
             browser.close()
+    return res
 
-    return results
+def cleanup(*files):
+    for f in files:
+        if f and os.path.exists(f): 
+            try: os.remove(f)
+            except: pass
 
-
-# ==============================================================================
-# PULIZIA FILE
-# ==============================================================================
-def cleanup_files(*paths):
-    deleted = []
-    for p in paths:
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-                deleted.append(os.path.basename(p))
-            except Exception:
-                pass
-    if deleted:
-        st.caption(f"🗑️ Eliminati: {', '.join(deleted)}")
-
-
-# ==============================================================================
-# UI LOGIN + RUN
-# ==============================================================================
+# --- UI ---
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
-pw = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
+p = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
 
-if not u or not pw:
-    c1, c2, c3 = st.columns([2, 2, 1])
-    u_in = c1.text_input("👤 Username")
-    p_in = c2.text_input("🔒 Password", type="password")
-    if c3.button("Login", type="primary"):
-        st.session_state["u"] = u_in
-        st.session_state["p"] = p_in
-        st.rerun()
+if not u or not p:
+    c1,c2,c3 = st.columns([2,2,1])
+    u_in = c1.text_input("User"); p_in = c2.text_input("Pass", type="password")
+    if c3.button("Login"): st.session_state.u=u_in; st.session_state.p=p_in; st.rerun()
 else:
-    col_u, col_m, col_a, col_btn, col_rst = st.columns([1, 1.5, 1, 1.5, 0.5])
-    col_u.markdown(f"**👤 {u}**")
-    m = col_m.selectbox("Mese", MESI_IT, index=9)
-    a = col_a.selectbox("Anno", [2024, 2025, 2026], index=1)
-
+    c1,c2,c3,c4,c5 = st.columns([1, 1.5, 1, 1.5, 0.5])
+    c1.markdown(f"**{u}**")
+    m = c2.selectbox("Mese", MESI_IT, index=9)
+    a = c3.selectbox("Anno", [2024,2025,2026], index=1)
+    
+    # Tipo (Cedolino/Tredicesima)
     tipo = "Cedolino"
-    if m == "Dicembre":
-        tipo = col_m.radio("Tipo", ["Cedolino", "Tredicesima"], horizontal=True)
+    if m == "Dicembre": tipo = c2.radio("Tipo", ["Cedolino", "Tredicesima"], horizontal=True)
+    is13 = (tipo == "Tredicesima")
 
-    if col_btn.button("🚀 ANALIZZA", type="primary"):
-        is_13 = (tipo == "Tredicesima")
-
-        with st.status("🔄 Elaborazione...", expanded=True):
-            paths = execute_download(m, a, u, pw, is_13)
-
-            if isinstance(paths, dict) and paths.get("login_ok") is False:
-                st.error(paths.get("login_error", "❌ Login fallito"))
-                st.stop()
-
-            st.write("🧠 Analisi AI...")
-            res_b = parse_busta_dettagliata(paths.get("busta"))
-            res_c = parse_cartellino_dettagliato(paths.get("cart")) if (not is_13 and paths.get("cart")) else {}
-
-            st.session_state["res"] = {
-                "busta": res_b,
-                "cart": res_c,
-                "agenda": paths.get("agenda", {}) or {},
-                "is_13": is_13,
-                "mese": m,
-                "anno": a,
-                "cart_download_ok": bool(paths.get("cart")),
+    if c4.button("🚀 ANALIZZA", type="primary"):
+        with st.status("Elaborazione...", expanded=True):
+            r = execute(m, a, u, p, is13)
+            if r.get("login_ok") is False:
+                st.error("Login KO"); st.stop()
+            
+            res_b = parse_busta(r["busta"])
+            res_c = parse_cart(r["cart"]) if r["cart"] else {}
+            st.session_state["data"] = {
+                "busta": res_b, "cart": res_c, "agenda": r["agenda"] or {},
+                "meta": {"m": m, "a": a, "is13": is13, "cart_ok": bool(r["cart"])}
             }
+            cleanup(r["busta"], r["cart"])
+            st.rerun()
 
-            cleanup_files(paths.get("busta"), paths.get("cart"))
+    if c5.button("🔄"): st.session_state.clear(); st.rerun()
 
-    if col_rst.button("🔄"):
-        st.session_state.clear()
-        st.rerun()
-
-
-# ==============================================================================
-# OUTPUT
-# ==============================================================================
-if "res" in st.session_state:
-    data = st.session_state["res"]
-    b = data.get("busta", {}) or {}
-    c = data.get("cart", {}) or {}
-    agenda = data.get("agenda", {}) or {}
-    is_13 = bool(data.get("is_13", False))
-
-    dg = b.get("dati_generali", {}) or {}
-    comp = b.get("competenze", {}) or {}
-    tratt = b.get("trattenute", {}) or {}
-    ferie = b.get("ferie", {}) or {}
-    par = b.get("par", {}) or {}
-
-    mese_nome = data.get("mese", "Ottobre")
-    mese_num = MESI_IT.index(mese_nome) + 1
-    anno = safe_int(data.get("anno", 2025))
-
-    a_evs = agenda.get("events_by_type", {}) if isinstance(agenda, dict) else {}
-    a_omesse = safe_int(a_evs.get("OMESSA TIMBRATURA", 0))
-    a_ferie = safe_int(a_evs.get("FERIE", 0))
-
-    tab1, tab2, tab3 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
-
-    gg_pagati_busta = safe_int(dg.get("giorni_pagati", 0))
-    assenze_busta = b.get("assenze_mese", {}) or {}
-    ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
-    ore_perm_busta = safe_float(assenze_busta.get("ore_permessi", 0))
-    ore_mal_busta = safe_float(assenze_busta.get("ore_malattia", 0))
-
-    ore_assenze_busta = ore_ferie_busta + ore_perm_busta
-    gg_assenze_busta = round(ore_assenze_busta / ORE_PER_GIORNO) if ore_assenze_busta > 0 else 0
-    gg_mal = round(ore_mal_busta / ORE_PER_GIORNO) if ore_mal_busta > 0 else safe_int(c.get("malattia", 0))
-
-    c_lavorati = safe_float(c.get("giorni_lavorati", 0))
-    cart_ok = bool(c) and c_lavorati > 0
-
-    if gg_assenze_busta > 0:
-        gg_ferie_eff = gg_assenze_busta
-        src_ferie = "Busta"
-    elif safe_int(c.get("ferie", 0)) > 0:
-        gg_ferie_eff = safe_int(c.get("ferie", 0))
-        src_ferie = "Cartellino"
-    else:
-        gg_ferie_eff = a_ferie
-        src_ferie = "Agenda"
-
+# --- DISPLAY ---
+if "data" in st.session_state:
+    d = st.session_state["data"]
+    b, c, ag = d["busta"], d["cart"], d["agenda"]
+    m, a = d["meta"]["m"], d["meta"]["a"]
+    
+    # Dati
+    dg = b.get("dati_generali", {})
+    comp = b.get("competenze", {})
+    tratt = b.get("trattenute", {})
+    
+    # Calcoli Verifica
+    gg_inps = safe_int(dg.get("giorni_pagati", 0))
+    c_lav = safe_float(c.get("giorni_lavorati", 0))
+    c_mal = safe_int(c.get("malattia", 0))
     c_fest = safe_int(c.get("festivita", 0))
-    c_riposi = safe_int(c.get("riposi", 0))
+    
+    # Ferie: Busta > Cart > Agenda
+    ass = b.get("assenze_mese", {})
+    h_fer = safe_float(ass.get("ore_ferie", 0)) + safe_float(ass.get("ore_permessi", 0))
+    gg_fer = round(h_fer/7.0) if h_fer>0 else (safe_int(c.get("ferie",0)) if c else safe_int(ag.get("events_by_type",{}).get("FERIE",0)))
+    src_fer = "Busta" if h_fer>0 else ("Cartellino" if c else "Agenda")
+    
+    tot = c_lav + gg_fer + c_mal + c_fest if d["meta"]["cart_ok"] else gg_fer + c_mal
+    diff = tot - gg_inps if d["meta"]["cart_ok"] else None
 
-    if cart_ok:
-        tot_calcolato = c_lavorati + gg_ferie_eff + gg_mal + c_fest
-        diff_gg = tot_calcolato - gg_pagati_busta
-    else:
-        tot_calcolato = gg_ferie_eff + gg_mal
-        diff_gg = None
+    # UI
+    st.divider()
+    st.subheader(f"📊 {m} {a}")
+    
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("GG INPS", gg_inps)
+    k2.metric("GG Calcolati", f"{tot:.0f}", delta=f"{diff:+.0f}" if diff is not None and diff!=0 else None)
+    k3.metric("Lavorati (C)", c_lav)
+    k4.metric("Omesse (A)", ag.get("events_by_type",{}).get("OMESSA TIMBRATURA",0))
+    
+    st.caption(f"Ferie usate: {gg_fer} ({src_fer}) | Malattia: {c_mal} | Fest: {c_fest}")
+    if not d["meta"]["cart_ok"] and not d["meta"]["is13"]: 
+        st.warning("Cartellino mancante -> Verifica parziale")
 
-    st.markdown("---")
-    st.subheader(f"📊 Verifica {mese_nome} {anno}")
-
-    v1, v2, v3, v4 = st.columns(4)
-    v1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-    v2.metric(
-        "📋 GG Calcolati" + ("" if cart_ok else " (parziale)"),
-        f"{tot_calcolato:.0f}",
-        delta=(f"{diff_gg:+.0f}" if cart_ok and diff_gg != 0 else None),
-    )
-    v3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-    v4.metric("⚠️ Omesse (Agenda)", a_omesse)
-
-    v5, v6, v7, v8 = st.columns(4)
-    v5.metric(f"🏖️ Ferie ({src_ferie})", gg_ferie_eff)
-    v6.metric("🤒 Malattia", gg_mal)
-    v7.metric("💤 Riposi", c_riposi)
-    v8.metric("🎉 Festività", c_fest)
-
-    if (ore_ferie_busta > 0) or (ore_perm_busta > 0) or (ore_mal_busta > 0):
-        st.caption(
-            f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_perm_busta:.0f}h permessi"
-            + (f" + {ore_mal_busta:.0f}h malattia" if ore_mal_busta > 0 else "")
-            + f" = {(ore_ferie_busta + ore_perm_busta + ore_mal_busta):.0f}h"
-        )
-
-    if (not cart_ok) and (not is_13):
-        st.warning("📌 Cartellino non disponibile: la verifica GG è parziale (mancano i lavorati).")
-
-    with tab1:
-        netto = safe_float(dg.get("netto", 0))
-        lordo = safe_float(comp.get("lordo_totale", 0))
-        base = safe_float(comp.get("base", 0))
-        anz = safe_float(comp.get("anzianita", 0))
-        stra = safe_float(comp.get("straordinari", 0))
-        festv = safe_float(comp.get("festivita", 0))
-        inps = safe_float(tratt.get("inps", 0))
-        irpef = safe_float(tratt.get("irpef_netta", 0))
-        add = safe_float(tratt.get("addizionali", 0))
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("💵 NETTO", f"€ {netto:,.2f}")
-        k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
-        k3.metric("📆 Giorni Pagati", gg_pagati_busta)
-        k4.metric("⏱️ Ore Lavorate", safe_float(dg.get("ore_ordinarie", 0)))
-
+    t1, t2, t3 = st.tabs(["Stipendio", "Cartellino", "Ferie"])
+    
+    with t1:
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Netto", f"€ {safe_float(dg.get('netto',0)):,.2f}")
+        c2.metric("Lordo", f"€ {safe_float(comp.get('lordo_totale',0)):,.2f}")
+        c3.metric("GG Pagati", gg_inps)
+        c4.metric("Ore Lav", safe_float(dg.get("ore_ordinarie",0)))
+        
         st.markdown("---")
-        a1, a2 = st.columns(2)
-        with a1:
-            st.subheader("➕ Competenze")
-            st.write(f"Paga Base: € {base:,.2f}")
-            if anz > 0:
-                st.write(f"Anzianità: € {anz:,.2f}")
-            if stra > 0:
-                st.write(f"Straordinari: € {stra:,.2f}")
-            if festv > 0:
-                st.write(f"Festività: € {festv:,.2f}")
-
-        with a2:
-            st.subheader("➖ Trattenute")
-            st.write(f"INPS: € {inps:,.2f}")
-            st.write(f"IRPEF: € {irpef:,.2f}")
-            if add > 0:
-                st.write(f"Addizionali: € {add:,.2f}")
-
-    with tab2:
-        if c:
-            st.json(c)
-        else:
-            st.info("Cartellino non disponibile" if not is_13 else "Non applicabile per Tredicesima")
-
-    with tab3:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("🏖️ Ferie")
-            st.write(ferie)
-        with c2:
-            st.subheader("⏱️ PAR")
-            st.write(par)
+        c1,c2 = st.columns(2)
+        c1.write("**Competenze**"); c1.write(f"Base: €{safe_float(comp.get('base',0)):,.2f}")
+        c2.write("**Trattenute**"); c2.write(f"INPS: €{safe_float(tratt.get('inps',0)):,.2f}")
+    
+    with t2:
+        if c: st.json(c)
+        else: st.info("Nessun dato cartellino")
+        
+    with t3:
+        c1,c2 = st.columns(2)
+        c1.write("Ferie"); c1.write(b.get("ferie",{}))
+        c2.write("PAR"); c2.write(b.get("par",{}))
