@@ -1,13 +1,3 @@
-# ==============================================================================
-# GOTTARDO PAYROLL ANALYZER - APP COMPLETA (DOWNLOAD CARTELLINO RIPRISTINATO)
-# ==============================================================================
-# - Logo header (assets/logo.jpg)
-# - Download Busta + Cartellino (Playwright) con ordine "funzionante" (v1)
-# - Agenda via API (stabile)
-# - Parsing AI (Gemini PDF) + fallback DeepSeek (testo PDF)
-# - Verifica GG: se cartellino manca => "parziale"
-# ==============================================================================
-
 import sys
 import asyncio
 import re
@@ -68,13 +58,17 @@ except Exception:
 # HEADER (LOGO + TITOLO)
 # ==============================================================================
 LOGOPATH = Path(__file__).resolve().parent / "assets" / "logo.jpg"
-
 c_logo, c_title = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
+
 with c_logo:
     if LOGOPATH.exists():
         st.image(str(LOGOPATH), width=100)
+
 with c_title:
-    st.markdown('<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>', unsafe_allow_html=True)
+    st.markdown(
+        '<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>',
+        unsafe_allow_html=True,
+    )
 
 st.title("💶 Analisi Stipendio & Presenze")
 
@@ -83,6 +77,7 @@ st.title("💶 Analisi Stipendio & Presenze")
 # COSTANTI
 # ==============================================================================
 BASE_HOME = "https://selfservice.gottardospa.it/js_rev/JSipert2"
+BASE_LOGIN = f"{BASE_HOME}?r=y"
 
 MESI_IT = [
     "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
@@ -97,7 +92,6 @@ CALENDAR_CODES = {
     "MAL": "MALATTIA",
 }
 
-# Conversione ore -> giorni (coerente con 80h ~ 11gg nel tuo output)
 ORE_PER_GIORNO = 7.0
 
 
@@ -160,29 +154,72 @@ def extract_text_from_pdf(file_path: str):
     return None
 
 
-def ensure_portal_home(page, tries: int = 3):
+def wait_portal_ready(page, timeout_ms: int = 60000) -> bool:
     """
-    Guard-rail: se dopo la busta finisci su viewer/ADP/altro,
-    forza rientro nella home del portale prima di cercare 'Time'.
+    Attende che la SPA monti la navbar (anche se l'URL è /js_rev/index.html).
+    Condizione: esiste l'ID del menu Time o compare testo Time / I miei dati.
     """
-    for _ in range(tries):
+    deadline = time.time() + (timeout_ms / 1000.0)
+
+    while time.time() < deadline:
+        try:
+            if page.locator("#revit_navigation_NavHoverItem_2_label").count() > 0:
+                try:
+                    if page.locator("#revit_navigation_NavHoverItem_2_label").first.is_visible(timeout=500):
+                        return True
+                except Exception:
+                    return True
+
+            if page.locator("text=Time").count() > 0:
+                return True
+            if page.locator("text=I miei dati").count() > 0:
+                return True
+            if page.locator("#ParametriLogin").count() > 0:
+                # siamo tornati al login: non è "ready" per il cartellino
+                return False
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    return False
+
+
+def safe_go_home(page):
+    """
+    Torna in home come nel tuo codice:
+    - prima prova click logo
+    - se non riesce, goto JSipert2
+    - poi aspetta che la navbar sia pronta
+    """
+    try:
+        logo = page.locator("img[src*='logo'], .logo").first
+        if logo.is_visible(timeout=2000):
+            logo.click()
+            time.sleep(2)
+        else:
+            raise Exception("logo non visibile")
+    except Exception:
+        page.goto(BASE_HOME, wait_until="domcontentloaded")
+        time.sleep(2)
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+
+    # Se la SPA è lenta (e ti manda a index.html), aspetta davvero.
+    if not wait_portal_ready(page, timeout_ms=60000):
+        # Prova un secondo giro "pulito"
         try:
             page.goto(BASE_HOME, wait_until="domcontentloaded")
-        except Exception:
-            pass
-        time.sleep(2.0)
-
-        if page.locator("#revit_navigation_NavHoverItem_2_label").count() > 0:
-            return
-        if page.locator("text=Time").count() > 0:
-            return
-
-        try:
-            page.reload(wait_until="domcontentloaded")
+            time.sleep(2)
+            page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
 
-    raise Exception(f"Home portale non raggiunta (URL attuale: {page.url})")
+        if not wait_portal_ready(page, timeout_ms=60000):
+            raise Exception(f"Navbar non pronta dopo goto home (URL: {page.url})")
 
 
 # ==============================================================================
@@ -205,8 +242,8 @@ def init_gemini_models():
     try:
         all_models = genai.list_models()
         valid = [m for m in all_models if "generateContent" in m.supported_generation_methods]
-
         models = []
+
         for m in valid:
             name = m.name.replace("models/", "")
             if "gemini" in name.lower() and "embedding" not in name.lower():
@@ -298,7 +335,7 @@ def analyze_with_fallback(file_path, prompt, tipo="documento"):
 
 
 # ==============================================================================
-# PARSERS AI
+# PARSERS
 # ==============================================================================
 def parse_busta_dettagliata(path):
     prompt = """
@@ -400,45 +437,29 @@ Output JSON:
     result = analyze_with_fallback(path, prompt, "Cartellino")
     if not result:
         return {
-            "giorni_lavorati": 0,
-            "giorni_footer": 0,
-            "giorni_righe": 0,
-            "ore_lavorate": 0,
-            "ferie": 0,
-            "malattia": 0,
-            "permessi": 0,
-            "riposi": 0,
-            "omesse_timbrature": 0,
-            "festivita": 0,
-            "note": "",
+            "giorni_lavorati": 0, "giorni_footer": 0, "giorni_righe": 0, "ore_lavorate": 0,
+            "ferie": 0, "malattia": 0, "permessi": 0, "riposi": 0, "omesse_timbrature": 0,
+            "festivita": 0, "note": ""
         }
 
     if safe_int(result.get("giorni_footer", 0)) > 0:
         result["giorni_lavorati"] = safe_int(result.get("giorni_footer", 0))
     elif safe_int(result.get("giorni_righe", 0)) > 0:
         result["giorni_lavorati"] = safe_int(result.get("giorni_righe", 0))
-
     return result
 
 
 # ==============================================================================
-# AGENDA (API)
+# AGENDA (API semplice)
 # ==============================================================================
 def read_agenda_api(context, mese_num, anno):
     result = {"events_by_type": {}, "total_events": 0, "success": False}
-    base_url = BASE_HOME
 
-    code_to_norm = {
-        "FEP": "FERIE",
-        "OMT": "OMESSA TIMBRATURA",
-        "RCS": "RIPOSO",
-        "RIC": "RIPOSO",
-        "MAL": "MALATTIA",
-    }
+    code_to_norm = {"FEP": "FERIE", "OMT": "OMESSA TIMBRATURA", "RCS": "RIPOSO", "RIC": "RIPOSO", "MAL": "MALATTIA"}
 
     for code in CALENDAR_CODES.keys():
         try:
-            url = f"{base_url}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
+            url = f"{BASE_HOME}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
             resp = context.request.get(url, timeout=10000)
             if not resp.ok:
                 continue
@@ -469,7 +490,7 @@ def read_agenda_api(context, mese_num, anno):
 
 
 # ==============================================================================
-# DOWNLOAD CORE (Playwright)
+# DOWNLOAD
 # ==============================================================================
 def execute_download(mese_nome, anno, user, pwd, is_13ma):
     results = {"busta": None, "cart": None, "agenda": None, "login_ok": None, "login_error": None}
@@ -493,9 +514,9 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
         page.set_viewport_size({"width": 1920, "height": 1080})
 
         try:
-            # --- LOGIN ---
+            # LOGIN
             st.toast("🔐 Login...", icon="🔐")
-            page.goto(f"{BASE_HOME}?r=y", wait_until="domcontentloaded")
+            page.goto(BASE_LOGIN, wait_until="domcontentloaded")
             page.wait_for_selector("#ParametriLogin input[name='username']", timeout=20000)
 
             page.locator("#ParametriLogin input[name='username']").first.fill(user)
@@ -523,13 +544,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 time.sleep(3)
 
             login_ok = False
-            for sel in [
-                "text=I miei dati",
-                "text=Time",
-                "text=Documenti",
-                "#revit_navigation_NavHoverItem_0_label",
-                "#revit_navigation_NavHoverItem_2_label",
-            ]:
+            for sel in ["text=I miei dati", "text=Time", "text=Documenti", "#revit_navigation_NavHoverItem_0_label", "#revit_navigation_NavHoverItem_2_label"]:
                 try:
                     if page.locator(sel).first.is_visible(timeout=5000):
                         login_ok = True
@@ -544,11 +559,11 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
 
             results["login_ok"] = True
 
-            # --- AGENDA (API) ---
+            # AGENDA (API)
             st.toast("🗓️ Agenda (API)...", icon="🗓️")
             results["agenda"] = read_agenda_api(ctx, mese_num, anno)
 
-            # --- BUSTA ---
+            # BUSTA
             st.toast("💰 Scarico Busta...", icon="💰")
             try:
                 try:
@@ -569,6 +584,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                         break
                     except Exception:
                         continue
+                time.sleep(2)
 
                 try:
                     page.wait_for_selector("text=Cedolino", timeout=10000)
@@ -576,25 +592,20 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     pass
 
                 try:
-                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
+                    page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=6000)
                 except Exception:
                     page.locator("text=Cedolino").first.click(force=True)
                 time.sleep(4)
 
-                with page.expect_download(timeout=25000) as dlinfo:
+                with page.expect_download(timeout=25000) as dl_info:
                     if is_13ma:
                         page.get_by_text(re.compile(f"Tredicesima.*{anno}", re.I)).first.click()
                     else:
                         links = page.locator("a")
                         total = links.count()
                         found = False
-                        patterns = [
-                            f"{mese_nome} {anno}",
-                            f"{mese_num:02d}/{anno}",
-                            f"{mese_num:02d}-{anno}",
-                            f"{mese_num}/{anno}",
-                            f"{mese_num}-{anno}",
-                        ]
+                        patterns = [f"{mese_nome} {anno}", f"{mese_num:02d}/{anno}", f"{mese_num:02d}-{anno}"]
+
                         for i in range(total):
                             try:
                                 txt = (links.nth(i).inner_text() or "").strip()
@@ -608,61 +619,70 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                                     break
                             except Exception:
                                 continue
+
+                        if not found:
+                            for i in range(total):
+                                try:
+                                    txt = links.nth(i).inner_text() or ""
+                                    if mese_nome.lower() in txt.lower() and str(anno) in txt and "Tredicesima" not in txt:
+                                        links.nth(i).click()
+                                        found = True
+                                        break
+                                except Exception:
+                                    continue
+
                         if not found:
                             raise Exception("Link busta non trovato")
 
-                dlinfo.value.save_as(local_busta)
+                dl_info.value.save_as(local_busta)
                 if os.path.exists(local_busta) and os.path.getsize(local_busta) > 1000:
                     results["busta"] = local_busta
+                    st.toast(f"✅ Busta: {os.path.getsize(local_busta):,} bytes", icon="📄")
+
             except Exception as e:
                 st.warning(f"⚠️ Busta: {e}")
 
-            # --- CARTELLINO (ordine RIPRISTINATO come nel codice che funzionava) ---
+            # CARTELLINO (ordine identico al tuo funzionante + wait navbar)
             if not is_13ma:
                 st.toast("📅 Scarico Cartellino...", icon="📅")
                 try:
-                    # (A) Escape
                     try:
                         page.keyboard.press("Escape")
                         time.sleep(0.3)
                     except Exception:
                         pass
 
-                    # (B) Torna HOME (logo -> goto) + guard-rail
-                    try:
-                        logo = page.locator("img[src*='logo'], .logo").first
-                        if logo.is_visible(timeout=2000):
-                            logo.click()
-                            time.sleep(2)
-                        else:
-                            raise Exception("logo non visibile")
-                    except Exception:
-                        page.goto(BASE_HOME, wait_until="domcontentloaded")
-                        time.sleep(3)
+                    # Torna home (logo/goto) e aspetta navbar
+                    safe_go_home(page)
 
-                    ensure_portal_home(page)
-
-                    # (C) Time menu (ID -> testo)
+                    # Time menu (id -> testo) + attesa visibilità
                     try:
                         page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     except Exception:
-                        page.locator("text=Time").first.click(force=True)
+                        pass
+
+                    # Se l'ID click non ha aperto, usa testo (ma aspetta che esista)
+                    if page.locator("text=Time").count() > 0:
+                        try:
+                            page.locator("text=Time").first.click(force=True, timeout=15000)
+                        except Exception:
+                            pass
+
                     time.sleep(3)
 
-                    # (D) Tab Cartellino presenze (ID -> testo)
+                    # Tab Cartellino presenze (id -> testo)
                     try:
                         page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     except Exception:
                         page.locator("text=Cartellino").first.click(force=True)
                     time.sleep(5)
 
-                    # (E) Date (selettore originale + fallback più permissivo)
-                    lastday = calendar.monthrange(anno, mese_num)[1]
-                    d1 = f"01/{mese_num:02d}/{anno}"
-                    d2 = f"{lastday}/{mese_num:02d}/{anno}"
+                    # Date (prima selettore originale, fallback più permissivo)
+                    last_day = calendar.monthrange(anno, mese_num)[1]
+                    d1, d2 = f"01/{mese_num:02d}/{anno}", f"{last_day}/{mese_num:02d}/{anno}"
 
-                    dal = page.locator("input[id='CLRICHIE'][class*='dijitInputInner']").first
-                    al = page.locator("input[id='CLRICHI2'][class*='dijitInputInner']").first
+                    dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
+                    al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
 
                     if dal.count() == 0:
                         dal = page.locator("input#CLRICHIE, input[id='CLRICHIE'], input[id*='CLRICHIE']").first
@@ -686,16 +706,17 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     al.press("Tab")
                     time.sleep(0.6)
 
-                    # (F) Esegui ricerca (XPATH originale)
+                    # Ricerca
                     try:
                         page.locator("//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']").last.click(force=True)
                     except Exception:
                         page.get_by_role("button", name=re.compile("ricerca|esegui", re.I)).last.click()
                     time.sleep(8)
 
-                    # (G) Riga mese + icona PDF
+                    # Icona PDF
                     pattern_cart = f"{mese_num:02d}/{anno}"
                     riga = page.locator(f"tr:has-text('{pattern_cart}')").first
+
                     if riga.count() > 0 and riga.locator("img[src*='search']").count() > 0:
                         icona = riga.locator("img[src*='search']").first
                     else:
@@ -704,7 +725,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     if icona.count() == 0:
                         raise Exception("Icona PDF cartellino non trovata")
 
-                    # (H) Popup + fetch PDF (fallback popup.pdf)
+                    # Popup + fetch PDF (fallback popup.pdf)
                     with ctx.expect_page(timeout=20000) as popupinfo:
                         icona.click()
                     popup = popupinfo.value
@@ -723,19 +744,25 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     if "EMBED" not in popupurl:
                         popupurl += "&EMBED=y"
 
-                    resp = ctx.request.get(popupurl, timeout=60000)
-                    body = resp.body()
+                    body = b""
+                    try:
+                        resp = ctx.request.get(popupurl, timeout=60000)
+                        body = resp.body()
+                    except Exception:
+                        body = b""
 
                     if body[:4] == b"%PDF":
                         with open(local_cart, "wb") as f:
                             f.write(body)
                         if os.path.exists(local_cart) and os.path.getsize(local_cart) > 1000:
                             results["cart"] = local_cart
+                            st.toast(f"✅ Cartellino: {os.path.getsize(local_cart):,} bytes", icon="📄")
                     else:
                         try:
                             popup.pdf(path=local_cart, format="A4")
                             if os.path.exists(local_cart) and os.path.getsize(local_cart) > 5000:
                                 results["cart"] = local_cart
+                                st.toast(f"✅ Cartellino: {os.path.getsize(local_cart):,} bytes", icon="📄")
                         except Exception:
                             pass
 
@@ -857,21 +884,19 @@ if "res" in st.session_state:
 
     tab1, tab2, tab3 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
 
-    # --- calcoli verifica (parziale se cartellino manca)
     gg_pagati_busta = safe_int(dg.get("giorni_pagati", 0))
     assenze_busta = b.get("assenze_mese", {}) or {}
     ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
     ore_perm_busta = safe_float(assenze_busta.get("ore_permessi", 0))
     ore_mal_busta = safe_float(assenze_busta.get("ore_malattia", 0))
-    ore_assenze_busta = ore_ferie_busta + ore_perm_busta
 
+    ore_assenze_busta = ore_ferie_busta + ore_perm_busta
     gg_assenze_busta = round(ore_assenze_busta / ORE_PER_GIORNO) if ore_assenze_busta > 0 else 0
     gg_mal = round(ore_mal_busta / ORE_PER_GIORNO) if ore_mal_busta > 0 else safe_int(c.get("malattia", 0))
 
     c_lavorati = safe_float(c.get("giorni_lavorati", 0))
     cart_ok = bool(c) and c_lavorati > 0
 
-    # ferie: busta > cartellino > agenda
     if gg_assenze_busta > 0:
         gg_ferie_eff = gg_assenze_busta
         src_ferie = "Busta"
@@ -894,16 +919,16 @@ if "res" in st.session_state:
 
     st.markdown("---")
     st.subheader(f"📊 Verifica {mese_nome} {anno}")
+
     v1, v2, v3, v4 = st.columns(4)
     v1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
     v2.metric(
         "📋 GG Calcolati" + ("" if cart_ok else " (parziale)"),
         f"{tot_calcolato:.0f}",
         delta=(f"{diff_gg:+.0f}" if cart_ok and diff_gg != 0 else None),
-        help=("Lavorati + Ferie + Malattia + Festività" if cart_ok else "Solo Ferie/Permessi/Malattia (Cartellino mancante)"),
     )
     v3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-    v4.metric("⚠️ Omesse (Agenda)", a_omesse, help="Solo informativo")
+    v4.metric("⚠️ Omesse (Agenda)", a_omesse)
 
     v5, v6, v7, v8 = st.columns(4)
     v5.metric(f"🏖️ Ferie ({src_ferie})", gg_ferie_eff)
