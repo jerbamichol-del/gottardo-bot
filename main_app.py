@@ -427,12 +427,129 @@ def parse_cartellino_dettagliato(path):
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
         
+
+    # RIPOSI_REGEX_FALLBACK: se l'AI non valorizza i riposi, contali dal testo PDF.
+    try:
+        if parse_number(result.get("riposi", 0)) <= 0 and path:
+            raw = extract_text_from_pdf(path) or ""
+            if raw:
+                n = 0
+                for line in raw.splitlines():
+                    t = line.strip().upper()
+                    if re.match(r"^(RDD|RCS|RIC|RCO|RDR|RPS|REC)\b", t):
+                        n += 1
+                if n > 0:
+                    result["riposi"] = n
+    except Exception:
+        pass
+
     return result
 
 
 # ==============================================================================
 # AGENDA - METODO MIGLIORATO CON INTERCETTAZIONE RETE
 # ==============================================================================
+# ----------------------------------------------------------------------------
+# AGENDA - calcolo giorni evento (start/end) nel mese target
+# ----------------------------------------------------------------------------
+
+def _parse_iso_dt(s):
+    if not s:
+        return None
+    ss = str(s).strip()
+    if ss.endswith('Z'):
+        ss = ss[:-1]
+    try:
+        return datetime.fromisoformat(ss)
+    except Exception:
+        m = re.search(r'(\d{4})-(\d{2})-(\d{2})', ss)
+        if not m:
+            return None
+        y, mo, d = map(int, m.groups())
+        return datetime(y, mo, d)
+
+
+def _has_explicit_time(s):
+    if not s:
+        return False
+    ss = str(s)
+    return ('T' in ss) or (':' in ss)
+
+
+def event_days_in_month(ev, mese_num, anno):
+    """Giorni di calendario coperti dall'evento nel mese target (inclusivi)."""
+    start_raw = ev.get('startTime') or ev.get('start') or ev.get('date') or ev.get('start_date')
+    end_raw = ev.get('endTime') or ev.get('end') or ev.get('end_date')
+    start = _parse_iso_dt(start_raw)
+    end = _parse_iso_dt(end_raw)
+
+    if not start:
+        return 0
+
+    a = start.date()
+
+    if end:
+        b = end.date()
+        # Tratta end esclusivo SOLO se end aveva un orario esplicito.
+        # Se end è solo una data (YYYY-MM-DD), considerala inclusiva.
+        try:
+            if _has_explicit_time(end_raw) and end.time() == datetime.min.time() and end > start:
+                b = b - timedelta(days=1)
+        except Exception:
+            pass
+    else:
+        b = a
+
+    first = date(anno, mese_num, 1)
+    last = date(anno, mese_num, calendar.monthrange(anno, mese_num)[1])
+
+    a = max(a, first)
+    b = min(b, last)
+
+    if b < a:
+        return 0
+
+    return (b - a).days + 1
+
+
+def event_inps_days_in_month(ev, mese_num, anno):
+    """Come event_days_in_month ma escludendo le domeniche (GG INPS su settimana 6gg)."""
+    start_raw = ev.get('startTime') or ev.get('start') or ev.get('date') or ev.get('start_date')
+    end_raw = ev.get('endTime') or ev.get('end') or ev.get('end_date')
+    start = _parse_iso_dt(start_raw)
+    end = _parse_iso_dt(end_raw)
+
+    if not start:
+        return 0
+
+    a = start.date()
+    if end:
+        b = end.date()
+        try:
+            if _has_explicit_time(end_raw) and end.time() == datetime.min.time() and end > start:
+                b = b - timedelta(days=1)
+        except Exception:
+            pass
+    else:
+        b = a
+
+    first = date(anno, mese_num, 1)
+    last = date(anno, mese_num, calendar.monthrange(anno, mese_num)[1])
+
+    a = max(a, first)
+    b = min(b, last)
+
+    if b < a:
+        return 0
+
+    days = 0
+    cur = a
+    while cur <= b:
+        if cur.weekday() != 6:  # 6 = Sunday
+            days += 1
+        cur += timedelta(days=1)
+    return days
+
 def read_agenda_with_navigation(page, context, mese_num, anno):
     """
     Legge l'agenda navigando effettivamente al calendario e intercettando le richieste.
@@ -1081,6 +1198,8 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
     all_events = captured_events + [{"summary": e} for e in dom_events]
 
     for ev in all_events:
+        days_cal = max(1, event_days_in_month(ev, mese_num, anno))
+        days_inps = max(1, event_inps_days_in_month(ev, mese_num, anno))
         summary = str(
             ev.get("summary", "") or ev.get("title", "") or ev.get("description", "")
         ).upper()
@@ -1638,7 +1757,8 @@ if "res" in st.session_state:
 
     # === CONTROLLO INCROCIATO DINAMICO (BUSTA vs CARTELLINO vs AGENDA) ===
     import calendar
-    from datetime import date
+    from datetime import date, timedelta
+
 
     # 0. Recupero e calcolo parametri del mese (Universale)
     anno = data.get("anno", 2025)  # Usa valore salvato in sessione, fallback 2025
@@ -1687,38 +1807,36 @@ if "res" in st.session_state:
         gg_malattia_busta = hours_to_days(ore_malattia_busta)
 
         # =====================================================================
-        # DATI DALL'AGENDA (SOLO INFORMATIVI; fallback solo se busta/cartellino assenti)
+        # DATI DALL'AGENDA
+        # - FERIE: giorni di calendario (può includere domeniche)
+        # - FERIE_INPS: giorni lavorativi INPS (domeniche escluse)
         # =====================================================================
         a_omesse = int(round(parse_number(a_evs.get("OMESSA TIMBRATURA", 0))))
-        a_ferie = parse_number(a_evs.get("FERIE", 0))
+        a_ferie_cal = parse_number(a_evs.get("FERIE", 0))
+        a_ferie_inps = parse_number(a_evs.get("FERIE_INPS", 0))
         a_malattia = parse_number(a_evs.get("MALATTIA", 0))
         a_riposi = parse_number(a_evs.get("RIPOSO", 0))
 
         # =====================================================================
-        # CONSOLIDAMENTO ASSENZE (PRIORITÀ FONTI)
-        # - Ferie mese: Busta (ore->gg) > Cartellino > Agenda (ultimo fallback)
-        # - Permessi mese: Busta (ore->gg) > Cartellino
-        # - Malattia mese: Busta (ore->gg) > Cartellino > Agenda (ultimo fallback)
-        # - Omesse: SOLO visual (non entrano nel totale)
+        # CONSOLIDAMENTO FERIE/PERMESSI
+        # Se i permessi sono usati come ferie, l'agenda (ferie pianificate) tende a combaciare con:
+        #   ferie_busta + permessi_busta   (in giorni/8)
+        # Il confronto va fatto su giorni INPS (no domeniche), quindi usiamo a_ferie_inps.
         # =====================================================================
-        use_source_ferie = "Busta"
-        if gg_ferie_busta > 0:
-            gg_ferie_effettive = gg_ferie_busta
-            use_source_ferie = "Busta"
-            if parse_number(c_ferie) > 0 and abs(parse_number(c_ferie) - gg_ferie_effettive) > 0.01:
-                st.info(
-                    f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive:.2f} gg) come da documento ufficiale (Cartellino indica {parse_number(c_ferie):.2f})."
-                )
-        elif parse_number(c_ferie) > 0:
-            gg_ferie_effettive = parse_number(c_ferie)
-            use_source_ferie = "Cartellino"
-        elif a_ferie > 0:
-            gg_ferie_effettive = a_ferie
-            use_source_ferie = "Agenda"
-        else:
-            gg_ferie_effettive = 0.0
+        gg_ferie_equivalenti_busta = gg_ferie_busta + gg_permessi_busta
 
-        gg_permessi = gg_permessi_busta if gg_permessi_busta > 0 else parse_number(c.get("permessi", 0))
+        # Default: tieni separati
+        use_source_ferie = "Busta"
+        gg_ferie_effettive = gg_ferie_busta
+        gg_permessi_effettivi = gg_permessi_busta
+
+        # Se agenda ferie INPS è coerente con ferie+permessi, allora permessi -> ferie
+        if a_ferie_inps > 0 and gg_ferie_equivalenti_busta > 0 and abs(a_ferie_inps - gg_ferie_equivalenti_busta) <= 1.01:
+            gg_ferie_effettive = gg_ferie_equivalenti_busta
+            gg_permessi_effettivi = 0.0
+            use_source_ferie = "Busta (Ferie+Permessi)"
+
+        # Malattia: busta > cartellino > agenda
         gg_malattia = gg_malattia_busta if gg_malattia_busta > 0 else (
             parse_number(c_malattia) if parse_number(c_malattia) > 0 else a_malattia
         )
@@ -1736,7 +1854,7 @@ if "res" in st.session_state:
         
         # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
         # L'agenda è solo informativa.
-        tot_calcolato = parse_number(c_lavorati) + parse_number(gg_ferie_effettive) + parse_number(gg_permessi) + parse_number(gg_malattia) + parse_number(c_festivita)
+        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
         diff_gg = tot_calcolato - gg_pagati_busta
@@ -1750,7 +1868,7 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Permessi + Malattia + Festività")
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività")
         col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
         col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
 
@@ -1771,12 +1889,12 @@ if "res" in st.session_state:
         col6.metric("🤒 Malattia", gg_malattia)
         col7.metric("💤 Riposi", c_riposi)
         col8.metric("🎉 Festività", c_festivita)
-
         # Mostra dettaglio ore dalla busta se disponibile
-        if ore_ferie_busta > 0 or ore_permessi_busta > 0:
+        if ore_ferie_busta > 0 or ore_permessi_busta > 0 or ore_malattia_busta > 0:
             st.caption(
-                f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
-                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
+                f"📋 Dettaglio Busta: {ore_ferie_busta:.2f}h ferie ({gg_ferie_busta:.2f} gg) + "
+                f"{ore_permessi_busta:.2f}h permessi ({gg_permessi_busta:.2f} gg) + "
+                f"{ore_malattia_busta:.2f}h malattia ({gg_malattia_busta:.2f} gg) ⇒ Ferie equivalenti: {gg_ferie_equivalenti_busta:.2f} gg. Agenda ferie: {a_ferie_cal:.0f} gg (calendario), {a_ferie_inps:.0f} gg (INPS)."
             )
 
         st.markdown("---")
