@@ -43,7 +43,6 @@ except Exception:
 # ==============================================================================
 # CONFIG
 # ==============================================================================
-st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 
 @st.cache_resource
 def ensure_playwright_installed():
@@ -916,3 +915,4 @@ if "res" in st.session_state:
         with f2:
             st.subheader("⏱️ PAR")
             st.write(par)
+
