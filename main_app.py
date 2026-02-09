@@ -1601,8 +1601,6 @@ def cleanup_files(*paths):
 # ==============================================================================
 # UI
 # ==============================================================================
-st.title("💶 Gottardo Payroll Analyzer")
-
 # Credenziali
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
 pw = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
@@ -2014,6 +2012,7 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
 
