@@ -1989,7 +1989,7 @@ if "res" in st.session_state:
 
             k5, k6, k7 = st.columns(3)
             # Mostra permessi (se non inglobati in Agenda) o 0
-            val_permessi = gg_permessi if not (agenda.get("success") and a_ferie > 0) else 0
+            val_permessi = gg_permessi if not (use_agenda and a_ferie > 0) else 0
             k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
             
             k6.metric("💤 Riposi", c_riposi)
@@ -2026,6 +2026,7 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
 
