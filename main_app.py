@@ -1,11 +1,10 @@
 # ==============================================================================
-# GOTTARDO PAYROLL ANALYZER - VERSIONE COMPLETA (CORRETTA)
+# GOTTARDO PAYROLL ANALYZER - VERSIONE COMPLETA (DOWNLOAD ROBUSTO)
 # ==============================================================================
-# Features:
-# - Download Busta Paga + Cartellino
-# - Lettura Agenda via Navigazione + fallback API
-# - Parsing AI dettagliato con fallback DeepSeek
-# - Controllo incrociato (Busta + Cartellino + Agenda informativa)
+# - Download Busta + Cartellino (Playwright)
+# - Lettura Agenda via Navigazione (intercetta rete) + fallback API
+# - Parsing AI (Gemini PDF) + fallback DeepSeek (testo PDF)
+# - Verifica coerente: se Cartellino manca => verifica GG "parziale" (no falsi allarmi)
 # ==============================================================================
 
 import sys
@@ -18,7 +17,6 @@ import calendar
 import locale
 import subprocess
 from pathlib import Path
-from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse  # utile per debug URL
 
 import streamlit as st
 import google.generativeai as genai
@@ -46,31 +44,16 @@ except Exception:
 # ==============================================================================
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 
-# NOTA: evitare install Playwright ad ogni rerun.
-# Se vuoi abilitarlo runtime (solo quando serve), setta env RUN_PLAYWRIGHT_INSTALL=1
 @st.cache_resource
-def ensure_playwright():
-    if os.environ.get("RUN_PLAYWRIGHT_INSTALL", "0") == "1":
-        try:
-            subprocess.run(["playwright", "install", "chromium"], check=False)
-        except Exception:
-            pass
+def ensure_playwright_installed():
+    # In cloud a volte serve; lo facciamo una sola volta per sessione.
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=False)
+    except Exception:
+        pass
     return True
 
-
-ensure_playwright()
-
-LOGOPATH = Path(__file__).resolve().parent / "assets" / "logo.jpg"
-
-c_logo, c_title = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
-with c_logo:
-    if LOGOPATH.exists():
-        st.image(str(LOGOPATH), width=100)
-with c_title:
-    st.markdown(
-        '<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>',
-        unsafe_allow_html=True,
-    )
+ensure_playwright_installed()
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -85,18 +68,8 @@ except Exception:
 # COSTANTI
 # ==============================================================================
 MESI_IT = [
-    "Gennaio",
-    "Febbraio",
-    "Marzo",
-    "Aprile",
-    "Maggio",
-    "Giugno",
-    "Luglio",
-    "Agosto",
-    "Settembre",
-    "Ottobre",
-    "Novembre",
-    "Dicembre",
+    "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre",
 ]
 
 CALENDAR_CODES = {
@@ -107,25 +80,7 @@ CALENDAR_CODES = {
     "MAL": "MALATTIA",
 }
 
-AGENDA_KEYWORDS = [
-    "OMESSA TIMBRATURA",
-    "OMESSA",
-    "OMT",
-    "MALATTIA",
-    "MAL",
-    "RIPOSO COMPENSATIVO",
-    "RCS",
-    "RIC",
-    "FERIE PIANIFICATE",
-    "FERIE",
-    "FEP",
-    "PERMESSO",
-    "PAR",
-    "ANOMALIA",
-    "ASSENZA",
-]
-
-# Conversione ore->giorni (nel tuo output 80h ≈ 11gg, quindi 7 è coerente con quel calcolo)
+# Conversione ore -> giorni (coerente con il tuo 80h ≈ 11gg)
 ORE_PER_GIORNO = 7.0
 
 
@@ -144,35 +99,10 @@ def safe_float(val) -> float:
 def safe_int(val) -> int:
     try:
         if isinstance(val, str):
-            val = val.strip()
+            val = val.strip().replace(",", ".")
         return int(float(val))
     except (ValueError, TypeError):
         return 0
-
-
-def click_esegui_ricerca_cartellino(page) -> None:
-    """
-    Click robusto su "Esegui ricerca" in UI ZK/Dojo.
-    Evita get_by_role('button') che spesso non matcha, e riduce timeout.
-    """
-    candidates = [
-        "[role='button']:has-text('Esegui ricerca')",
-        "span[role='button']:has-text('Esegui ricerca')",
-        "[role='button']:has-text('Esegui')",
-        "span[role='button']:has-text('Esegui')",
-        "//span[contains(.,'Esegui ricerca')]/ancestor::*[@role='button'][1]",
-        "//span[contains(.,'Esegui')]/ancestor::*[@role='button'][1]",
-    ]
-
-    last_err = None
-    for sel in candidates:
-        try:
-            page.locator(sel).last.click(force=True, timeout=5000)
-            return
-        except Exception as e:
-            last_err = e
-
-    raise Exception(f"Bottone 'Esegui ricerca' non trovato/cliccabile: {last_err}")
 
 
 # ==============================================================================
@@ -334,8 +264,8 @@ def parse_busta_dettagliata(path):
 Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 
 1) DATI GENERALI:
-- NETTO: riga "PROGRESSIVI" colonna finale (es. 788,61)
-- GIORNI PAGATI: riga "GG. INPS" (es. 26)
+- NETTO: riga "PROGRESSIVI" colonna finale
+- GIORNI PAGATI: riga "GG. INPS"
 - ORE ORDINARIE: "ORE INAIL" o giorni×8
 
 2) COMPETENZE:
@@ -353,9 +283,9 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 4) FERIE/PAR (tabella in alto a destra):
 - RES.PREC / SPETTANTI / FRUITE / SALDO
 
-5) ASSENZE DEL MESE (IMPORTANTE!):
-- ore_ferie: "FERIE GODUTE" (spesso voce 4521) -> colonna ORE
-- ore_permessi: "PERMESSI GODUTI"/"ROL GODUTI" (spesso voce 4529) -> colonna ORE
+5) ASSENZE DEL MESE:
+- ore_ferie: "FERIE GODUTE" (spesso 4521) -> colonna ORE
+- ore_permessi: "PERMESSI GODUTI"/"ROL GODUTI" (spesso 4529) -> colonna ORE
 - ore_malattia: righe "MALATTIA" -> colonna ORE
 
 6) TREDICESIMA:
@@ -397,18 +327,18 @@ Analizza questo CARTELLINO PRESENZE GOTTARDO S.p.A.
 
 2) CONTEGGIO RIGHE (VERIFICA):
 Conta righe di presenza/lavoro:
-- Codici che iniziano con 'V' (V70, V50, V29, V01, ecc.)
-- Righe con orari di timbratura
+- Codici che iniziano con 'V'
+- Righe con orari timbratura
 - Righe "ORD" o "STR"
-NON contare righe che hanno SOLO assenze (F70, FER, MAL, RCO/RDD) senza timbrature.
+NON contare righe che hanno SOLO assenze senza timbrature.
 -> giorni_righe
 
 3) ALTRI CODICI:
-- festivita: F70, FST, FES (1 per giorno)
-- ferie: FER, FE, FEP
-- permessi: PAR, PER, ROL
+- festivita: F70/FST/FES
+- ferie: FER/FE/FEP
+- permessi: PAR/PER/ROL
 - malattia: MAL
-- omesse_timbrature: SOLO se testo contiene OMESSA/ANOMALIA/MANCATA TIMBRATURA (NON Vxx senza orari)
+- omesse_timbrature: SOLO se scritto OMESSA/ANOMALIA/MANCATA TIMBRATURA
 
 Output JSON:
 {
@@ -451,7 +381,7 @@ Output JSON:
 
 
 # ==============================================================================
-# AGENDA - NAVIGAZIONE + INTERCETTAZIONE RETE
+# AGENDA - NAVIGAZIONE + INTERCETTAZIONE RETE (con fallback API)
 # ==============================================================================
 def read_agenda_with_navigation(page, context, mese_num, anno):
     result = {"events_by_type": {}, "total_events": 0, "items": [], "debug": [], "success": False}
@@ -465,7 +395,6 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                     try:
                         data = response.json()
                         if data:
-                            result["debug"].append(f"📡 Catturato: {url[:70]}...")
                             if isinstance(data, list):
                                 captured_events.extend(data)
                             elif isinstance(data, dict) and "items" in data:
@@ -480,29 +409,23 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
     page.on("response", capture_calendar_response)
 
     try:
-        result["debug"].append("🗓️ Navigazione al calendario...")
-
         # Time menu
         try:
             page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
-            result["debug"].append("  Menu Time cliccato (JS)")
         except Exception:
             try:
                 page.locator("text=Time").first.click(force=True)
-                result["debug"].append("  Menu Time cliccato (locator)")
             except Exception:
-                result["debug"].append("  ⚠️ Menu Time non trovato")
-        time.sleep(3)
+                pass
+        time.sleep(2.5)
 
         # Tab calendario
-        calendar_tabs = ["Mese", "Calendario", "Agenda", "Calendar", "Month"]
         tab_clicked = False
-        for tab_name in calendar_tabs:
+        for tab_name in ["Mese", "Calendario", "Agenda", "Calendar", "Month"]:
             try:
                 tab = page.locator(f"text={tab_name}").first
                 if tab.is_visible(timeout=2000):
                     tab.click(force=True)
-                    result["debug"].append(f"  ✅ Tab '{tab_name}' cliccato")
                     tab_clicked = True
                     break
             except Exception:
@@ -513,56 +436,45 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 try:
                     if page.evaluate(f"!!document.getElementById('{tab_id}')"):
                         page.evaluate(f"document.getElementById('{tab_id}')?.click()")
-                        result["debug"].append(f"  ✅ Tab {tab_id} cliccato")
                         break
                 except Exception:
                     pass
 
-        time.sleep(4)
+        time.sleep(3.5)
 
         # Frame calendario
-        result["debug"].append("🔍 Ricerca eventi nell'IFRAME del calendario...")
         calendar_frame = None
         for frame in page.frames:
             if "CalUI" in frame.name or "calendar" in frame.url:
                 calendar_frame = frame
-                result["debug"].append(f"  ✅ Frame calendario trovato: {frame.name}")
                 break
 
         dom_events = []
-        found_any = False
-
         if calendar_frame:
             try:
-                calendar_frame.locator("body").wait_for(timeout=2000)
-                time.sleep(2)
+                calendar_frame.locator("body").wait_for(timeout=4000)
+                time.sleep(1.5)
 
                 grid = calendar_frame.locator("#calendarContainer, #calendarUI_ExtendedCalendar_0").first
                 search_area = grid if grid.is_visible() else calendar_frame.locator("body")
-                src_name = "Griglia" if grid.is_visible() else "BODY (Fallback)"
-                result["debug"].append(f"  Target scraping: {src_name}")
 
                 allowed_boxes = []
-                try:
-                    cell_selectors = [
-                        ".dijitCalendarCurrentMonth",
-                        "td:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth)",
-                    ]
-                    for sel in cell_selectors:
-                        try:
-                            cells = search_area.locator(sel).all()
-                            for c in cells:
-                                if c.is_visible():
-                                    b = c.bounding_box()
-                                    if b:
-                                        allowed_boxes.append(b)
-                            if len(allowed_boxes) >= 28:
-                                break
-                        except Exception:
-                            continue
-                    result["debug"].append(f"  ✅ Mappate {len(allowed_boxes)} celle giorni mese corrente")
-                except Exception:
-                    pass
+                for sel in [
+                    ".dijitCalendarCurrentMonth",
+                    "td:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth)",
+                    "td[style*='background']:not([style*='gray'])",
+                ]:
+                    try:
+                        cells = search_area.locator(sel).all()
+                        for c in cells:
+                            if c.is_visible():
+                                b = c.bounding_box()
+                                if b:
+                                    allowed_boxes.append(b)
+                        if len(allowed_boxes) >= 28:
+                            break
+                    except Exception:
+                        continue
 
                 mese_nome_corrente = MESI_IT[mese_num - 1]
                 altri_mesi = [m.lower()[:3] for m in MESI_IT if m.lower()[:3] != mese_nome_corrente.lower()[:3]]
@@ -570,30 +482,23 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                 all_kws = ["OMESSA", "OMT", "MANCATA", "ANOMALIA", "FERIE", "FEP", "MALATTIA", "MAL", "RIPOSO", "RCS", "RIC", "RPS", "REC"]
                 for kw in all_kws:
                     matches = search_area.locator(f"text={kw}")
-                    count = matches.count()
-                    real_matches = 0
-
-                    for i in range(count):
+                    for i in range(matches.count()):
                         try:
                             el = matches.nth(i)
                             if not el.is_visible():
                                 continue
-
                             txt_upper = el.inner_text().upper()
                             txt_lower = el.inner_text().lower()
-
                             if "SALDO" in txt_upper or "RESIDUO" in txt_upper:
                                 continue
                             if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper:
                                 continue
-
                             if any(am in txt_lower for am in altri_mesi):
                                 continue
 
                             box = el.bounding_box()
                             if not box:
                                 continue
-
                             if box["x"] < 300:
                                 continue
 
@@ -608,7 +513,6 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 if not ok:
                                     continue
 
-                            real_matches += 1
                             if kw in ["OMESSA", "OMT", "MANCATA", "ANOMALIA"]:
                                 dom_events.append("OMESSA TIMBRATURA")
                             elif kw in ["FERIE", "FEP"]:
@@ -617,30 +521,20 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
                                 dom_events.append("MALATTIA")
                             elif kw in ["RIPOSO", "RCS", "RIC", "RPS", "REC"]:
                                 dom_events.append("RIPOSO")
-
                         except Exception:
                             pass
+            except Exception:
+                pass
 
-                    if real_matches > 0:
-                        result["debug"].append(f"  📝 Trovati {real_matches} x '{kw}' validi")
-                        found_any = True
-
-                if not found_any:
-                    result["debug"].append("  ⚠️ Nessun evento valido trovato (possibile filtro geometrico troppo stretto)")
-
-            except Exception as e:
-                result["debug"].append(f"  ❌ Errore scraping: {e}")
-
-        result["debug"].append(f"📋 Totale eventi DOM estratti: {len(dom_events)}")
-
-    except Exception as e:
-        result["debug"].append(f"❌ Errore navigazione: {type(e).__name__}: {e}")
+    except Exception:
+        pass
     finally:
         try:
             page.remove_listener("response", capture_calendar_response)
         except Exception:
             pass
 
+    # Processa eventi catturati + DOM
     all_events = captured_events + [{"summary": e} for e in dom_events]
 
     for ev in all_events:
@@ -677,13 +571,12 @@ def read_agenda_with_navigation(page, context, mese_num, anno):
             result["events_by_type"]["RIPOSO"] = result["events_by_type"].get("RIPOSO", 0) + 1
 
     result["total_events"] = sum(result["events_by_type"].values())
-    result["debug"].append(f"📊 Totale categorizzati: {result['total_events']}")
     result["success"] = True
     return result
 
 
 def read_agenda_api(context, mese_num, anno):
-    result = {"events_by_type": {}, "total_events": 0, "items": [], "debug": ["📡 Tentativo API dirette..."], "success": False}
+    result = {"events_by_type": {}, "total_events": 0, "items": [], "debug": [], "success": False}
     base_url = "https://selfservice.gottardospa.it/js_rev/JSipert2"
 
     code_to_norm = {
@@ -694,40 +587,71 @@ def read_agenda_api(context, mese_num, anno):
         "MAL": "MALATTIA",
     }
 
-    for code, name in CALENDAR_CODES.items():
+    for code in CALENDAR_CODES.keys():
         try:
             url = f"{base_url}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
             resp = context.request.get(url, timeout=10000)
-            result["debug"].append(f"  {code}: status={resp.status}")
-
             if resp.ok:
-                try:
-                    data = resp.json()
-                    if data:
-                        events = data if isinstance(data, list) else [data]
-                        month_events = []
-                        for ev in events:
-                            start = ev.get("startTime", "") or ev.get("start", "")
-                            if start and len(start) >= 7:
-                                try:
-                                    ev_month = int(start[5:7])
-                                    if ev_month == mese_num:
-                                        month_events.append(ev)
-                                except Exception:
-                                    pass
-
-                        if month_events:
-                            key = code_to_norm.get(code, name)
-                            result["events_by_type"][key] = result["events_by_type"].get(key, 0) + len(month_events)
-                            result["total_events"] += len(month_events)
-                except Exception as e:
-                    result["debug"].append(f"  ❌ {code} parse error: {e}")
-        except Exception as e:
-            result["debug"].append(f"  ⚠️ {code}: {type(e).__name__}: {e}")
+                data = resp.json()
+                if data:
+                    events = data if isinstance(data, list) else [data]
+                    month_events = []
+                    for ev in events:
+                        start = ev.get("startTime", "") or ev.get("start", "")
+                        if start and len(start) >= 7:
+                            try:
+                                ev_month = int(start[5:7])
+                                if ev_month == mese_num:
+                                    month_events.append(ev)
+                            except Exception:
+                                pass
+                    if month_events:
+                        key = code_to_norm.get(code, code)
+                        result["events_by_type"][key] = result["events_by_type"].get(key, 0) + len(month_events)
+                        result["total_events"] += len(month_events)
+        except Exception:
+            pass
 
     if result["total_events"] > 0:
         result["success"] = True
     return result
+
+
+# ==============================================================================
+# CARTELLINO CLICK ROBUSTO (best-of: selettore "buono" + timeouts lunghi)
+# ==============================================================================
+def click_esegui_ricerca_cartellino(page) -> None:
+    # Aspetta che eventuale validazione date abiliti il bottone
+    time.sleep(0.8)
+
+    candidates = [
+        # IDENTICO al selettore della versione che scaricava
+        "//span[contains(text(),'Esegui ricerca')]/ancestor::span[@role='button']",
+        # Varianti utili
+        "//span[contains(.,'Esegui ricerca')]/ancestor::*[@role='button'][1]",
+        "//span[contains(text(),'Ricerca')]/ancestor::span[@role='button']",
+        "[role='button']:has-text('Esegui ricerca')",
+        "span[role='button']:has-text('Esegui ricerca')",
+        "[role='button']:has-text('Esegui')",
+        "span[role='button']:has-text('Esegui')",
+    ]
+
+    last_err = None
+    for sel in candidates:
+        try:
+            loc = page.locator(sel).last
+            loc.wait_for(state="visible", timeout=20000)
+            loc.click(force=True, timeout=20000)
+            return
+        except Exception as e:
+            last_err = e
+
+    # fallback finale (a volte matcha)
+    try:
+        page.get_by_role("button", name=re.compile(r"ricerca|esegui", re.I)).last.click(timeout=20000)
+        return
+    except Exception as e:
+        raise Exception(f"Bottone 'Esegui ricerca' non trovato/cliccabile: {last_err or e}")
 
 
 # ==============================================================================
@@ -741,6 +665,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
     except Exception:
         return results
 
+    anno = safe_int(anno)
     suffix = "_13" if is_13ma else ""
     local_busta = os.path.abspath(f"busta_{idx}_{anno}{suffix}.pdf")
     local_cart = os.path.abspath(f"cartellino_{idx}_{anno}.pdf")
@@ -784,7 +709,13 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 time.sleep(3)
 
             login_ok = False
-            for sel in ["text=I miei dati", "text=Time", "text=Documenti", "#revit_navigation_NavHoverItem_0_label", "#revit_navigation_NavHoverItem_2_label"]:
+            for sel in [
+                "text=I miei dati",
+                "text=Time",
+                "text=Documenti",
+                "#revit_navigation_NavHoverItem_0_label",
+                "#revit_navigation_NavHoverItem_2_label",
+            ]:
                 try:
                     if page.locator(sel).first.is_visible(timeout=5000):
                         login_ok = True
@@ -795,11 +726,6 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
             if not login_ok:
                 results["login_ok"] = False
                 results["login_error"] = "Login fallito: elementi post-login non trovati."
-                st.error("❌ Login fallito")
-                try:
-                    st.caption(f"URL: {page.url}")
-                except Exception:
-                    pass
                 return results
 
             results["login_ok"] = True
@@ -810,9 +736,6 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 results["agenda"] = read_agenda_with_navigation(page, ctx, idx, anno)
                 if results["agenda"].get("total_events", 0) == 0:
                     results["agenda"] = read_agenda_api(ctx, idx, anno)
-
-                if results["agenda"].get("total_events", 0) > 0:
-                    st.toast(f"✅ Agenda: {results['agenda']['total_events']} eventi", icon="📅")
             except Exception as e:
                 results["agenda"] = {"events_by_type": {}, "total_events": 0, "debug": [str(e)], "success": False}
 
@@ -847,7 +770,7 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     page.locator("tr", has=page.locator("text=Cedolino")).locator(".z-image").click(timeout=5000)
                 except Exception:
                     page.locator("text=Cedolino").first.click(force=True)
-                time.sleep(3)
+                time.sleep(3.5)
 
                 with page.expect_download(timeout=25000) as dl_info:
                     if is_13ma:
@@ -856,7 +779,13 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                         links = page.locator("a")
                         total = links.count()
                         found = False
-                        patterns = [f"{mese_nome} {anno}", f"{idx:02d}/{anno}", f"{idx}/{anno}", f"{idx:02d}-{anno}", f"{idx}-{anno}"]
+                        patterns = [
+                            f"{mese_nome} {anno}",
+                            f"{idx:02d}/{anno}",
+                            f"{idx}/{anno}",
+                            f"{idx:02d}-{anno}",
+                            f"{idx}-{anno}",
+                        ]
 
                         for i in range(total):
                             try:
@@ -878,7 +807,6 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 dl_info.value.save_as(local_busta)
                 if os.path.exists(local_busta) and os.path.getsize(local_busta) > 1000:
                     results["busta"] = local_busta
-                    st.toast(f"✅ Busta: {os.path.getsize(local_busta):,} bytes", icon="📄")
             except Exception as e:
                 st.warning(f"⚠️ Busta: {e}")
 
@@ -892,48 +820,64 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     except Exception:
                         pass
 
+                    # Torna in home (più stabile che restare in Documenti)
                     try:
                         page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="domcontentloaded")
-                        time.sleep(2)
+                        time.sleep(2.5)
                     except Exception:
                         pass
 
+                    # Menu Time
                     try:
                         page.evaluate("document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()")
                     except Exception:
                         page.locator("text=Time").first.click(force=True)
-                    time.sleep(2)
+                    time.sleep(2.5)
 
+                    # Tab Cartellino
                     try:
                         page.evaluate("document.getElementById('lnktab_5_label')?.click()")
                     except Exception:
                         page.locator("text=Cartellino").first.click(force=True)
-                    time.sleep(4)
+                    time.sleep(5)
 
                     last_day = calendar.monthrange(anno, idx)[1]
-                    d1, d2 = f"01/{idx:02d}/{anno}", f"{last_day}/{idx:02d}/{anno}"
+                    d1 = f"01/{idx:02d}/{anno}"
+                    d2 = f"{last_day}/{idx:02d}/{anno}"
 
                     dal = page.locator("input[id*='CLRICHIE'][class*='dijitInputInner']").first
                     al = page.locator("input[id*='CLRICHI2'][class*='dijitInputInner']").first
 
-                    if dal.count() > 0 and al.count() > 0:
-                        dal.click(force=True)
-                        page.keyboard.press("Control+A")
-                        dal.fill("")
-                        dal.type(d1, delay=60)
-                        dal.press("Tab")
-                        time.sleep(0.4)
+                    # aspetta input visibili
+                    dal.wait_for(state="visible", timeout=20000)
+                    al.wait_for(state="visible", timeout=20000)
 
-                        al.click(force=True)
-                        page.keyboard.press("Control+A")
-                        al.fill("")
-                        al.type(d2, delay=60)
-                        al.press("Tab")
-                        time.sleep(0.4)
+                    # fill con typing lento (ZK)
+                    dal.click(force=True)
+                    page.keyboard.press("Control+A")
+                    dal.fill("")
+                    dal.type(d1, delay=80)
+                    dal.press("Tab")
+                    time.sleep(0.6)
 
+                    al.click(force=True)
+                    page.keyboard.press("Control+A")
+                    al.fill("")
+                    al.type(d2, delay=80)
+                    al.press("Tab")
+                    time.sleep(0.6)
+
+                    # click ricerca
                     click_esegui_ricerca_cartellino(page)
                     time.sleep(8)
 
+                    # aspetta che compaiano risultati / icone
+                    try:
+                        page.locator("img[src*='search']").first.wait_for(state="visible", timeout=20000)
+                    except Exception:
+                        pass
+
+                    # trova riga mese (tollerante)
                     patterns = [f"{idx:02d}/{anno}", f"{idx}/{anno}", f"{idx:02d}-{anno}", f"{idx}-{anno}"]
                     riga = None
                     for pat in patterns:
@@ -950,10 +894,18 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     if icona.count() == 0:
                         raise Exception("Icona PDF cartellino non trovata")
 
-                    with ctx.expect_page(timeout=20000) as popup_info:
-                        icona.click()
-                    popup = popup_info.value
+                    # popup: prova expect_popup, poi expect_page
+                    popup = None
+                    try:
+                        with page.expect_popup(timeout=20000) as pop_info:
+                            icona.click()
+                        popup = pop_info.value
+                    except Exception:
+                        with ctx.expect_page(timeout=20000) as pop_info:
+                            icona.click()
+                        popup = pop_info.value
 
+                    # aspetta URL "SERVIZIO=JPSC"
                     t0 = time.time()
                     last_url = popup.url
                     while time.time() - t0 < 15:
@@ -968,16 +920,27 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                     if "EMBED" not in popup_url:
                         popup_url += "&EMBED=y"
 
-                    resp = ctx.request.get(popup_url, timeout=60000)
-                    body = resp.body()
+                    # prova fetch diretto
+                    body = b""
+                    try:
+                        resp = ctx.request.get(popup_url, timeout=60000)
+                        body = resp.body()
+                    except Exception:
+                        body = b""
 
                     if body[:4] == b"%PDF":
                         with open(local_cart, "wb") as f:
                             f.write(body)
-                        results["cart"] = local_cart
-                        st.toast(f"✅ Cartellino: {len(body):,} bytes", icon="📋")
+                        if os.path.exists(local_cart) and os.path.getsize(local_cart) > 1000:
+                            results["cart"] = local_cart
                     else:
-                        raise Exception("Risposta cartellino non è un PDF")
+                        # fallback "stampa a PDF" (come nella versione che scaricava)
+                        try:
+                            popup.pdf(path=local_cart, format="A4")
+                            if os.path.exists(local_cart) and os.path.getsize(local_cart) > 5000:
+                                results["cart"] = local_cart
+                        except Exception:
+                            pass
 
                     try:
                         popup.close()
@@ -1017,6 +980,8 @@ def cleanup_files(*paths):
 u = st.session_state.get("u", st.secrets.get("ZK_USER", ""))
 pw = st.session_state.get("p", st.secrets.get("ZK_PASS", ""))
 
+st.title("💶 Analisi Stipendio & Presenze")
+
 if not u or not pw:
     c1, c2, c3 = st.columns([2, 2, 1])
     u_in = c1.text_input("👤 Username")
@@ -1036,7 +1001,7 @@ else:
         tipo = col_m.radio("Tipo", ["Cedolino", "Tredicesima"], horizontal=True)
 
     if col_btn.button("🚀 ANALIZZA", type="primary"):
-        is_13 = tipo == "Tredicesima"
+        is_13 = (tipo == "Tredicesima")
 
         with st.status("🔄 Elaborazione...", expanded=True):
             paths = execute_download(m, a, u, pw, is_13)
@@ -1056,6 +1021,7 @@ else:
                 "is_13": is_13,
                 "mese": m,
                 "anno": a,
+                "cart_download_ok": bool(paths.get("cart")),
             }
 
             cleanup_files(paths.get("busta"), paths.get("cart"))
@@ -1084,7 +1050,6 @@ if "res" in st.session_state:
     anno = safe_int(data.get("anno", 2025))
     mese_nome = data.get("mese", "Ottobre")
     mese_num = MESI_IT.index(mese_nome) + 1
-    nome_mese = mese_nome  # evita month_name in inglese quando locale non è disponibile
 
     a_evs = agenda.get("events_by_type", {}) if isinstance(agenda, dict) else {}
     a_omesse = safe_int(a_evs.get("OMESSA TIMBRATURA", 0))
@@ -1092,131 +1057,120 @@ if "res" in st.session_state:
     a_malattia = safe_int(a_evs.get("MALATTIA", 0))
     a_riposi = safe_int(a_evs.get("RIPOSO", 0))
 
-    tab1, tab2, tab4 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
+    tab1, tab2, tab3 = st.tabs(["💰 Stipendio", "📅 Cartellino", "🏖️ Ferie/PAR"])
 
     # --------------------
-    # Verifica (top)
+    # Calcoli coerenti (no locals hack)
     # --------------------
+    calc = {
+        "cart_ok": False,
+        "c_lavorati": 0.0,
+        "c_festivita": 0,
+        "c_riposi": 0,
+        "gg_ferie_eff": 0,
+        "gg_mal": 0,
+        "gg_perm": 0,
+        "use_source_ferie": "Busta",
+        "tot_calcolato": 0.0,
+        "diff_gg": None,
+        "gg_pagati_busta": safe_int(dg.get("giorni_pagati", 0)),
+        "final_omesse": a_omesse,
+        "ore_ferie_busta": 0.0,
+        "ore_permessi_busta": 0.0,
+        "ore_malattia_busta": 0.0,
+        "gg_assenze_busta": 0,
+    }
+
     if not is_13:
-        c_lavorati = safe_float(c.get("giorni_lavorati", 0))
+        calc["c_lavorati"] = safe_float(c.get("giorni_lavorati", 0))
         c_ore_lavorate = safe_float(c.get("ore_lavorate", 0))
-        c_riposi = safe_int(c.get("riposi", 0))
-        c_festivita = safe_int(c.get("festivita", 0))
+        calc["c_riposi"] = safe_int(c.get("riposi", 0))
+        calc["c_festivita"] = safe_int(c.get("festivita", 0))
         c_malattia = safe_int(c.get("malattia", 0))
         c_ferie = safe_int(c.get("ferie", 0))
 
         assenze_busta = b.get("assenze_mese", {}) or {}
-        ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
-        ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
-        ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
+        calc["ore_ferie_busta"] = safe_float(assenze_busta.get("ore_ferie", 0))
+        calc["ore_permessi_busta"] = safe_float(assenze_busta.get("ore_permessi", 0))
+        calc["ore_malattia_busta"] = safe_float(assenze_busta.get("ore_malattia", 0))
 
-        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round(ore_assenze_busta / ORE_PER_GIORNO) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / ORE_PER_GIORNO) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / ORE_PER_GIORNO) if ore_permessi_busta > 0 else 0
+        ore_assenze_busta = calc["ore_ferie_busta"] + calc["ore_permessi_busta"]
+        calc["gg_assenze_busta"] = round(ore_assenze_busta / ORE_PER_GIORNO) if ore_assenze_busta > 0 else 0
+        calc["gg_mal"] = round(calc["ore_malattia_busta"] / ORE_PER_GIORNO) if calc["ore_malattia_busta"] > 0 else c_malattia
+        calc["gg_perm"] = round(calc["ore_permessi_busta"] / ORE_PER_GIORNO) if calc["ore_permessi_busta"] > 0 else 0
 
-        gg_ferie_effettive = 0
-        use_source_ferie = "Busta"
-        if gg_assenze_busta > 0:
-            gg_ferie_effettive = gg_assenze_busta
-            if c_ferie != gg_ferie_effettive and c_ferie > 0:
-                st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive} gg). Cartellino indica {c_ferie}.")
+        # Priorità fonte ferie: Busta > Cartellino > Agenda
+        if calc["gg_assenze_busta"] > 0:
+            calc["gg_ferie_eff"] = calc["gg_assenze_busta"]
+            calc["use_source_ferie"] = "Busta"
         elif c_ferie > 0:
-            gg_ferie_effettive = c_ferie
-            use_source_ferie = "Cartellino"
+            calc["gg_ferie_eff"] = c_ferie
+            calc["use_source_ferie"] = "Cartellino"
         elif a_ferie > 0:
-            gg_ferie_effettive = a_ferie
-            use_source_ferie = "Agenda"
+            calc["gg_ferie_eff"] = a_ferie
+            calc["use_source_ferie"] = "Agenda"
 
-        final_omesse = a_omesse
+        calc["cart_ok"] = bool(c) and (calc["c_lavorati"] > 0 or c_ore_lavorate > 0)
 
-        gg_pagati_busta = safe_int(dg.get("giorni_pagati", 0))
-
-        cart_ok = bool(c) and (c_lavorati > 0 or c_ore_lavorate > 0)
-        if cart_ok:
-            tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
-            diff_gg = tot_calcolato - gg_pagati_busta
+        if calc["cart_ok"]:
+            calc["tot_calcolato"] = calc["c_lavorati"] + calc["gg_ferie_eff"] + calc["gg_mal"] + calc["c_festivita"]
+            calc["diff_gg"] = calc["tot_calcolato"] - calc["gg_pagati_busta"]
         else:
-            tot_calcolato = gg_ferie_effettive + gg_malattia  # parziale
-            diff_gg = None
+            calc["tot_calcolato"] = calc["gg_ferie_eff"] + calc["gg_mal"]
+            calc["diff_gg"] = None
 
+        # VERIFICA (top)
         st.markdown("---")
-        st.subheader(f"📊 Verifica {nome_mese} {anno}")
+        st.subheader(f"📊 Verifica {mese_nome} {anno}")
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
+        col1.metric("📅 GG INPS (Busta)", calc["gg_pagati_busta"])
         col2.metric(
-            "📋 GG Calcolati" + ("" if cart_ok else " (parziale)"),
-            f"{tot_calcolato:.0f}",
-            delta=(f"{diff_gg:+.0f}" if (cart_ok and diff_gg != 0) else None),
-            help=("Lavorati + Ferie + Malattia + Festività" if cart_ok else "Solo Ferie/Permessi/Malattia (Cartellino non disponibile)"),
+            "📋 GG Calcolati" + ("" if calc["cart_ok"] else " (parziale)"),
+            f"{calc['tot_calcolato']:.0f}",
+            delta=(f"{calc['diff_gg']:+.0f}" if (calc["cart_ok"] and calc["diff_gg"] != 0) else None),
+            help=("Lavorati + Ferie + Malattia + Festività" if calc["cart_ok"] else "Solo Ferie/Permessi/Malattia (Cartellino non disponibile)"),
         )
-        col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo")
+        col3.metric("👔 Lavorati (Cartellino)", calc["c_lavorati"])
+        col4.metric("⚠️ Omesse (Agenda)", calc["final_omesse"], help="Solo informativo")
 
         col5, col6, col7, col8 = st.columns(4)
-        if use_source_ferie == "Agenda":
-            lbl_ferie, help_ferie = "🏖️ Ferie (Agenda)", "Dati rilevati dal calendario"
-        elif use_source_ferie == "Cartellino":
-            lbl_ferie, help_ferie = "🏖️ Ferie (Cartellino)", "Giorni 'FER' contati dal cartellino"
+        if calc["use_source_ferie"] == "Agenda":
+            lbl_ferie = "🏖️ Ferie (Agenda)"
+        elif calc["use_source_ferie"] == "Cartellino":
+            lbl_ferie = "🏖️ Ferie (Cartellino)"
         else:
-            lbl_ferie, help_ferie = "🏖️ Ferie (Busta)", "Calcolato dalle ore in busta (documento ufficiale)"
+            lbl_ferie = "🏖️ Ferie (Busta)"
 
-        col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
-        col6.metric("🤒 Malattia", gg_malattia)
-        col7.metric("💤 Riposi", c_riposi)
-        col8.metric("🎉 Festività", c_festivita)
+        col5.metric(lbl_ferie, calc["gg_ferie_eff"])
+        col6.metric("🤒 Malattia", calc["gg_mal"])
+        col7.metric("💤 Riposi", calc["c_riposi"])
+        col8.metric("🎉 Festività", calc["c_festivita"])
 
-        if ore_ferie_busta > 0 or ore_permessi_busta > 0 or ore_malattia_busta > 0:
+        if calc["ore_ferie_busta"] > 0 or calc["ore_permessi_busta"] > 0 or calc["ore_malattia_busta"] > 0:
+            ore_assenze_busta = calc["ore_ferie_busta"] + calc["ore_permessi_busta"]
             st.caption(
-                f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi"
-                f"{(' + ' + str(int(ore_malattia_busta)) + 'h malattia') if ore_malattia_busta > 0 else ''}"
-                f" = {(ore_assenze_busta + ore_malattia_busta):.0f}h (assenze ferie/permessi: {gg_assenze_busta} gg)"
+                f"📋 Dettaglio Busta: {calc['ore_ferie_busta']:.0f}h ferie + {calc['ore_permessi_busta']:.0f}h permessi"
+                f"{(' + ' + str(int(calc['ore_malattia_busta'])) + 'h malattia') if calc['ore_malattia_busta'] > 0 else ''}"
+                f" = {(ore_assenze_busta + calc['ore_malattia_busta']):.0f}h (assenze ferie/permessi: {calc['gg_assenze_busta']} gg)"
             )
 
-        st.markdown("---")
-
-        if not cart_ok:
+        if not calc["cart_ok"]:
             st.warning("📌 Cartellino non disponibile: la verifica GG è parziale (mancano i lavorati).")
         else:
-            if gg_pagati_busta > 0:
-                if diff_gg == 0:
-                    st.success("✅ **DATI COERENTI**")
-                elif diff_gg > 0:
-                    overlap = min(final_omesse, int(diff_gg)) if final_omesse > 0 else 0
-                    if overlap > 0:
-                        st.success(
-                            f"✅ **DATI COERENTI CON SOVRAPPOSIZIONE**: totale calcolato ({tot_calcolato:.0f}) "
-                            f"supera la busta di {diff_gg:.0f} gg; probabile doppio conteggio tra lavorati e assenze ferie/permessi."
-                        )
-                    else:
-                        st.warning(
-                            f"⚠️ **DISCREPANZA (ECCESSO)**: +{diff_gg:.0f} gg. "
-                            f"Verifica sovrapposizione tra Lavorati ({c_lavorati}) e Ferie ({gg_ferie_effettive})."
-                        )
-                else:
-                    st.error(
-                        f"❌ **DISCREPANZA (DIFETTO)**: {diff_gg:.0f} gg. "
-                        f"Busta {gg_pagati_busta} vs Calcolato {tot_calcolato:.0f} "
-                        f"(Lavorati {c_lavorati} + Ferie {gg_ferie_effettive} + Malattia {gg_malattia} + Fest {c_festivita})"
-                    )
+            if calc["diff_gg"] == 0:
+                st.success("✅ DATI COERENTI")
+            elif calc["diff_gg"] > 0:
+                st.warning(f"⚠️ DISCREPANZA (ECCESSO): +{calc['diff_gg']:.0f} gg. Possibile sovrapposizione lavorati/assenze.")
+            else:
+                st.error(
+                    f"❌ DISCREPANZA (DIFETTO): {calc['diff_gg']:.0f} gg. "
+                    f"Busta {calc['gg_pagati_busta']} vs Calcolato {calc['tot_calcolato']:.0f}"
+                )
 
-        if final_omesse > 0:
-            st.info("ℹ️ Nota: ci sono giorni con omessa timbratura (Agenda). Non cambiano i GG INPS, sono informativi.")
+        st.divider()
 
-        if c_riposi > 0 or a_riposi > 0:
-            st.caption(f"💤 {max(c_riposi, a_riposi)} riposi (domeniche + compensativi) — non contano come GG INPS")
-    else:
-        if b.get("e_tredicesima"):
-            st.success("🎄 **TREDICESIMA ANALIZZATA**")
-        else:
-            st.info("📄 Cedolino analizzato")
-
-    st.divider()
-
-    # ==============================================================================
     # TAB 1 - Stipendio
-    # ==============================================================================
     with tab1:
         netto = safe_float(dg.get("netto", 0))
         lordo = safe_float(comp.get("lordo_totale", 0))
@@ -1238,79 +1192,43 @@ if "res" in st.session_state:
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("➕ Competenze")
-            st.write(f"**Paga Base:** € {base:,.2f}")
+            st.write(f"Paga Base: € {base:,.2f}")
             if anzianita > 0:
-                st.write(f"**Anzianità:** € {anzianita:,.2f}")
+                st.write(f"Anzianità: € {anzianita:,.2f}")
             if straordinari > 0:
-                st.write(f"**Straordinari:** € {straordinari:,.2f}")
+                st.write(f"Straordinari: € {straordinari:,.2f}")
             if festivita_val > 0:
-                st.write(f"**Festività:** € {festivita_val:,.2f}")
+                st.write(f"Festività: € {festivita_val:,.2f}")
 
         with c2:
             st.subheader("➖ Trattenute")
-            st.write(f"**INPS:** € {inps:,.2f}")
-            st.write(f"**IRPEF:** € {irpef:,.2f}")
+            st.write(f"INPS: € {inps:,.2f}")
+            st.write(f"IRPEF: € {irpef:,.2f}")
             if addizionali > 0:
-                st.write(f"**Addizionali:** € {addizionali:,.2f}")
+                st.write(f"Addizionali: € {addizionali:,.2f}")
 
-    # ==============================================================================
     # TAB 2 - Cartellino
-    # ==============================================================================
     with tab2:
         if c:
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("👔 Lavorati", safe_float(c.get("giorni_lavorati", 0)), help=f"Ore Totali: {safe_float(c.get('ore_lavorate', 0))}")
-
-            use_agenda = (locals().get("use_source_ferie", "Busta") == "Agenda")
-            use_cartellino = (locals().get("use_source_ferie", "Busta") == "Cartellino")
-
-            if use_agenda:
-                label_ferie_tab = "🏖️ Ferie (Agenda)"
-            elif use_cartellino:
-                label_ferie_tab = "🏖️ Ferie (Cartellino)"
-            else:
-                label_ferie_tab = "🏖️ Ferie (Busta)"
-
-            gg_ferie_effettive = locals().get("gg_ferie_effettive", 0)
-            gg_malattia = locals().get("gg_malattia", 0)
-            final_omesse = locals().get("final_omesse", 0)
-            gg_permessi = locals().get("gg_permessi", 0)
-            a_ferie_local = locals().get("a_ferie", 0)
-            c_riposi = locals().get("c_riposi", 0)
-            c_festivita = locals().get("c_festivita", 0)
-
-            k2.metric(label_ferie_tab, gg_ferie_effettive)
-            k3.metric("🤒 Malattia", gg_malattia)
-            k4.metric("⚠️ Omesse", final_omesse)
-
-            st.markdown("---")
-            k5, k6, k7 = st.columns(3)
-            val_permessi = gg_permessi if not (use_agenda and a_ferie_local > 0) else 0
-            k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
-            k6.metric("💤 Riposi", c_riposi)
-            k7.metric("🎉 Festività", c_festivita)
+            k2.metric("🏖️ Ferie", safe_int(c.get("ferie", 0)))
+            k3.metric("🤒 Malattia", safe_int(c.get("malattia", 0)))
+            k4.metric("🎉 Festività", safe_int(c.get("festivita", 0)))
 
             if c.get("note"):
-                st.info(f"📝 {c['note']}")
+                st.info(c["note"])
         else:
             st.info("Cartellino non disponibile" if not is_13 else "Non applicabile per Tredicesima")
 
-    # ==============================================================================
-    # TAB 4 - Ferie/PAR
-    # ==============================================================================
-    with tab4:
-        assenze_busta = b.get("assenze_mese", {}) or {}
-        ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
-        ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
-        ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
-
-        if ore_ferie_busta > 0 or ore_permessi_busta > 0 or ore_malattia_busta > 0:
+    # TAB 3 - Ferie / PAR
+    with tab3:
+        if calc["ore_ferie_busta"] > 0 or calc["ore_permessi_busta"] > 0 or calc["ore_malattia_busta"] > 0:
             st.caption(
-                f"📋 Dettaglio busta (ore): {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi + {ore_malattia_busta:.0f}h malattia"
+                f"📋 Dettaglio busta (ore): {calc['ore_ferie_busta']:.2f} ferie + {calc['ore_permessi_busta']:.2f} permessi + {calc['ore_malattia_busta']:.2f} malattia"
             )
 
         c1, c2 = st.columns(2)
-
         with c1:
             st.subheader("🏖️ Ferie")
             f1, f2 = st.columns(2)
