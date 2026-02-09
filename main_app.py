@@ -1957,6 +1957,20 @@ if "res" in st.session_state:
             
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
+
+            # --- Normalizza agenda/ferie/par e flags sorgente ferie ---
+            agenda = agenda if isinstance(agenda, dict) else {"success": False, "eventsbytype": {}}
+            aevs = agenda.get("eventsbytype") or {}
+            a_ferie = aevs.get("FERIE", 0)
+
+            # Nel tuo codice originale la variabile guida è "usesourceferie" con valori: "Agenda" / "Cartellino" / "Busta"
+            use_agenda = (usesourceferie == "Agenda")
+            use_cartellino = (usesourceferie == "Cartellino")
+
+            ferie = ferie if isinstance(ferie, dict) else {}
+            par = par if isinstance(par, dict) else {}
+            c = c if isinstance(c, dict) else {}
+
             
             # Label dinamico
             if use_agenda:
@@ -2012,6 +2026,7 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
 
