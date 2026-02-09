@@ -44,6 +44,19 @@ except Exception:
 # ==============================================================================
 st.set_page_config(page_title="Gottardo Payroll", page_icon="💶", layout="wide")
 os.system("playwright install chromium")
+from pathlib import Path
+
+LOGOPATH = Path(__file__).resolve().parent / "assets" / "logo.jpg"
+
+c_logo, c_title = st.columns([0.75, 9.25], gap="small", vertical_alignment="center")
+with c_logo:
+    if LOGOPATH.exists():
+        st.image(str(LOGOPATH), width=100)
+with c_title:
+    st.markdown(
+        '<h1 style="margin:0;padding:0">Gottardo Payroll Analyzer</h1>',
+        unsafe_allow_html=True,
+    )
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -2001,5 +2014,6 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
 
