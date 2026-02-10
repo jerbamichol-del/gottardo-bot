@@ -1939,7 +1939,18 @@ if "res" in st.session_state:
         
         # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
         # L'agenda è solo informativa.
-        tot_calcolato = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
+        # Omesse timbrature: sono giorni lavorati
+        # Se il cartellino non le include nei 'lavorati', usale SOLO per colmare un difetto vs GG INPS
+        c_lavorati_eff = c_lavorati
+        try:
+            if gg_pagati_busta > 0 and final_omesse > 0:
+                base = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
+                if base < gg_pagati_busta:
+                    add_omesse = min(int(final_omesse), int(gg_pagati_busta - base))
+                    c_lavorati_eff = c_lavorati + add_omesse
+        except Exception:
+            pass
+        tot_calcolato = c_lavorati_eff + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
         diff_gg = tot_calcolato - gg_pagati_busta
