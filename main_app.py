@@ -1830,9 +1830,8 @@ if "res" in st.session_state:
                 conflict_dates = [token_to_date_str(anno, mese_num, t) or t for t in conflicts_tokens]
                 st.error(
                     "❌ CONFLITTO CARTELLINO: almeno un giorno risulta sia PRESENZA (Vxx) sia ASSENZA/RIPOSO/FESTIVITÀ. "
-                    "Questo può spiegare un giorno pagato in meno.
-"
-                    + "Giorni: " + ", ".join(conflict_dates)
+                    "Questo può spiegare un giorno pagato in meno."
+                 + "Giorni: " + ", ".join(conflict_dates)
                 )
         except Exception:
             pass
@@ -2030,3 +2029,4 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
