@@ -1278,20 +1278,26 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y",
                 wait_until="domcontentloaded",
             )
-            page.wait_for_selector('input[type="text"]', timeout=10000)
-            page.fill('input[type="text"]', user)
-            page.fill('input[type="password"]', pwd)
-            page.press('input[type="password"]', "Enter")
-            time.sleep(3)
+            page.wait_for_selector('input[name="username"]', timeout=20000)
+            page.fill('input[name="username"]', user)
+            page.fill('input[name="password"]', pwd)
 
+            # Meglio click su submit se esiste, altrimenti Enter
+            btn = page.locator('button[type="submit"], input[type="submit"]').first
+            if btn.count() > 0:
+                btn.click()
+            else:
+                page.press('input[name="password"]', "Enter")
+
+            # Verifica login con un elemento che usi già dopo (più stabile di un testo)
             try:
-                page.wait_for_selector("text=I miei dati", timeout=15000)
+                page.wait_for_selector("#revitnavigationNavHoverItem0label", timeout=30000)
             except:
-                st.error("❌ Login fallito")
+                st.error("Login fallito (selettori cambiati / portale lento / credenziali / schermata intermedia).")
                 browser.close()
                 return results
 
-            # === AGENDA CON NAVIGAZIONE ===
+         # === AGENDA CON NAVIGAZIONE ===
             st.toast("🗓️ Lettura Agenda...", icon="🗓️")
             try:
                 # Prima prova con navigazione al calendario
@@ -2001,3 +2007,4 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
