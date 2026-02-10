@@ -1854,13 +1854,39 @@ if "res" in st.session_state:
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
-        # Converti ore in giorni (ore totali / 8 per ottenere giorni)
-        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round(ore_assenze_busta / ORE_GIORNALIERE) if ore_assenze_busta > 0 else 0
-        gg_malattia = round(ore_malattia_busta / ORE_GIORNALIERE) if ore_malattia_busta > 0 else c_malattia
-        gg_permessi = round(ore_permessi_busta / ORE_GIORNALIERE) if ore_permessi_busta > 0 else 0
+        # Converti ore in giorni (usa ore/giorno effettive dal footer cartellino se disponibili)
+        import math
 
-        # =====================================================================
+        def round_half_up(x: float) -> int:
+            return int(math.floor(x + 0.5))
+
+        # ore/giorno effettive: ore_ordinarie_pv / giorni_footer (fallback a 8)
+        ore_giornaliere_eff = ORE_GIORNALIERE
+        try:
+            gg_footer = safe_float(c.get("giorni_footer", 0))
+            ore_pv = safe_float(c.get("ore_ordinarie_pv", 0))
+            if gg_footer > 0 and ore_pv > 0:
+                ore_giornaliere_eff = ore_pv / gg_footer
+        except Exception:
+            pass
+
+        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
+        gg_assenze_busta = round_half_up(ore_assenze_busta / ore_giornaliere_eff) if ore_assenze_busta > 0 else 0
+
+        # Nel footer cartellino: ore_malattia_footer spesso è un valore "giorni" (es. CARENZA 2,00)
+        gg_mal_footer = 0
+        try:
+            gg_mal_footer = round_half_up(safe_float(c.get("ore_malattia_footer", 0)))
+        except Exception:
+            gg_mal_footer = 0
+
+        gg_malattia = (
+            round_half_up(ore_malattia_busta / ore_giornaliere_eff)
+            if ore_malattia_busta > 0
+            else (int(gg_mal_footer) if gg_mal_footer > 0 else c_malattia)
+        )
+        gg_permessi = round_half_up(ore_permessi_busta / ore_giornaliere_eff) if ore_permessi_busta > 0 else 0
+# =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
         # L'agenda mostra i giorni REALI di ferie (linee gialle)
         # =====================================================================
@@ -2053,7 +2079,7 @@ if "res" in st.session_state:
         k1.metric("💵 NETTO", f"€ {netto:,.2f}")
         k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
         k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
-        k4.metric("⏱️ Ore Lavorate", dg.get("ore_ordinarie", 0))
+        k4.metric("⏱️ Ore ordinarie (Busta)", dg.get("ore_ordinarie", 0))
 
 
         st.markdown("---")
@@ -2138,4 +2164,3 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
-
