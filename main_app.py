@@ -69,7 +69,7 @@ MESI_IT = [
     "Dicembre",
 ]
 
-# Ore standard per giornata (per conversione ore→giorni)
+# Ore standard per giornata (conversione ore→giorni)
 ORE_GIORNALIERE = 8.0
 
 # Codici eventi calendario Gottardo (dallo screenshot del portale)
@@ -196,32 +196,52 @@ def extract_text_from_pdf(file_path):
 
 
 
-def _norm_day_tokens(arr):
-    # Normalizza lista token tipo ['M01','D05'] -> set maiuscolo valido
-    out=set()
-    if not arr:
-        return out
-    for t in arr:
-        if not isinstance(t, str):
-            continue
-        t=t.strip().upper()
-        if re.match(r'^[A-Z]\d{2}$', t):
-            out.add(t)
-    return out
+from collections import defaultdict
+
+RIPOSO_CODES = {"RDD", "RCS", "RIC", "RPS", "REC", "RDO"}
 
 
-def token_to_date_str(anno: int, mese_num: int, token: str):
-    # Converte token tipo 'M01' in 'YYYY-MM-DD' usando il numero giorno (01)
+def extract_lines_from_pdf_words(pdf_path: str) -> list:
+    """Estrae righe dal PDF usando PyMuPDF page.get_text('words'), più robusto per tabelle."""
+    if not pdf_path or not os.path.exists(pdf_path) or not fitz:
+        return []
+
+    lines_out = []
     try:
-        if not token or len(token) < 2:
-            return None
-        day = int(token[1:])
-        last = calendar.monthrange(int(anno), int(mese_num))[1]
-        if day < 1 or day > last:
-            return None
-        return f"{int(anno):04d}-{int(mese_num):02d}-{day:02d}"
+        doc = fitz.open(pdf_path)
     except Exception:
-        return None
+        return []
+
+    for page in doc:
+        try:
+            words = page.get_text("words") or []
+        except Exception:
+            words = []
+
+        grouped = defaultdict(list)
+        for x0, y0, x1, y1, w, b, l, wn in words:
+            if not w:
+                continue
+            grouped[(b, l)].append((x0, str(w)))
+
+        for (b, l), items in grouped.items():
+            items.sort(key=lambda t: t[0])
+            line = " ".join(w for _, w in items).strip()
+            if line:
+                lines_out.append(line)
+
+    return lines_out
+
+
+def riposi_from_cartellino_pdf(pdf_path: str):
+    """Conta riposi come giorni unici (token tipo D05) leggendo le righe del cartellino."""
+    days = set()
+    for line in extract_lines_from_pdf_words(pdf_path):
+        ln = (line or "").replace(".", " ").strip().upper()
+        m = re.match(r"^(RDD|RCS|RIC|RPS|REC|RDO)\s+([A-Z]\d{2})\b", ln)
+        if m and m.group(1) in RIPOSO_CODES:
+            days.add(m.group(2))
+    return len(days)
 def analyze_with_fallback(file_path, prompt, tipo="documento"):
     """Analizza PDF con Gemini, fallback su DeepSeek."""
     if not file_path or not os.path.exists(file_path):
@@ -384,11 +404,6 @@ def parse_cartellino_dettagliato(path):
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
-    - **RIPOSI**: codici RDD/RCS/RIC/RPS/REC/RDO. Restituisci i token-giorno in riposi_tokens (es. ["D05","D12"]) e riposi = numero giorni unici.
-    - **PRESENZE**: codici Vxx. Restituisci token-giorno in presenze_tokens (es. ["M01","G02"]) (dedup).
-    - **FERIE**: codici FER/FE/FEP -> ferie_tokens (dedup).
-    - **MALATTIA**: codici MAL -> malattia_tokens (dedup).
-    - **FESTIVITÀ**: codici F70/FST/FES -> festivita_tokens (dedup).
     - **FESTIVITÀ**: Codici F70, FST, FES. (Conta 1 per ogni giorno).
     - **FERIE**: Righe con FER, FE, FEP.
     - **PERMESSI**: Righe con PAR, PER, ROL.
@@ -405,11 +420,6 @@ def parse_cartellino_dettagliato(path):
       "malattia": 0,
       "permessi": 0,
       "riposi": 0,
-      "riposi_tokens": [],
-      "presenze_tokens": [],
-      "ferie_tokens": [],
-      "malattia_tokens": [],
-      "festivita_tokens": [],
       "omesse_timbrature": 0,
       "festivita": 0,
       "note": "Descrivi eventuali discrepanze tra Footer e Righe"
@@ -427,11 +437,6 @@ def parse_cartellino_dettagliato(path):
             "malattia": 0,
             "permessi": 0,
             "riposi": 0,
-            "riposi_tokens": [],
-            "presenze_tokens": [],
-            "ferie_tokens": [],
-            "malattia_tokens": [],
-            "festivita_tokens": [],
             "omesse_timbrature": 0,
             "festivita": 0,
             "note": "",
@@ -442,32 +447,13 @@ def parse_cartellino_dettagliato(path):
         result["giorni_lavorati"] = result["giorni_footer"]
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
+        
 
-    # Normalizza token e ricalcola conteggi in modo coerente
+    # RIPOSI: da PDF (PyMuPDF words) per coerenza con il cartellino
     try:
-        pres = _norm_day_tokens(result.get('presenze_tokens', []))
-        rip  = _norm_day_tokens(result.get('riposi_tokens', []))
-        fer  = _norm_day_tokens(result.get('ferie_tokens', []))
-        mal  = _norm_day_tokens(result.get('malattia_tokens', []))
-        fes  = _norm_day_tokens(result.get('festivita_tokens', []))
-
-        result['presenze_tokens'] = sorted(list(pres))
-        result['riposi_tokens']   = sorted(list(rip))
-        result['ferie_tokens']    = sorted(list(fer))
-        result['malattia_tokens'] = sorted(list(mal))
-        result['festivita_tokens']= sorted(list(fes))
-
-        # riposi = giorni unici di riposo
-        if len(rip) > 0:
-            result['riposi'] = len(rip)
-
-        # conflitti: stesso giorno segnato come presenza e anche assenza/riposo/festività
-        conflicts = set()
-        conflicts |= (pres & rip)
-        conflicts |= (pres & fer)
-        conflicts |= (pres & mal)
-        conflicts |= (pres & fes)
-        result['conflicts_tokens'] = sorted(list(conflicts))
+        rip_det = riposi_from_cartellino_pdf(path)
+        if rip_det > 0:
+            result["riposi"] = int(rip_det)
     except Exception:
         pass
 
@@ -1822,20 +1808,6 @@ if "res" in st.session_state:
                 f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
             )
 
-        # Alert: presenza nel cartellino ma stesso giorno marcato anche come riposo/assenza/festività
-        try:
-            conflicts_tokens = c.get('conflicts_tokens', []) or []
-            if conflicts_tokens:
-                # Converte token in date del mese per mostrarle chiaramente
-                conflict_dates = [token_to_date_str(anno, mese_num, t) or t for t in conflicts_tokens]
-                st.error(
-                    "❌ CONFLITTO CARTELLINO: almeno un giorno risulta sia PRESENZA (Vxx) sia ASSENZA/RIPOSO/FESTIVITÀ. "
-                    "Questo può spiegare un giorno pagato in meno."
-                 + "Giorni: " + ", ".join(conflict_dates)
-                )
-        except Exception:
-            pass
-
         st.markdown("---")
 
         # =====================================================================
@@ -2029,4 +2001,3 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
-
