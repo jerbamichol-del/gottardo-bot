@@ -1865,38 +1865,32 @@ if "res" in st.session_state:
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
         
-        # Converti ore in giorni (usa ore/giorno effettive dal footer cartellino se disponibili)
-        import math
-
-        def round_half_up(x: float) -> int:
-            return int(math.floor(x + 0.5))
-
-        # ore/giorno effettive: ore_ordinarie_pv / giorni_footer (fallback a 8)
-        ore_giornaliere_eff = ORE_GIORNALIERE
-        try:
-            gg_footer = safe_float(c.get("giorni_footer", 0))
-            ore_pv = safe_float(c.get("ore_ordinarie_pv", 0))
-            if gg_footer > 0 and ore_pv > 0:
-                ore_giornaliere_eff = ore_pv / gg_footer
-        except Exception:
-            pass
-
-        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
-        gg_assenze_busta = round_half_up(ore_assenze_busta / ore_giornaliere_eff) if ore_assenze_busta > 0 else 0
-
-        # Nel footer cartellino: ore_malattia_footer spesso è un valore "giorni" (es. CARENZA 2,00)
-        gg_mal_footer = 0
-        try:
-            gg_mal_footer = round_half_up(safe_float(c.get("ore_malattia_footer", 0)))
-        except Exception:
-            gg_mal_footer = 0
-
-        gg_malattia = (
-            round_half_up(ore_malattia_busta / ore_giornaliere_eff)
-            if ore_malattia_busta > 0
-            else (int(gg_mal_footer) if gg_mal_footer > 0 else c_malattia)
-        )
-        gg_permessi = round_half_up(ore_permessi_busta / ore_giornaliere_eff) if ore_permessi_busta > 0 else 0
+        # 1. Calcolo dinamico ore/giorno (0253 / 0265)
+        # Evita il fisso "8 ore" che crea discrepanze su part-time/turni
+        c_ore_tot = c.get("ore_lavorate", 0) or 0.0
+        c_gg_tot  = c.get("giorni_footer", 0) or c.get("giorni_lavorati", 0) or 0.0
+        
+        ore_giorno_eff = 8.0
+        if c_ore_tot > 0 and c_gg_tot > 0:
+            ore_giorno_eff = c_ore_tot / c_gg_tot
+            
+        # 2. Converti ore in giorni (float preciso)
+        gg_ferie_busta_reali = ore_ferie_busta / ore_giorno_eff
+        gg_permessi_busta_reali = ore_permessi_busta / ore_giorno_eff
+        gg_malattia_busta_reali = ore_malattia_busta / ore_giorno_eff
+        
+        # Totale Assenze Busta (Ferie + Permessi)
+        # Manteniamo i float per la precisione nel "totale calcolato"
+        gg_assenze_busta = gg_ferie_busta_reali + gg_permessi_busta_reali
+        
+        # Malattia: se c'è in busta (ore), usa quella convertita. Altrimenti usa cartellino.
+        if ore_malattia_busta > 0:
+             gg_malattia = gg_malattia_busta_reali
+        else:
+             gg_malattia = c_malattia
+             
+        # Permessi (variabile di appoggio per UI)
+        gg_permessi = gg_permessi_busta_reali
 # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
         # L'agenda mostra i giorni REALI di ferie (linee gialle)
@@ -1918,7 +1912,7 @@ if "res" in st.session_state:
             gg_ferie_effettive = gg_assenze_busta
             # Info se c'è discrepanza con Cartellino
             if c_ferie != gg_ferie_effettive:
-                 st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive} gg) come da documento ufficiale (Cartellino indica {c_ferie}).")
+                 st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive:.2f} gg) come da documento ufficiale (Cartellino indica {c_ferie}).")
         elif c_ferie > 0:
             gg_ferie_effettive = c_ferie
             use_source_ferie = "Cartellino"
@@ -1968,29 +1962,52 @@ if "res" in st.session_state:
         col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
         col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
 
-        # Dettaglio assenze
-        col5, col6, col7, col8 = st.columns(4)
+        # Dettaglio assenze (Restyling 5 colonne)
+        c5, c6, c7, c8, c9 = st.columns(5)
+        
+        lbl_ferie = "Assenze Totali"
+        val_ferie = gg_ferie_effettive
+        help_ferie = ""
         
         if use_source_ferie == "Agenda":
             lbl_ferie = "🏖️ Ferie (Agenda)"
             help_ferie = "Dati rilevati dal calendario"
+            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
+            c6.metric("📋 Permessi", "0.00") # Agenda non distingue bene ferie/permessi spesso
+
         elif use_source_ferie == "Cartellino":
             lbl_ferie = "🏖️ Ferie (Cartellino)"
             help_ferie = "Giorni 'FER' contati dal cartellino"
+            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
+            c6.metric("📋 Permessi", "0.00")
+
         else:
-            lbl_ferie = "🏖️ Ferie (Busta)"
-            help_ferie = "Calcolato dalle ore in busta (Documento Ufficiale)"
-        
-        col5.metric(lbl_ferie, gg_ferie_effettive, help=help_ferie)
-        col6.metric("🤒 Malattia", gg_malattia)
-        col7.metric("💤 Riposi", c_riposi)
-        col8.metric("🎉 Festività", c_festivita)
+            # BUSTA (Source of Truth)
+            lbl_ferie = "🏖️ Assenze (Busta)"
+            help_ferie = f"Ferie + Permessi ({ore_giorno_eff:.2f} h/gg calcolate su {c_gg_tot}gg lavorati)"
+            
+            # Colonna 5: Totale Assenze
+            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
+            
+            # Colonna 6: Ferie (Breakdown)
+            c6.metric("🏖️ Ferie", f"{gg_ferie_busta_reali:.2f}", help=f"{ore_ferie_busta} ore")
+            
+            # Colonna 7: Permessi (Breakdown)
+            c7.metric("� Permessi", f"{gg_permessi:.2f}", help=f"{ore_permessi_busta} ore")
+
+        # Riempimento altre colonne se non usate sopra (Agenda/Cartellino usano c5 e c6, Busta usa c5,c6,c7)
+        if use_source_ferie != "Busta":
+             # Se non siamo in Busta mode, shiftiamo per riempire
+             c7.metric("⠀", "⠀") # Spacer
+
+        c8.metric("🤒 Malattia", f"{gg_malattia:.2f}")
+        c9.metric("🎉 Festività/Riposi", f"{c_festivita + c_riposi}", help=f"Fest: {c_festivita}, Rip: {c_riposi}")
 
         # Mostra dettaglio ore dalla busta se disponibile
         if ore_ferie_busta > 0 or ore_permessi_busta > 0:
             st.caption(
                 f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
-                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
+                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta:.2f} gg)"
             )
 
         st.markdown("---")
