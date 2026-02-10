@@ -265,8 +265,9 @@ def parse_cartellino_footer_metrics(pdf_path: str) -> dict:
         ln = (raw or "").upper().replace("  ", " ").strip()
 
         # 0265 GG PRESENZA ... 15,00
-        if "0265" in ln and "PRESENZA" in ln:
-            m = re.search(r"\b0265\b.*?PRESENZA.*?(\d+[\.,]\d+)", ln)
+        # (robusto: a volte "PRESENZA" non è sulla stessa riga del "0265")
+        if "0265" in ln:
+            m = re.search(r"\b0265\b.*?(\d+[\.,]\d+)", ln)
             if m:
                 out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
 
@@ -287,6 +288,16 @@ def parse_cartellino_footer_metrics(pdf_path: str) -> dict:
             m = re.search(r"\bCARENZA\b.*?(\d+[\.,]\d+)", ln)
             if m:
                 out["ore_malattia"] = max(out["ore_malattia"], _to_float_it(m.group(1)))
+
+
+    # Fallback globale: se il footer viene spezzato su righe diverse
+    try:
+        full = " | ".join((x or "").upper() for x in lines)
+        m = re.search(r"\b0265\b.*?(\d+[\.,]\d+)", full)
+        if m:
+            out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
+    except Exception:
+        pass
 
     return out
 def analyze_with_fallback(file_path, prompt, tipo="documento"):
