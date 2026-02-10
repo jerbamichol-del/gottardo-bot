@@ -1881,6 +1881,7 @@ if "res" in st.session_state:
         
         # Totale Assenze Busta (Ferie + Permessi)
         # Manteniamo i float per la precisione nel "totale calcolato"
+        ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = gg_ferie_busta_reali + gg_permessi_busta_reali
         
         # Malattia: se c'è in busta (ore), usa quella convertita. Altrimenti usa cartellino.
