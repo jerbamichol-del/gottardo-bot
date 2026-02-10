@@ -196,30 +196,32 @@ def extract_text_from_pdf(file_path):
 
 
 
-def _extract_cartellino_day_token(line: str):
-    """Estrae (codice, token-giorno) da una riga del cartellino.
-    Esempio: 'RDD D05' -> ('RDD','D05'), 'V70 M01 ...' -> ('V70','M01')
-    """
-    m = re.match(r"^\s*([A-Z0-9]{2,3})\s+([A-Z]\d{2})", (line or "").strip())
-    if not m:
-        return None, None
-    return m.group(1), m.group(2)
+def _norm_day_tokens(arr):
+    # Normalizza lista token tipo ['M01','D05'] -> set maiuscolo valido
+    out=set()
+    if not arr:
+        return out
+    for t in arr:
+        if not isinstance(t, str):
+            continue
+        t=t.strip().upper()
+        if re.match(r'^[A-Z]\d{2}$', t):
+            out.add(t)
+    return out
 
 
-def count_riposi_from_cartellino_text(text: str) -> int:
-    """Conta riposi come giorni UNICI (dedup per token giorno, es. D05/M01)."""
-    if not text:
-        return 0
-
-    riposo_codes = {"RDD", "RCS", "RIC", "RPS", "REC", "RDO"}
-    days = set()
-
-    for ln in text.splitlines():
-        code, day = _extract_cartellino_day_token(ln)
-        if code in riposo_codes and day:
-            days.add(day)
-
-    return len(days)
+def token_to_date_str(anno: int, mese_num: int, token: str):
+    # Converte token tipo 'M01' in 'YYYY-MM-DD' usando il numero giorno (01)
+    try:
+        if not token or len(token) < 2:
+            return None
+        day = int(token[1:])
+        last = calendar.monthrange(int(anno), int(mese_num))[1]
+        if day < 1 or day > last:
+            return None
+        return f"{int(anno):04d}-{int(mese_num):02d}-{day:02d}"
+    except Exception:
+        return None
 def analyze_with_fallback(file_path, prompt, tipo="documento"):
     """Analizza PDF con Gemini, fallback su DeepSeek."""
     if not file_path or not os.path.exists(file_path):
@@ -382,6 +384,11 @@ def parse_cartellino_dettagliato(path):
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
+    - **RIPOSI**: codici RDD/RCS/RIC/RPS/REC/RDO. Restituisci i token-giorno in riposi_tokens (es. ["D05","D12"]) e riposi = numero giorni unici.
+    - **PRESENZE**: codici Vxx. Restituisci token-giorno in presenze_tokens (es. ["M01","G02"]) (dedup).
+    - **FERIE**: codici FER/FE/FEP -> ferie_tokens (dedup).
+    - **MALATTIA**: codici MAL -> malattia_tokens (dedup).
+    - **FESTIVITÀ**: codici F70/FST/FES -> festivita_tokens (dedup).
     - **FESTIVITÀ**: Codici F70, FST, FES. (Conta 1 per ogni giorno).
     - **FERIE**: Righe con FER, FE, FEP.
     - **PERMESSI**: Righe con PAR, PER, ROL.
@@ -398,6 +405,11 @@ def parse_cartellino_dettagliato(path):
       "malattia": 0,
       "permessi": 0,
       "riposi": 0,
+      "riposi_tokens": [],
+      "presenze_tokens": [],
+      "ferie_tokens": [],
+      "malattia_tokens": [],
+      "festivita_tokens": [],
       "omesse_timbrature": 0,
       "festivita": 0,
       "note": "Descrivi eventuali discrepanze tra Footer e Righe"
@@ -415,6 +427,11 @@ def parse_cartellino_dettagliato(path):
             "malattia": 0,
             "permessi": 0,
             "riposi": 0,
+            "riposi_tokens": [],
+            "presenze_tokens": [],
+            "ferie_tokens": [],
+            "malattia_tokens": [],
+            "festivita_tokens": [],
             "omesse_timbrature": 0,
             "festivita": 0,
             "note": "",
@@ -426,14 +443,31 @@ def parse_cartellino_dettagliato(path):
     elif result.get("giorni_righe", 0) > 0:
         result["giorni_lavorati"] = result["giorni_righe"]
 
-    # Riposi: conteggio deterministico dal PDF (dedup per giorno).
-    # Se disponibile, è considerato autorevole rispetto al valore AI.
+    # Normalizza token e ricalcola conteggi in modo coerente
     try:
-        text_pdf = extract_text_from_pdf(path) or ''
-        riposi_det = count_riposi_from_cartellino_text(text_pdf)
-        if riposi_det > 0:
-            result['riposi_det'] = riposi_det  # debug
-            result['riposi'] = int(riposi_det)
+        pres = _norm_day_tokens(result.get('presenze_tokens', []))
+        rip  = _norm_day_tokens(result.get('riposi_tokens', []))
+        fer  = _norm_day_tokens(result.get('ferie_tokens', []))
+        mal  = _norm_day_tokens(result.get('malattia_tokens', []))
+        fes  = _norm_day_tokens(result.get('festivita_tokens', []))
+
+        result['presenze_tokens'] = sorted(list(pres))
+        result['riposi_tokens']   = sorted(list(rip))
+        result['ferie_tokens']    = sorted(list(fer))
+        result['malattia_tokens'] = sorted(list(mal))
+        result['festivita_tokens']= sorted(list(fes))
+
+        # riposi = giorni unici di riposo
+        if len(rip) > 0:
+            result['riposi'] = len(rip)
+
+        # conflitti: stesso giorno segnato come presenza e anche assenza/riposo/festività
+        conflicts = set()
+        conflicts |= (pres & rip)
+        conflicts |= (pres & fer)
+        conflicts |= (pres & mal)
+        conflicts |= (pres & fes)
+        result['conflicts_tokens'] = sorted(list(conflicts))
     except Exception:
         pass
 
@@ -1787,6 +1821,21 @@ if "res" in st.session_state:
                 f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
                 f"{ore_assenze_busta:.0f}h ({gg_assenze_busta} gg)"
             )
+
+        # Alert: presenza nel cartellino ma stesso giorno marcato anche come riposo/assenza/festività
+        try:
+            conflicts_tokens = c.get('conflicts_tokens', []) or []
+            if conflicts_tokens:
+                # Converte token in date del mese per mostrarle chiaramente
+                conflict_dates = [token_to_date_str(anno, mese_num, t) or t for t in conflicts_tokens]
+                st.error(
+                    "❌ CONFLITTO CARTELLINO: almeno un giorno risulta sia PRESENZA (Vxx) sia ASSENZA/RIPOSO/FESTIVITÀ. "
+                    "Questo può spiegare un giorno pagato in meno.
+"
+                    + "Giorni: " + ", ".join(conflict_dates)
+                )
+        except Exception:
+            pass
 
         st.markdown("---")
 
