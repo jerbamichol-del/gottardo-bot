@@ -198,7 +198,7 @@ def extract_text_from_pdf(file_path):
 
 from collections import defaultdict
 
-RIPOSO_CODES = {"RDD", "RCS", "RIC", "RPS", "REC", "RDO"}
+RIPOSO_CODES = {"RDD", "RCS", "RIC", "RPS", "REC", "RDO", "RCO"}
 
 
 def extract_lines_from_pdf_words(pdf_path: str) -> list:
@@ -238,10 +238,57 @@ def riposi_from_cartellino_pdf(pdf_path: str):
     days = set()
     for line in extract_lines_from_pdf_words(pdf_path):
         ln = (line or "").replace(".", " ").strip().upper()
-        m = re.match(r"^(RDD|RCS|RIC|RPS|REC|RDO)\s+([A-Z]\d{2})\b", ln)
+        m = re.match(r"^(RDD|RCS|RIC|RPS|REC|RDO|RCO)\s+([A-Z]\d{2})\b", ln)
         if m and m.group(1) in RIPOSO_CODES:
             days.add(m.group(2))
     return len(days)
+
+def parse_cartellino_footer_metrics(pdf_path: str) -> dict:
+    # Estrae metriche dal footer del cartellino con regex su righe PyMuPDF words.
+    out = {
+        "gg_presenza": 0.0,
+        "ore_lavorate": 0.0,
+        "ore_ordinarie_pv": 0.0,
+        "ore_malattia": 0.0,
+    }
+
+    def _to_float_it(x: str) -> float:
+        try:
+            x = (x or "").strip()
+            x = x.replace(".", "").replace(",", ".")
+            return float(x)
+        except Exception:
+            return 0.0
+
+    lines = extract_lines_from_pdf_words(pdf_path) or []
+    for raw in lines:
+        ln = (raw or "").upper().replace("  ", " ").strip()
+
+        # 0265 GG PRESENZA ... 15,00
+        if "0265" in ln and "PRESENZA" in ln:
+            m = re.search(r"\b0265\b.*?PRESENZA.*?(\d+[\.,]\d+)", ln)
+            if m:
+                out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
+
+        # 0253 ORE LAVORATE ... 110,45
+        if "0253" in ln and "LAVORATE" in ln:
+            m = re.search(r"\b0253\b.*?LAVORATE.*?(\d+[\.,]\d+)", ln)
+            if m:
+                out["ore_lavorate"] = max(out["ore_lavorate"], _to_float_it(m.group(1)))
+
+        # 0251 ORE ORDINARIE (P.V ...) 104,45
+        if "0251" in ln and "ORDINARIE" in ln:
+            m = re.search(r"\b0251\b.*?ORDINARIE.*?(\d+[\.,]\d+)", ln)
+            if m:
+                out["ore_ordinarie_pv"] = max(out["ore_ordinarie_pv"], _to_float_it(m.group(1)))
+
+        # MAL: CARENZA ... 2,00
+        if "MAL" in ln and "CARENZA" in ln:
+            m = re.search(r"\bCARENZA\b.*?(\d+[\.,]\d+)", ln)
+            if m:
+                out["ore_malattia"] = max(out["ore_malattia"], _to_float_it(m.group(1)))
+
+    return out
 def analyze_with_fallback(file_path, prompt, tipo="documento"):
     """Analizza PDF con Gemini, fallback su DeepSeek."""
     if not file_path or not os.path.exists(file_path):
@@ -457,6 +504,21 @@ def parse_cartellino_dettagliato(path):
     except Exception:
         pass
 
+
+    # Footer metrics (deterministico): GG PRESENZA / ORE / MAL
+    try:
+        fm = parse_cartellino_footer_metrics(path)
+        if fm.get("gg_presenza", 0) > 0:
+            result["giorni_footer"] = fm["gg_presenza"]
+            result["giorni_lavorati"] = fm["gg_presenza"]
+        if fm.get("ore_lavorate", 0) > 0:
+            result["ore_lavorate"] = fm["ore_lavorate"]
+        if fm.get("ore_ordinarie_pv", 0) > 0:
+            result["ore_ordinarie_pv"] = fm["ore_ordinarie_pv"]
+        if fm.get("ore_malattia", 0) > 0:
+            result["ore_malattia_footer"] = fm["ore_malattia"]
+    except Exception:
+        pass
     return result
 
 
@@ -1359,10 +1421,26 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
         try:
             # === LOGIN ===
             st.toast("🔐 Login...", icon="🔐")
+            page.goto(
+                "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y",
+                wait_until="domcontentloaded",
+            )
+            page.wait_for_selector('input[name="username"]', timeout=20000)
+            page.fill('input[name="username"]', user)
+            page.fill('input[name="password"]', pwd)
+
+            # Meglio click su submit se esiste, altrimenti Enter
+            btn = page.locator('button[type="submit"], input[type="submit"]').first
+            if btn.count() > 0:
+                btn.click()
+            else:
+                page.press('input[name="password"]', "Enter")
+
+            # Verifica login con un elemento che usi già dopo (più stabile di un testo)
             try:
-                resilient_login(page, user, pwd, timeout_ms=45000)
-            except Exception as e:
-                st.error(f"Login fallito: {e}")
+                page.wait_for_selector("#revitnavigationNavHoverItem0label", timeout=30000)
+            except:
+                st.error("Login fallito (selettori cambiati / portale lento / credenziali / schermata intermedia).")
                 browser.close()
                 return results
 
