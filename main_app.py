@@ -1246,6 +1246,91 @@ def read_agenda_api(context, mese_num, anno):
 # ==============================================================================
 # SCRAPER CORE
 # ==============================================================================
+def _first_locator(page, selectors):
+    """Ritorna il primo locator che esiste (count>0), altrimenti None."""
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                return loc.first
+        except Exception:
+            pass
+    return None
+
+
+def resilient_login(page, user: str, pwd: str, timeout_ms: int = 45000):
+    """
+    Login robusto:
+    - preferisce attributi stabili (name=...),
+    - fallback su selettori alternativi se il DOM cambia,
+    - submit robusto (click submit se presente, altrimenti Enter),
+    - verifica successo con segnali post-login più stabili di un testo.
+    """
+    login_url = "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y"
+    page.goto(login_url, wait_until="domcontentloaded")
+
+    user_field = _first_locator(page, [
+        'input[name="username"]',
+        'input#username',
+        'input[type="email"]',
+        'input[type="text"][name*="user"]',
+        'input[type="text"]',
+    ])
+    pwd_field = _first_locator(page, [
+        'input[name="password"]',
+        'input#password',
+        'input[type="password"]',
+    ])
+
+    if not user_field or not pwd_field:
+        raise Exception("Campi login non trovati (pagina o DOM cambiati).")
+
+    user_field.fill(user)
+    pwd_field.fill(pwd)
+
+    submit = _first_locator(page, [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:has-text("Accedi")',
+        'button:has-text("Login")',
+        'button:has-text("Entra")',
+    ])
+
+    if submit:
+        submit.click()
+    else:
+        pwd_field.press("Enter")
+
+    # Attendi esito (successo / schermata intermedia)
+    import time
+    t0 = time.time()
+
+    while (time.time() - t0) * 1000 < timeout_ms:
+        # Successo: menu/elementi post-login
+        try:
+            if page.locator("#revitnavigationNavHoverItem0label").count() > 0:
+                return True
+        except Exception:
+            pass
+
+        # Altri segnali tipici post-login (fallback)
+        try:
+            if page.locator("text=I miei dati").count() > 0:
+                return True
+        except Exception:
+            pass
+
+        # Schermata intermedia comune
+        try:
+            if page.locator("text=Cambia Password").count() > 0:
+                raise Exception("Login bloccato: richiesta cambio password / schermata intermedia.")
+        except Exception:
+            raise
+
+        time.sleep(0.25)
+
+    raise Exception("Timeout login: nessun segnale di successo.")
+
 def execute_download(mese_nome, anno, user, pwd, is_13ma):
     """Scarica busta paga, cartellino e legge agenda."""
     results = {"busta": None, "cart": None, "agenda": None}
@@ -2007,4 +2092,5 @@ if "res" in st.session_state:
             p3, p4 = st.columns(2)
             p3.metric("Fruite", f"{safe_float_val(par.get('fruite', 0)):.2f}")
             p4.metric("Saldo", f"{safe_float_val(par.get('saldo', 0)):.2f}")
+
 
