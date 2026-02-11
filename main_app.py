@@ -1933,18 +1933,12 @@ if "res" in st.session_state:
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
         # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
-        # L'agenda è solo informativa.
-        # Omesse timbrature: sono giorni lavorati
-        # Se il cartellino non le include nei 'lavorati', usale SOLO per colmare un difetto vs GG INPS
-        c_lavorati_eff = c_lavorati
-        try:
-            if gg_pagati_busta > 0 and final_omesse > 0:
-                base = c_lavorati + gg_ferie_effettive + gg_malattia + c_festivita
-                if base < gg_pagati_busta:
-                    add_omesse = min(int(final_omesse), int(gg_pagati_busta - base))
-                    c_lavorati_eff = c_lavorati + add_omesse
-        except Exception:
-            pass
+        # Omesse timbrature: sono giorni lavorati e vanno SEMPRE sommati se non già nel cartellino 
+        # (assumiamo che il cartellino NON le conti come lavorati se non timbrati)
+        c_lavorati_eff = c_lavorati + final_omesse
+
+        # Totale calcolato (somma componenti)
+        # IMPORTANTE: c_riposi NON va sommato (non sono GG INPS)
         tot_calcolato = c_lavorati_eff + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
@@ -1959,9 +1953,9 @@ if "res" in st.session_state:
         # Metriche principali
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
-        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.0f}", delta=f"{diff_gg:+.0f}" if diff_gg != 0 else None, help="Lavorati + Ferie + Malattia + Festività")
-        col3.metric("👔 Lavorati (Cartellino)", c_lavorati)
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Solo informativo: giorni con timbratura mancante")
+        col2.metric("📋 GG Calcolati", f"{tot_calcolato:.2f}", delta=f"{diff_gg:+.2f}" if diff_gg != 0 else None, help=f"Lavorati ({c_lavorati}) + Omesse ({final_omesse}) + Ferie/Perm + Mal + Fest")
+        col3.metric("👔 Lavorati + Omesse", f"{c_lavorati_eff}", help=f"{c_lavorati} (Cartellino) + {final_omesse} (Omesse)")
+        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Giorni lavorati ma non timbrati")
 
         # Dettaglio assenze (Restyling 5 colonne)
         c5, c6, c7, c8, c9 = st.columns(5)
@@ -1994,7 +1988,7 @@ if "res" in st.session_state:
             c6.metric("🏖️ Ferie", f"{gg_ferie_busta_reali:.2f}", help=f"{ore_ferie_busta} ore")
             
             # Colonna 7: Permessi (Breakdown)
-            c7.metric("� Permessi", f"{gg_permessi:.2f}", help=f"{ore_permessi_busta} ore")
+            c7.metric("📋 Permessi", f"{gg_permessi:.2f}", help=f"{ore_permessi_busta} ore")
 
         # Riempimento altre colonne se non usate sopra (Agenda/Cartellino usano c5 e c6, Busta usa c5,c6,c7)
         if use_source_ferie != "Busta":
@@ -2002,7 +1996,9 @@ if "res" in st.session_state:
              c7.metric("⠀", "⠀") # Spacer
 
         c8.metric("🤒 Malattia", f"{gg_malattia:.2f}")
-        c9.metric("🎉 Festività/Riposi", f"{c_festivita + c_riposi}", help=f"Fest: {c_festivita}, Rip: {c_riposi}")
+        
+        # Colonna 9: Festività (solide) + Riposi (info)
+        c9.metric("🎉 Festività", f"{c_festivita}", help=f"Inclusi nel totale. Riposi ({c_riposi}) esclusi.")
 
         # Mostra dettaglio ore dalla busta se disponibile
         if ore_ferie_busta > 0 or ore_permessi_busta > 0:
