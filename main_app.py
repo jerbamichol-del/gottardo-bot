@@ -1207,26 +1207,25 @@ if "res" in st.session_state:
                 mancanti = abs(diff_gg)
                 if final_omesse >= mancanti:
                      st.info(
-                        f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate in Agenda. "
+                        f"☝️ **Nota**: La differenza di {mancanti} giorni corrisponde alle **{final_omesse} Omesse Timbrature** rilevate nel Cartellino. "
                         "Poiché le omesse sono giorni lavorati, i conti tornano."
                     )
         else:
             st.info(f"ℹ️ GG INPS non disponibile dalla busta. Calcolato: {tot_calcolato} giorni.")
 
-        # Avviso solo informativo per le omesse (senza warning errori)
+        # Avviso solo informativo per le omesse
         if final_omesse > 0:
             st.info(
-                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni lavorati con 'Omessa Timbratura' (presi dall'Agenda). "
+                f"ℹ️ **Nota**: Ci sono {final_omesse} giorni lavorati con 'Omessa Timbratura' (rilevati dal Cartellino). "
                 "Questi sono stati inclusi nel calcolo dei giorni lavorati totali."
             )
 
         # =====================================================================
         # INFO RIPOSI (non contano come GG INPS)
         # =====================================================================
-        if c_riposi > 0 or a_riposi > 0:
-            riposi_totali = max(c_riposi, a_riposi)
+        if c_riposi > 0:
             st.caption(
-                f"💤 {riposi_totali} riposi (domeniche + compensativi) — non contano come GG INPS"
+                f"💤 {c_riposi} riposi (domeniche + compensativi) — non contano come GG INPS"
             )
 
     elif is_13:
@@ -1298,9 +1297,7 @@ if "res" in st.session_state:
             k1.metric("👔 Lavorati", c_lavorati, help=f"Ore Totali: {c.get('ore_lavorate', 0)}")
             
             # Label dinamico (basato sulla fonte ferie)
-            if use_source_ferie == "Agenda":
-                label_ferie_tab = "🏖️ Ferie (Agenda)"
-            elif use_source_ferie == "Cartellino":
+            if use_source_ferie == "Cartellino":
                 label_ferie_tab = "🏖️ Ferie (Cartellino)"
             else:
                 label_ferie_tab = "🏖️ Ferie (Busta)"
@@ -1313,9 +1310,7 @@ if "res" in st.session_state:
             st.markdown("---")
 
             k5, k6, k7 = st.columns(3)
-            # Mostra permessi (se non inglobati in Agenda) o 0
-            val_permessi = gg_permessi if not (agenda.get("success") and a_ferie > 0) else 0
-            k5.metric("📋 Permessi", val_permessi, help="Inclusi nelle Ferie se da Agenda")
+            k5.metric("📋 Permessi", gg_permessi)
             
             k6.metric("💤 Riposi", c_riposi)
             k7.metric("🎉 Festività", c_festivita)
