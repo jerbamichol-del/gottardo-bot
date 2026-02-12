@@ -563,47 +563,60 @@ def resilient_login(page, user: str, pwd: str, timeout_ms: int = 45000):
     """
     st.toast(f"🔑 Tentativo login per {user}...", icon="🔑")
     
-    # 1. Naviga
-    page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="networkidle", timeout=timeout_ms)
+    # 1. Naviga all'URL specifico che forza il redirect al login se necessario
+    login_url = "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y"
+    page.goto(login_url, wait_until="domcontentloaded", timeout=timeout_ms)
     
-    # 2. Identifica campi
-    u_sel = ["input[name='username']", "input[id*='user']", "#username", "input[type='text']"]
-    p_sel = ["input[name='password']", "input[id*='pass']", "#password", "input[type='password']"]
+    # 2. Identifica campi con selettori multipli
+    user_field = _first_locator(page, [
+        'input[name="username"]',
+        'input#username',
+        'input[type="email"]',
+        'input[type="text"][name*="user"]',
+        'input[type="text"]',
+    ])
+    pwd_field = _first_locator(page, [
+        'input[name="password"]',
+        'input#password',
+        'input[type="password"]',
+    ])
     
-    u_f = _first_locator(page, u_sel)
-    p_f = _first_locator(page, p_sel)
-    
-    if not u_f or not p_f:
+    if not user_field or not pwd_field:
         raise Exception("Campi login non trovati.")
 
-    # 3. Inserimento
-    u_f.fill("")
-    u_f.type(user, delay=50)
-    p_f.fill("")
-    p_f.type(pwd, delay=50)
+    # 3. Inserimento pulito
+    user_field.first.fill("")
+    user_field.first.type(user, delay=50)
+    pwd_field.first.fill("")
+    pwd_field.first.type(pwd, delay=50)
     
-    # 4. Submit
-    btn_sel = ["button[type='submit']", "input[type='submit']", ".z-button", "text=Login", "text=Accedi"]
-    btn = _first_locator(page, btn_sel)
+    # 4. Submit robusto
+    submit_btn = _first_locator(page, [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        '.z-button',
+        'button:has-text("Accedi")',
+        'button:has-text("Login")',
+        'text=Login',
+        'text=Accedi'
+    ])
     
-    if btn:
-        btn.click()
+    if submit_btn:
+        submit_btn.first.click()
     else:
         page.keyboard.press("Enter")
 
-    # 5. Verifica Successo (URL cambia o compaiono elementi della Home)
-    # Segnali di successo: 'logout', 'benvenuto', o sparizione form login
+    # 5. Verifica Successo
     try:
         page.wait_for_function(
-            "() => !document.querySelector('input[type=\"password\"]') || location.href.includes('Home') || document.body.innerText.includes('Esci')",
+            "() => !document.querySelector('input[type=\"password\"]') || location.href.includes('Home') || document.body.innerText.includes('Esci') || document.body.innerText.includes('logout')",
             timeout=15000
         )
     except:
-        # Fallback a check testuale
-        if "Home" in page.url or "Esci" in page.content():
+        if "Home" in page.url or "Esci" in page.content().lower() or "logout" in page.content().lower():
             pass
         else:
-            raise Exception("Segnale di successo post-login non rilevato.")
+            raise Exception("Timeout login: nessun segnale di successo.")
 
     time.sleep(2)
     return True
