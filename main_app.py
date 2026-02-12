@@ -408,9 +408,10 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 Cerca nella colonna centrale le voci relative a ferie/permessi/malattia fruiti nel mese corrente:
 - ore_ferie_mese: Cerca "FERIE GODUTE" (voce 4521) -> prendi valore colonna "ORE/GG/MESI".
 - ore_permessi_mese: Cerca "PERMESSI GODUTI" o "ROL" (voce 4529) -> prendi valore colonna "ORE/GG/MESI".
-- gg_malattia_mese: Cerca righe con "MAL: CARENZA" o "MALATTIA" -> prendi valore colonna "ORE/GG/MESI". Se il valore è piccolo (es. 1.00, 2.00) e il valore unitario è alto (>50), sono GIORNI.
+- gg_malattia_mese: Cerca righe con "MAL: CARENZA" o "MALATTIA" -> prendi valore colonna "ORE/GG/MESI".
+- festivita: Cerca "FESTIVITA' GODUTA" (voce 4006) -> prendi valore colonna "ORE/GG/MESI" (solitamente è 1.00).
 
-IMPORTANTE: Estrai i valori numerici con TUTTI i decimali. Se trovi più righe di malattia, NON sommarle se sono una la trattenuta dell'altra (es. voce 2502 e 2650 spesso riportano lo stesso valore). Prendi il valore massimo.
+IMPORTANTE: Estrai i valori numerici con TUTTI i decimali. Per la malattia, se trovi più righe (es. voce 2502 e 2650), riportano lo stesso evento: prendi il valore una sola volta (massimo).
 
 Output SOLO JSON:
 {
@@ -420,7 +421,7 @@ Output SOLO JSON:
   "trattenute": {"inps": 0.00, "irpef_netta": 0.00, "addizionali": 0.00},
   "ferie": {"residue_ap": 0.00, "maturate": 0.00, "godute": 0.00, "saldo": 0.00},
   "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00},
-  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "gg_malattia": 0.00}
+  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "gg_malattia": 0.00, "gg_festivita": 0.00}
 }
 """.strip()
 
@@ -464,17 +465,16 @@ def parse_cartellino_dettagliato(path):
     - Assegna questo conteggio manuale a "giorni_righe".
     
     **3. ALTRI CODICI:**
-    - **FESTIVITÀ**: Codici F70, FST, FES. (Conta 1 per ogni giorno).
-    - **FERIE**: Righe con FER, FE, FEP.
-    - **PERMESSI**: Righe con PAR, PER, ROL.
-    - **MALATTIA**: Righe con MAL.
-    - **OMESSE TIMBRATURE**: Conta SOLO se trovi esplicitamente scritto "OMESSA", "ANOMALIA", "MANCATA TIMBRATURA". NON contare righe Vxx senza orario come omesse (possono essere giustificativi manuali).
+    - **FESTIVITÀ**: Solo Codice F70 (Festività). Conta i giorni (es. 1 maggio = 1).
+    - **FERIE**: Solo Righe con FER, FE sulle righe.
+    - **MALATTIA**: Solo Righe con MAL.
+    - **IMPORTANTE**: Ignora il codice 0265 (GG PRESENZA) per quanto riguarda le assenze e le festività. Non confondere i 15 o 21 giorni di presenza con le festività.
 
     Output JSON:
     {
-      "giorni_lavorati": 0,  // Usa il valore del FOOTER
-      "giorni_footer": 0,    // Valore esplicito footer
-      "giorni_righe": 0,     // Conteggio manuale righe
+      "giorni_lavorati": 0,  
+      "giorni_footer": 0,    
+      "giorni_righe": 0,     
       "ore_lavorate": 0.00,
       "ferie": 0,
       "malattia": 0,
@@ -482,7 +482,7 @@ def parse_cartellino_dettagliato(path):
       "riposi": 0,
       "omesse_timbrature": 0,
       "festivita": 0,
-      "note": "Descrivi eventuali discrepanze tra Footer e Righe"
+      "note": ""
     }
     """.strip()
 
@@ -1870,9 +1870,9 @@ if "res" in st.session_state:
         ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
         gg_malattia_busta = safe_float(assenze_busta.get("gg_malattia", 0))
+        gg_festivita_busta = safe_float(assenze_busta.get("gg_festivita", 0))
         
         # 1. Calcolo dinamico ore/giorno (0253 / 0265)
-        # Evita il fisso "8 ore" che crea discrepanze su part-time/turni
         c_ore_tot = c.get("ore_lavorate", 0) or 0.0
         c_gg_tot  = c.get("giorni_footer", 0) or c.get("giorni_lavorati", 0) or 0.0
         
@@ -1880,27 +1880,30 @@ if "res" in st.session_state:
         if c_ore_tot > 0 and c_gg_tot > 0:
             ore_giorno_eff = c_ore_tot / c_gg_tot
             
-        # 2. Converti ore in giorni (float preciso)
+        # 2. Converti assenze in giorni
         gg_ferie_busta_reali = ore_ferie_busta / ore_giorno_eff
         gg_permessi_busta_reali = ore_permessi_busta / ore_giorno_eff
         
-        # Totale Assenze Busta (Ferie + Permessi)
-        # Manteniamo i float per la precisione nel "totale calcolato"
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = gg_ferie_busta_reali + gg_permessi_busta_reali
         
-        # Malattia: Busta (Ufficiale) o Cartellino
+        # Malattia: Busta > Cartellino
         if gg_malattia_busta > 0:
              gg_malattia = gg_malattia_busta
         else:
-             # Se dal cartellino abbiamo ore, convertiamo. Se abbiamo già giorni, usiamo quelli.
              c_mal_val = c.get("ore_malattia_footer", 0) or c.get("malattia", 0)
-             if c_mal_val > 5: # Presumibilmente ore
-                 gg_malattia = c_mal_val / ore_giorno_eff
-             else:
-                 gg_malattia = c_mal_val
+             gg_malattia = c_mal_val / ore_giorno_eff if c_mal_val > 5 else c_mal_val
              
-        # Permessi (variabile di appoggio per UI)
+        # Festività: Busta > Cartellino
+        if gg_festivita_busta > 0:
+             c_festivita = gg_festivita_busta
+        else:
+             c_fest_val = c.get("ore_festivita_footer", 0) / ore_giorno_eff if c.get("ore_festivita_footer") else c_festivita
+             if c_fest_val > 0 and (c_festivita == 0 or abs(c_fest_val - c_festivita) > 0.5):
+                 # Limite di sicurezza per evitare errori macroscopici (es. 15 gg festivi)
+                 c_festivita = c_fest_val if c_fest_val < 5 else c_festivita
+
+        # Permessi
         gg_permessi = gg_permessi_busta_reali
 # =====================================================================
         # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
@@ -1945,12 +1948,6 @@ if "res" in st.session_state:
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
         c_lavorati_eff = c_lavorati + final_omesse
-
-        # Consolidamento Festività: Footer o AI
-        if c.get("ore_festivita_footer"):
-             c_fest_val = c.get("ore_festivita_footer") / ore_giorno_eff
-             if abs(c_fest_val - c_festivita) > 0.5:
-                 c_festivita = c_fest_val
 
         # Totale calcolato (somma componenti)
         # Se gg_malattia è già in giorni (valore basso), lo usiamo direttamente.
