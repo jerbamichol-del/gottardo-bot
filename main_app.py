@@ -1007,6 +1007,7 @@ if "res" in st.session_state:
     tratt = b.get("trattenute", {})
     ferie = b.get("ferie", {})
     par = b.get("par", {})
+    gg_pagati_busta = dg.get("giorni_pagati", 0)
 
     # 0. Recupero e calcolo parametri del mese (Universale)
     import calendar
@@ -1122,7 +1123,6 @@ if "res" in st.session_state:
         # =====================================================================
         # CALCOLO GG INPS (VERIFICA PRINCIPALE)
         # =====================================================================
-        gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
         # Se c_lavorati viene da giorni_footer (codice 0265), di solito include già le omesse.
         # Facciamo una verifica: se c_lavorati è uguale ai giorni totali del mese meno riposi/assenze, 
