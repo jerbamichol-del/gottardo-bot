@@ -540,789 +540,6 @@ def parse_cartellino_dettagliato(path):
 
 
 # ==============================================================================
-# AGENDA - METODO MIGLIORATO CON INTERCETTAZIONE RETE
-# ==============================================================================
-def read_agenda_with_navigation(page, context, mese_num, anno):
-    """
-    Legge l'agenda navigando effettivamente al calendario e intercettando le richieste.
-    Questo è più affidabile delle chiamate API dirette.
-    """
-    result = {"events_by_type": {}, "total_events": 0, "items": [], "debug": []}
-
-    captured_events = []
-
-    # Handler per catturare risposte di rete
-    def capture_calendar_response(response):
-        try:
-            url = response.url
-            if (
-                "events" in url.lower()
-                or "calendar" in url.lower()
-                or "time" in url.lower()
-                or "anomalies" in url.lower()
-            ):
-                if response.status == 200:
-                    try:
-                        data = response.json()
-                        if data:
-                            result["debug"].append(
-                                f"📡 Catturato ({'JSON' if isinstance(data, (list, dict)) else 'TEXT'}): {url[:70]}..."
-                            )
-                            if isinstance(data, list):
-                                captured_events.extend(data)
-                            elif isinstance(data, dict) and "items" in data:
-                                captured_events.extend(data["items"])
-                            elif isinstance(data, dict):
-                                captured_events.append(data)
-                    except:
-                        pass
-        except:
-            pass
-
-    # Registra listener
-    page.on("response", capture_calendar_response)
-
-    try:
-        # Naviga al calendario (Time -> Calendario)
-        result["debug"].append("🗓️ Navigazione al calendario...")
-
-        # 1) Clicca su Time nel menu
-        try:
-            page.evaluate(
-                "document.getElementById('revit_navigation_NavHoverItem_2_label')?.click()"
-            )
-            result["debug"].append("  Menu Time cliccato (JS)")
-        except:
-            try:
-                page.locator("text=Time").first.click(force=True)
-                result["debug"].append("  Menu Time cliccato (locator)")
-            except:
-                result["debug"].append("  ⚠️ Menu Time non trovato")
-        time.sleep(3)
-
-        # 2) Cerca il pannello/tab del calendario - vari tentativi
-        # Guardando lo screenshot: "Mese" è un tab che mostra la vista calendario
-        calendar_tabs = ["Mese", "Calendario", "Agenda", "Calendar", "Month"]
-        tab_clicked = False
-
-        for tab_name in calendar_tabs:
-            try:
-                tab = page.locator(f"text={tab_name}").first
-                if tab.is_visible(timeout=2000):
-                    tab.click(force=True)
-                    result["debug"].append(f"  ✅ Tab '{tab_name}' cliccato")
-                    tab_clicked = True
-                    break
-            except:
-                continue
-
-        if not tab_clicked:
-            # Prova con ID specifici
-            for tab_id in ["lnktab_0_label", "lnktab_1_label", "lnktab_2_label"]:
-                try:
-                    if page.evaluate(f"!!document.getElementById('{tab_id}')"):
-                        page.evaluate(f"document.getElementById('{tab_id}')?.click()")
-                        result["debug"].append(f"  ✅ Tab {tab_id} cliccato")
-                        break
-                except:
-                    pass
-
-        time.sleep(4)
-
-        # === CATTURA EVENTI DAL DOM (DENTRO IFRAME) ===
-        result["debug"].append("🔍 Ricerca eventi nell'IFRAME del calendario...")
-
-        # Cerca il frame del calendario
-        calendar_frame = None
-        for frame in page.frames:
-            if "CalUI" in frame.name or "calendar" in frame.url:
-                calendar_frame = frame
-                result["debug"].append(f"  ✅ Frame calendario trovato: {frame.name}")
-                break
-
-        # Se non trova il frame specifico, usa il main frame ma cerca anche negli altri
-        target_frames = [calendar_frame] if calendar_frame else page.frames
-
-        # === NAVIGAZIONE AL MESE CORRETTO (LOGICA SIDEBAR) ===
-        target_month_name = MESI_IT[mese_num - 1].upper()  # es: OTTOBRE
-        result["debug"].append(
-            f"🗓️ Navigazione al mese target: {target_month_name} {anno}"
-        )
-
-        cal_nav_success = False
-        if calendar_frame:
-            try:
-                # 0. FORZA VISTA MENSILE (CRITICO!)
-                # Cerca e clicca il bottone "Mese" nella toolbar principale
-                result["debug"].append("  🖱️ Imposto vista MENSILE (click 'Mese')...")
-
-                # Selettori per il bottone Mese
-                # Cerchiamo bottoni che contengono il testo "Mese"
-                month_view_btns = calendar_frame.locator(
-                    ".dijitButtonText, .dijitButton"
-                ).filter(has_text="Mese")
-
-                clicked_view = False
-                if month_view_btns.count() > 0:
-                    # Clicca il primo visibile
-                    for i in range(month_view_btns.count()):
-                        btn = month_view_btns.nth(i)
-                        if btn.is_visible():
-                            btn.click()
-                            clicked_view = True
-                            result["debug"].append("  ✅ Vista 'Mese' cliccata")
-                            break
-
-                if not clicked_view:
-                    # Fallback su span testo esatto
-                    try:
-                        calendar_frame.locator("span", has_text="Mese").first.click()
-                        result["debug"].append(
-                            "  ✅ Vista 'Mese' cliccata (fallback span)"
-                        )
-                    except:
-                        result["debug"].append("  ⚠️ Bottone 'Mese' non trovato")
-
-                time.sleep(2)  # Attesa cambio vista
-
-                # === NUOVA NAVIGAZIONE: USA FRECCE PRINCIPALI TOOLBAR (NO SIDEBAR) ===
-                # 1. Assicurati Vista MENSILE
-                result["debug"].append("  🖱️ Imposto vista MENSILE...")
-                month_btns = calendar_frame.locator(
-                    ".dijitButtonText, .dijitButtonContents"
-                ).filter(has_text="Mese")
-                if month_btns.count() > 0:
-                    for i in range(month_btns.count()):
-                        if month_btns.nth(i).is_visible():
-                            try:
-                                month_btns.nth(i).click()
-                                time.sleep(2)
-                                break
-                            except:
-                                pass
-
-                # Selettori per il titolo (es. "Gennaio 2026")
-                # Tentativo 1: Selettori specifici Dojo/ZK
-                title_selectors = [
-                    ".dijitCalendarTitle",
-                    ".dojoxCalendarTitle",
-                    "#calendarTitle",
-                    ".calendarTitle",
-                    "span[id*='Title']",
-                    "div[id*='Title']",
-                    ".title",
-                    ".header-title",
-                ]
-
-                found_title = False
-                title_el = None
-
-                for sel in title_selectors:
-                    els = calendar_frame.locator(sel)
-                    if els.count() > 0:
-                        for i in range(els.count()):
-                            if els.nth(i).is_visible():
-                                t = els.nth(i).inner_text().strip()
-                                if re.search(r"\b20\d{2}\b", t):  # Cerca anno (20xx)
-                                    title_el = els.nth(i)
-                                    found_title = True
-                                    result["debug"].append(
-                                        f"  ✅ Titolo trovato con sel '{sel}': {t}"
-                                    )
-                                    break
-                    if found_title:
-                        break
-
-                # Tentativo 2: Ricerca testuale generica per testo che sembra una data (Mese Anno)
-                if not found_title:
-                    result["debug"].append(
-                        "  ⚠️ Titolo non trovato con selettori, provo ricerca testo generica..."
-                    )
-                    # Cerca elementi che contengono l'anno corrente o target
-                    # Es: "Gennaio 2026"
-                    text_candidates = calendar_frame.locator(
-                        "text=202"
-                    ).all()  # Prende tutto ciò che ha "202..."
-                    for el in text_candidates:
-                        try:
-                            if el.is_visible():
-                                txt = (
-                                    el.inner_text().strip()
-                                )  # es "Gennaio 2026" o "01/01/2026"
-                                # Deve essere breve (< 30 caratteri) per essere un titolo
-                                if len(txt) < 30 and re.search(
-                                    r"[A-Za-z]+\s+20\d{2}", txt
-                                ):
-                                    title_el = el
-                                    current_title_text = txt
-                                    found_title = True
-                                    result["debug"].append(
-                                        f"  ✅ Titolo trovato per euristica testo: '{txt}'"
-                                    )
-                                    break
-                        except:
-                            pass
-
-                # DIAGNOSTICA HTML SE FALLISCE ANCORA
-                if not found_title:
-                    result["debug"].append(
-                        "  ❌ TITOLO ASSENTE. Eseguo DUMP struttura HTML..."
-                    )
-                    # Salva un riassunto dei div/span visibili per capire cosa c'è
-                    try:
-                        visible_els = calendar_frame.locator("div, span, button").all()
-                        count_vis = 0
-                        for el in visible_els:
-                            if count_vis > 30:
-                                break
-                            if el.is_visible():
-                                t = el.inner_text().strip() or "[no text]"
-                                if len(t) > 50:
-                                    t = t[:50] + "..."
-                                i_d = el.get_attribute("id") or ""
-                                cls = el.get_attribute("class") or ""
-                                if t != "[no text]" or i_d:  # Logga solo roba utile
-                                    result["debug"].append(
-                                        f"    - Tag: {t} | ID: {i_d} | Class: {cls}"
-                                    )
-                                    count_vis += 1
-                    except Exception as dump_e:
-                        result["debug"].append(f"    Errore dump: {dump_e}")
-
-                # 3. Naviga Indietro/Avanti (STRATEGIA POPUP: ICONA -> MINI CAL -> FRECCE)
-                # Il "Mini Calendar" si apre cliccando un DropDownButton
-
-                # Cerca l'icona/bottone dropdown
-                # Strategia: Trova TUTTI i candidati e clicca il primo VISIBILE
-                dropdown_candidates = calendar_frame.locator(
-                    ".popup-trigger, .calendar16, [widgetid^='revit_form_Button'], .dijitCalendarIcon"
-                ).all()
-
-                opened_popup = False
-                result["debug"].append(
-                    f"  🔍 Trovati {len(dropdown_candidates)} candidati per il Dropdown. Cerco quello visibile..."
-                )
-
-                for btn in dropdown_candidates:
-                    try:
-                        if btn.is_visible():
-                            result["debug"].append(
-                                f"  🖱️ Clicco candidato visibile: {btn.get_attribute('class')}..."
-                            )
-                            btn.click()
-                            time.sleep(2.0)
-
-                            # Verifica se si è aperto
-                            if calendar_frame.locator(
-                                ".dijitCalendar, .dijitCalendarPopup"
-                            ).last.is_visible():
-                                opened_popup = True
-                                break
-                    except:
-                        pass
-
-                if not opened_popup:
-                    # Fallback: Clicca il TITOLO STESSO (spesso apre il picker)
-                    result["debug"].append(
-                        "  ⚠️ Nessun Dropdown visibile funzionante. Provo click su Titolo..."
-                    )
-                    try:
-                        calendar_frame.locator(
-                            f"text={current_title_text}"
-                        ).first.click()
-                        time.sleep(2.0)
-                        if calendar_frame.locator(
-                            ".dijitCalendar, .dijitCalendarPopup"
-                        ).last.is_visible():
-                            opened_popup = True
-                    except:
-                        pass
-
-                # Ora cerchiamo il POPUP del calendario (spesso è un dijitPopup o dijitCalendarMenu)
-                # Potrebbe essere dentro il frame o nel root. Proviamo nel frame.
-                mini_cal = calendar_frame.locator(
-                    ".dijitCalendar, .dijitCalendarPopup"
-                ).last
-
-                if mini_cal.is_visible():
-                    result["debug"].append("  ✅ Mini-Calendario APERTO!")
-
-                    moves = 0
-                    max_moves = 36
-
-                    # Calcolo Delta Iniziale (Dead Reckoning)
-                    # Se la lettura del popup fallisce, usiamo la data letta dalla pagina principale (current_title_text)
-                    months_delta = 0
-                    start_y = -1
-                    start_m = -1
-
-                    # Parsing data principale (che sappiamo funzionare: '01 feb - 28 feb 2026')
-                    try:
-                        # Assicuriamoci che sia UPPER
-                        current_title_upper = current_title_text.upper()
-
-                        y_match = re.search(r"20\d{2}", current_title_upper)
-                        if y_match:
-                            start_y = int(y_match.group(0))
-
-                        mesi = [m.upper() for m in MESI_IT]
-                        for i, m in enumerate(mesi):
-                            if m in current_title_upper or (
-                                len(m) > 4 and m[:-1] in current_title_upper
-                            ):
-                                start_m = i + 1
-                                break
-                        if start_m == -1:  # Try short
-                            for i, m3 in enumerate([m[:3] for m in mesi]):
-                                if re.search(r"\b" + m3 + r"\b", current_title_upper):
-                                    start_m = i + 1
-                                    break
-                    except Exception as e_delta:
-                        result["debug"].append(f"    ⚠️ Errore calcolo delta: {e_delta}")
-
-                    if start_y != -1 and start_m != -1:
-                        target_val = anno * 12 + mese_num
-                        start_val = start_y * 12 + start_m
-                        months_delta = target_val - start_val
-                        result["debug"].append(
-                            f"  🧮 Navigazione Stimata (Dead Reckoning): Start={start_m}/{start_y}, Target={mese_num}/{anno}, Delta={months_delta}"
-                        )
-                    else:
-                        result["debug"].append(
-                            "  ⚠️ Impossibile calcolare delta mesi iniziale (Start date ignota)"
-                        )
-
-                    moves = 0
-                    clicks_needed = abs(months_delta)
-                    direction_is_back = months_delta < 0
-
-                    while moves <= clicks_needed + 2:  # +2 buffer
-                        # 3a. Leggi data (Opzionale, solo per conferma)
-                        curr_title = "ERROR"
-                        try:
-                            # Prova a leggere per fermarci prima se funziona
-                            curr_month_el = mini_cal.locator(
-                                ".dijitCalendarMonthLabel"
-                            ).first
-                            if curr_month_el.is_visible():
-                                curr_title = (
-                                    curr_month_el.inner_text()
-                                    + " "
-                                    + mini_cal.locator(
-                                        ".dijitCalendarYearLabel"
-                                    ).first.inner_text()
-                                )
-                            curr_title = curr_title.strip().upper()
-                        except:
-                            pass
-
-                        if curr_title != "ERROR" and len(curr_title) > 3:
-                            # Logica Intelligente (Se la lettura funziona)
-                            # ... (omissis, usiamo la logica cieca prioritariamente se abbiamo delta)
-                            # Check if arrived
-                            # ...
-                            pass
-
-                        # LOGICA CIECA PRIORITARIA o FALLBACK
-                        if months_delta != 0:
-                            # Se abbiamo un piano di navigazione, seguiamolo
-                            if moves < clicks_needed:
-                                arrow_sel = (
-                                    ".dijitCalendarDecrease"
-                                    if direction_is_back
-                                    else ".dijitCalendarIncrease"
-                                )
-                                desc = "Indietro" if direction_is_back else "Avanti"
-
-                                btn = mini_cal.locator(arrow_sel).first
-                                if btn.is_visible():
-                                    btn.click()
-                                    result["debug"].append(
-                                        f"    Blind Click {moves + 1}/{clicks_needed}: {desc}"
-                                    )
-                                else:
-                                    result["debug"].append(
-                                        f"    ⚠️ Bottone Blind {arrow_sel} NON VISIBILE"
-                                    )
-                                time.sleep(0.4)  # Click rapidi
-                                moves += 1
-                                continue
-                            else:
-                                # Finito i click previsti!
-                                result["debug"].append(
-                                    "    🏁 Finiti click stimati. Clicco giorno per confermare..."
-                                )
-
-                                # Clicca GIORNO
-                                days = mini_cal.locator(
-                                    ".dijitCalendarDateTemplate:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth), .dijitCalendarCurrentMonth"
-                                ).all()
-                                if len(days) > 0:
-                                    idx = min(15, len(days) - 1)
-                                    try:
-                                        days[idx].click()
-                                        result["debug"].append(
-                                            f"    🖱️ Click giorno {idx + 1}"
-                                        )
-                                        time.sleep(4)
-                                        cal_nav_success = True
-                                    except:
-                                        pass
-                                else:
-                                    result["debug"].append(
-                                        "    ⚠️ Nessun giorno cliccabile trovato"
-                                    )
-                                break
-                        else:
-                            # Se delta è 0 (o ignoto), prova logica standard (con lettura fallimentare -> exit)
-                            break
-
-                        moves += 1
-                else:
-                    result["debug"].append(
-                        "  ⚠️ Popup Mini-Calendario NON APERTO dopo il click"
-                    )
-            except Exception as nav_err:
-                result["debug"].append(f"  ❌ Errore generale navigazione: {nav_err}")
-
-        # === CATTURA EVENTI DAL DOM (FALLBACK TOTALE) ===
-        # Se la griglia non si trova, cerca OVUNQUE nel frame
-        result["debug"].append(
-            "🔍 Avvio scraping eventi (Ricerca Globale nel Frame)..."
-        )
-
-        dom_events = []
-        found_any = False  # Inizializza flag PRIMA del loop
-
-        if calendar_frame:
-            try:
-                # Url check: siamo ancora sull'agenda?
-                # Aspetta body visible
-                calendar_frame.locator("body").wait_for(timeout=2000)
-                time.sleep(2)  # Rendering finale
-
-                # 1. Prova prima griglia specifica (più accurata)
-                grid = calendar_frame.locator(
-                    "#calendarContainer, #calendarUI_ExtendedCalendar_0"
-                ).first
-
-                search_area = (
-                    grid if grid.is_visible() else calendar_frame.locator("body")
-                )
-                src_name = "Griglia" if grid.is_visible() else "BODY (Fallback)"
-                result["debug"].append(f"  Target scraping: {src_name}")
-
-                # 2. Cerca Keyword
-                keywords = [
-                    "OMESSA",
-                    "OMT",
-                    "FERIE",
-                    "FEP",
-                    "MALATTIA",
-                    "MAL",
-                    "RIPOSO",
-                    "RCS",
-                    "RIC",
-                    "RPS",
-                ]
-
-                # Dizionario per evitare duplicati (stesso evento letto più volte)
-                # Chiave = testo + posizione approx? No, conteggio semplice per ora.
-
-                # STRATEGIA GEOMETRICA WHITELIST
-                # Invece di cercare le celle "bad", cerchiamo le celle "GOOD" (mese corrente)
-                # e accettiamo SOLO gli eventi che cadono sopra di esse.
-                allowed_boxes = []
-                try:
-                    # Prova diversi selettori per le celle del mese corrente
-                    cell_selectors = [
-                        ".dijitCalendarCurrentMonth",
-                        "td:not(.dijitCalendarPreviousMonth):not(.dijitCalendarNextMonth)",
-                        "td[style*='background']:not([style*='gray'])",
-                    ]
-                    
-                    for sel in cell_selectors:
-                        try:
-                            cells = search_area.locator(sel).all()
-                            for c in cells:
-                                if c.is_visible():
-                                    b = c.bounding_box()
-                                    if b:
-                                        allowed_boxes.append(b)
-                            if len(allowed_boxes) >= 28:  # Minimo 28 giorni in un mese
-                                break
-                        except:
-                            continue
-
-                    result["debug"].append(
-                        f"  ✅ Mappate {len(allowed_boxes)} celle giorni mese corrente"
-                    )
-                except:
-                    pass
-
-                # Nomi dei mesi per il filtro testuale (escludere eventi che menzionano altri mesi)
-                mese_nome_corrente = MESI_IT[mese_num - 1]  # es: "Ottobre" per mese_num=10
-                altri_mesi = [m.lower()[:3] for m in MESI_IT if m.lower()[:3] != mese_nome_corrente.lower()[:3]]
-                mese_corrente_short = mese_nome_corrente.lower()[:3]  # es: "ott" per Ottobre
-
-                # Loop completo keywords (esteso con MANCATA/ANOMALIA)
-                all_kws = [
-                    "OMESSA",
-                    "OMT",
-                    "MANCATA",
-                    "ANOMALIA",
-                    "FERIE",
-                    "FEP",
-                    "MALATTIA",
-                    "MAL",
-                    "RIPOSO",
-                    "RCS",
-                    "RIC",
-                    "RPS",
-                    "REC",
-                ]
-                for kw in all_kws:
-                    # text=KW è case-insensitive
-                    matches = search_area.locator(f"text={kw}")
-                    count = matches.count()
-
-                    real_matches = 0
-                    for i in range(count):
-                        try:
-                            el = matches.nth(i)
-                            if not el.is_visible():
-                                continue
-
-                            # 1. FILTRI TESTUALI (ANTI-SIDEBAR)
-                            txt_upper = el.inner_text().upper()
-                            txt_lower = el.inner_text().lower()
-                            if "SALDO" in txt_upper or "RESIDUO" in txt_upper:
-                                continue
-                            if "TOTALE" in txt_upper or "PERMESSI DEL" in txt_upper:
-                                continue
-                            
-                            # 1b. FILTRO DATE ALTRI MESI
-                            # Escludi eventi che contengono date di altri mesi (es. "29 set", "1 nov")
-                            skip_wrong_month = False
-                            for altro_mese in altri_mesi:
-                                if altro_mese in txt_lower:
-                                    skip_wrong_month = True
-                                    break
-                            if skip_wrong_month:
-                                result["debug"].append(f"    Scartato evento fuori mese: {txt_lower[:40]}...")
-                                continue
-
-
-                            # 2. FILTRI GEOMETRICI
-                            box = el.bounding_box()
-                            if not box:
-                                continue
-
-                            # a) Sidebar a sinistra
-                            if box["x"] < 300:
-                                continue
-
-                            # b) WHITELIST CHECK: Deve sovrapporsi a una cella del mese corrente
-                            # Se allowed_boxes è vuoto (es. scraping body fallback senza griglia), disabilitiamo il filtro per sicurezza
-                            # Ma se ne abbiamo trovate (es. 31), allora il filtro è ATTIVO.
-                            if allowed_boxes:
-                                is_good = False
-                                cx = box["x"] + box["width"] / 2
-                                cy = box["y"] + box["height"] / 2
-                                for gbox in allowed_boxes:
-                                    if (
-                                        gbox["x"] <= cx <= gbox["x"] + gbox["width"]
-                                    ) and (
-                                        gbox["y"] <= cy <= gbox["y"] + gbox["height"]
-                                    ):
-                                        is_good = True
-                                        break
-                                if not is_good:
-                                    # result["debug"].append(f"    Scartato '{kw}' fuori dai giorni del mese")
-                                    continue
-
-                            real_matches += 1
-                            if "OMESSA" in kw or "OMT" in kw:
-                                dom_events.append("OMESSA TIMBRATURA")
-                            elif "FERIE" in kw or "FEP" in kw:
-                                dom_events.append("FERIE")
-                            elif "MALATTIA" in kw or "MAL" in kw:
-                                dom_events.append("MALATTIA")
-                            elif (
-                                "RIPOSO" in kw
-                                or "RCS" in kw
-                                or "RIC" in kw
-                                or "RPS" in kw
-                            ):
-                                dom_events.append("RIPOSO")
-
-                        except:
-                            pass
-
-                    if real_matches > 0:
-                        result["debug"].append(
-                            f"  📝 Trovati {real_matches} x '{kw}' validi"
-                        )
-                        found_any = True
-
-                if not found_any:
-                    # Se il filtro geometrico ha fallito, NON fare fallback sul testo grezzo
-                    # perché potrebbe includere eventi di mesi precedenti/successivi
-                    result["debug"].append(
-                        "  ⚠️ Nessun evento valido trovato (il filtro geometrico potrebbe aver escluso giorni fuori mese)"
-                    )
-
-            except Exception as e:
-                result["debug"].append(f"  ❌ Errore scraping globale: {e}")
-
-        result["debug"].append(f"📋 Totale eventi validi estratti: {len(dom_events)}")
-
-    except Exception as e:
-        result["debug"].append(f"❌ Errore navigazione: {type(e).__name__}")
-    finally:
-        # Rimuovi listener
-        try:
-            page.remove_listener("response", capture_calendar_response)
-        except:
-            pass
-
-    # Processa eventi catturati
-    all_events = captured_events + [{"summary": e} for e in dom_events]
-
-    for ev in all_events:
-        summary = str(
-            ev.get("summary", "") or ev.get("title", "") or ev.get("description", "")
-        ).upper()
-
-        # FILTRO ANTI-SIDEBAR/FOOTER (anche per API events)
-        if "SALDO" in summary or "RESIDUO" in summary or "TOTALE" in summary:
-            continue
-        if "PERMESSI DEL" in summary:
-            continue
-
-        # Filtra per mese (se c'è data)
-        start = ev.get("startTime", "") or ev.get("start", "") or ev.get("date", "")
-        if start and len(str(start)) >= 7:
-            try:
-                ev_month = int(str(start)[5:7])
-                if ev_month != mese_num:
-                    continue
-            except:
-                pass
-
-        # Categorizza (supporto per logica Anomaly Zucchetti)
-        summary_norm = summary.upper()
-        is_omessa = (
-            any(k in summary_norm for k in ["OMESSA", "OMT", "MANCATA", "ANOMALIA"])
-            or ev.get("isAnomaly") == True
-            or ev.get("warning")
-            or ev.get("type") == "Anomaly"
-        )
-
-        if is_omessa:
-            result["events_by_type"]["OMESSA TIMBRATURA"] = (
-                result["events_by_type"].get("OMESSA TIMBRATURA", 0) + 1
-            )
-            result["items"].append(f"⚠️ OMESSA: {summary[:50]}")
-        elif "FERIE" in summary_norm or "FEP" in summary_norm:
-            result["events_by_type"]["FERIE"] = (
-                result["events_by_type"].get("FERIE", 0) + 1
-            )
-            result["items"].append(f"🏖️ FERIE: {summary[:50]}")
-        elif "MALATTIA" in summary or "MAL" in summary:
-            result["events_by_type"]["MALATTIA"] = (
-                result["events_by_type"].get("MALATTIA", 0) + 1
-            )
-            result["items"].append(f"🤒 MALATTIA: {summary[:50]}")
-        elif (
-            "RIPOSO" in summary
-            or "RCS" in summary
-            or "RIC" in summary
-            or "RPS" in summary
-            or "REC" in summary
-        ):
-            result["events_by_type"]["RIPOSO"] = (
-                result["events_by_type"].get("RIPOSO", 0) + 1
-            )
-            result["items"].append(f"💤 RIPOSO: {summary[:50]}")
-
-    result["total_events"] = sum(result["events_by_type"].values())
-    result["debug"].append(f"📊 Totale categorizzati: {result['total_events']}")
-    result["success"] = True  # Flag Esplicito di Successo
-
-    return result
-
-
-def read_agenda_api(context, mese_num, anno):
-    """Fallback: Legge l'agenda tramite chiamate API dirette."""
-    result = {
-        "events_by_type": {},
-        "total_events": 0,
-        "items": [],
-        "debug": ["📡 Tentativo API dirette..."],
-        "success": False,
-    }
-
-    base_url = "https://selfservice.gottardospa.it/js_rev/JSipert2"
-    
-    # Mappa codici API -> chiavi normalizzate (coerenti con il resto del codice)
-    CODE_TO_NORMALIZED = {
-        "FEP": "FERIE",
-        "OMT": "OMESSA TIMBRATURA",
-        "RCS": "RIPOSO",
-        "RIC": "RIPOSO",
-        "MAL": "MALATTIA",
-    }
-
-    for code, name in CALENDAR_CODES.items():
-        try:
-            url = f"{base_url}/api/time/v2/events?$filter_api=calendarCode={code},startTime={anno}-01-01T00:00:00,endTime={anno}-12-31T00:00:00"
-            resp = context.request.get(url, timeout=10000)
-
-            result["debug"].append(f"  {code}: status={resp.status}")
-
-            if resp.ok:
-                try:
-                    data = resp.json()
-                    if data:
-                        events = data if isinstance(data, list) else [data]
-
-                        month_events = []
-                        for ev in events:
-                            start = ev.get("startTime", "") or ev.get("start", "")
-                            if start and len(start) >= 7:
-                                try:
-                                    ev_month = int(start[5:7])
-                                    if ev_month == mese_num:
-                                        month_events.append(ev)
-                                        result["items"].append(
-                                            f"{code}: {ev.get('summary', name)}"
-                                        )
-                                except:
-                                    pass
-
-                        if month_events:
-                            # Usa chiave normalizzata
-                            normalized_key = CODE_TO_NORMALIZED.get(code, name)
-                            result["events_by_type"][normalized_key] = (
-                                result["events_by_type"].get(normalized_key, 0) + len(month_events)
-                            )
-                            result["total_events"] += len(month_events)
-                            result["debug"].append(
-                                f"  ✅ {code}: {len(month_events)} eventi"
-                            )
-                except Exception as e:
-                    result["debug"].append(f"  ❌ {code} parse error: {e}")
-        except Exception as e:
-            result["debug"].append(f"  ⚠️ {code}: {type(e).__name__}")
-
-    if result["total_events"] > 0:
-        result["success"] = True
-    
-    return result
-
-
-# ==============================================================================
 # SCRAPER CORE
 # ==============================================================================
 def _first_locator(page, selectors):
@@ -1331,11 +548,10 @@ def _first_locator(page, selectors):
         try:
             loc = page.locator(sel)
             if loc.count() > 0:
-                return loc.first
-        except Exception:
-            pass
+                return loc
+        except:
+            continue
     return None
-
 
 def resilient_login(page, user: str, pwd: str, timeout_ms: int = 45000):
     """
@@ -1345,74 +561,56 @@ def resilient_login(page, user: str, pwd: str, timeout_ms: int = 45000):
     - submit robusto (click submit se presente, altrimenti Enter),
     - verifica successo con segnali post-login più stabili di un testo.
     """
-    login_url = "https://selfservice.gottardospa.it/js_rev/JSipert2?r=y"
-    page.goto(login_url, wait_until="domcontentloaded")
+    st.toast(f"🔑 Tentativo login per {user}...", icon="🔑")
+    
+    # 1. Naviga
+    page.goto("https://selfservice.gottardospa.it/js_rev/JSipert2", wait_until="networkidle", timeout=timeout_ms)
+    
+    # 2. Identifica campi
+    u_sel = ["input[name='username']", "input[id*='user']", "#username", "input[type='text']"]
+    p_sel = ["input[name='password']", "input[id*='pass']", "#password", "input[type='password']"]
+    
+    u_f = _first_locator(page, u_sel)
+    p_f = _first_locator(page, p_sel)
+    
+    if not u_f or not p_f:
+        raise Exception("Campi login non trovati.")
 
-    user_field = _first_locator(page, [
-        'input[name="username"]',
-        'input#username',
-        'input[type="email"]',
-        'input[type="text"][name*="user"]',
-        'input[type="text"]',
-    ])
-    pwd_field = _first_locator(page, [
-        'input[name="password"]',
-        'input#password',
-        'input[type="password"]',
-    ])
-
-    if not user_field or not pwd_field:
-        raise Exception("Campi login non trovati (pagina o DOM cambiati).")
-
-    user_field.fill(user)
-    pwd_field.fill(pwd)
-
-    submit = _first_locator(page, [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button:has-text("Accedi")',
-        'button:has-text("Login")',
-        'button:has-text("Entra")',
-    ])
-
-    if submit:
-        submit.click()
+    # 3. Inserimento
+    u_f.fill("")
+    u_f.type(user, delay=50)
+    p_f.fill("")
+    p_f.type(pwd, delay=50)
+    
+    # 4. Submit
+    btn_sel = ["button[type='submit']", "input[type='submit']", ".z-button", "text=Login", "text=Accedi"]
+    btn = _first_locator(page, btn_sel)
+    
+    if btn:
+        btn.click()
     else:
-        pwd_field.press("Enter")
+        page.keyboard.press("Enter")
 
-    # Attendi esito (successo / schermata intermedia)
-    import time
-    t0 = time.time()
-
-    while (time.time() - t0) * 1000 < timeout_ms:
-        # Successo: menu/elementi post-login
-        try:
-            if page.locator("#revitnavigationNavHoverItem0label").count() > 0:
-                return True
-        except Exception:
+    # 5. Verifica Successo (URL cambia o compaiono elementi della Home)
+    # Segnali di successo: 'logout', 'benvenuto', o sparizione form login
+    try:
+        page.wait_for_function(
+            "() => !document.querySelector('input[type=\"password\"]') || location.href.includes('Home') || document.body.innerText.includes('Esci')",
+            timeout=15000
+        )
+    except:
+        # Fallback a check testuale
+        if "Home" in page.url or "Esci" in page.content():
             pass
+        else:
+            raise Exception("Segnale di successo post-login non rilevato.")
 
-        # Altri segnali tipici post-login (fallback)
-        try:
-            if page.locator("text=I miei dati").count() > 0:
-                return True
-        except Exception:
-            pass
-
-        # Schermata intermedia comune
-        try:
-            if page.locator("text=Cambia Password").count() > 0:
-                raise Exception("Login bloccato: richiesta cambio password / schermata intermedia.")
-        except Exception:
-            raise
-
-        time.sleep(0.25)
-
-    raise Exception("Timeout login: nessun segnale di successo.")
+    time.sleep(2)
+    return True
 
 def execute_download(mese_nome, anno, user, pwd, is_13ma):
-    """Scarica busta paga, cartellino e legge agenda."""
-    results = {"busta": None, "cart": None, "agenda": None}
+    """Scarica busta paga e cartellino."""
+    results = {"busta": None, "cart": None}
 
     try:
         idx = MESI_IT.index(mese_nome) + 1
@@ -1444,27 +642,6 @@ def execute_download(mese_nome, anno, user, pwd, is_13ma):
                 st.error(f"Login fallito: {e}")
                 browser.close()
                 return results
-
-# === AGENDA CON NAVIGAZIONE ===
-            st.toast("🗓️ Lettura Agenda...", icon="🗓️")
-            try:
-                # Prima prova con navigazione al calendario
-                results["agenda"] = read_agenda_with_navigation(page, ctx, idx, anno)
-                if results["agenda"]["total_events"] == 0:
-                    # Fallback: API dirette
-                    results["agenda"] = read_agenda_api(ctx, idx, anno)
-
-                if results["agenda"]["total_events"] > 0:
-                    st.toast(
-                        f"✅ Agenda: {results['agenda']['total_events']} eventi",
-                        icon="📅",
-                    )
-            except Exception as e:
-                results["agenda"] = {
-                    "events_by_type": {},
-                    "total_events": 0,
-                    "debug": [str(e)],
-                }
 
             # === BUSTA PAGA ===
             st.toast("💰 Scarico Busta...", icon="💰")
@@ -1811,7 +988,6 @@ if "res" in st.session_state:
     data = st.session_state["res"]
     b = data["busta"]
     c = data["cart"]
-    agenda = data.get("agenda", {})
     is_13 = data["is_13"]
 
     dg = b.get("dati_generali", {})
@@ -1820,24 +996,16 @@ if "res" in st.session_state:
     ferie = b.get("ferie", {})
     par = b.get("par", {})
 
-    # === CONTROLLO INCROCIATO DINAMICO (BUSTA vs CARTELLINO vs AGENDA) ===
+    # 0. Recupero e calcolo parametri del mese (Universale)
     import calendar
     from datetime import date
-
-    # 0. Recupero e calcolo parametri del mese (Universale)
+    
     anno = data.get("anno", 2025)  # Usa valore salvato in sessione, fallback 2025
     mese_nome = data.get("mese", "Ottobre")
     mese_num = MESI_IT.index(mese_nome) + 1
 
     _, total_days_month = calendar.monthrange(anno, mese_num)
     nome_mese = calendar.month_name[mese_num].capitalize()
-
-    # Inizializza variabili agenda (disponibili sempre)
-    a_evs = agenda.get("events_by_type", {}) if isinstance(agenda, dict) else {}
-    a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
-    a_ferie = a_evs.get("FERIE", 0)
-    a_malattia = a_evs.get("MALATTIA", 0)
-    a_riposi = a_evs.get("RIPOSO", 0)
 
     if not is_13:
         if not c:
@@ -1852,7 +1020,6 @@ if "res" in st.session_state:
         c_riposi = c.get("riposi", 0)
         c_festivita = c.get("festivita", 0)
         c_malattia = c.get("malattia", 0)
-
         c_ferie = c.get("ferie", 0)
 
         # =====================================================================
@@ -1900,47 +1067,27 @@ if "res" in st.session_state:
         else:
              c_fest_val = c.get("ore_festivita_footer", 0) / ore_giorno_eff if c.get("ore_festivita_footer") else c_festivita
              if c_fest_val > 0 and (c_festivita == 0 or abs(c_fest_val - c_festivita) > 0.5):
-                 # Limite di sicurezza per evitare errori macroscopici (es. 15 gg festivi)
+                 # Limite di sicurezza
                  c_festivita = c_fest_val if c_fest_val < 5 else c_festivita
 
         # Permessi
         gg_permessi = gg_permessi_busta_reali
-# =====================================================================
-        # DATI DALL'AGENDA (FONTE PRIMARIA PER LE FERIE!)
-        # L'agenda mostra i giorni REALI di ferie (linee gialle)
-        # =====================================================================
-        a_ferie = a_evs.get("FERIE", 0)
-        a_omesse = a_evs.get("OMESSA TIMBRATURA", 0)
-        a_riposi = a_evs.get("RIPOSO", 0)
-        a_malattia = a_evs.get("MALATTIA", 0)
-
-        # PRIORITÀ FONTI SECONDO RICHIESTA UTENTE:
-        # 1. FERIE: Busta Paga (Documento Ufficiale)
-        # 2. OMESSE: Solo Agenda (Dato informativo)
-        
+        # PRIORITÀ FERIE: Busta Paga (Documento Ufficiale)
         gg_ferie_effettive = 0
-        use_source_ferie = "Busta" # Label for UI
+        use_source_ferie = "Busta"
 
-        # LOGICA FERIE: Priorità Busta > Cartellino
         c_ferie_val = c.get("ore_ferie_footer", 0) / ore_giorno_eff if c.get("ore_ferie_footer") else c_ferie
 
         if gg_assenze_busta > 0:
             gg_ferie_effettive = gg_assenze_busta
-            # Info se c'è discrepanza con Cartellino
             if abs(c_ferie_val - gg_ferie_effettive) > 0.1:
                  st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive:.2f} gg) come da documento ufficiale (Cartellino indica {c_ferie_val:.2f}).")
         elif c_ferie_val > 0:
             gg_ferie_effettive = c_ferie_val
             use_source_ferie = "Cartellino"
-        elif a_ferie > 0:
-            gg_ferie_effettive = a_ferie
-            use_source_ferie = "Agenda"
 
-        # =====================================================================
-        # CONSOLIDAMENTO OMESSE TIMBRATURE
-        # SOLO DALL'AGENDA. Il cartellino non fa testo per le omesse.
-        # =====================================================================
-        final_omesse = a_omesse
+        # Omesse Timbrature dal Cartellino
+        final_omesse = c_omesse
 
         # =====================================================================
         # CALCOLO GG INPS (VERIFICA PRINCIPALE)
@@ -1967,50 +1114,29 @@ if "res" in st.session_state:
         col1.metric("📅 GG INPS (Busta)", gg_pagati_busta)
         col2.metric("📋 GG Calcolati", f"{tot_calcolato:.2f}", delta=f"{diff_gg:+.2f}" if diff_gg != 0 else None, help=f"Lavorati ({c_lavorati}) + Omesse ({final_omesse}) + Ferie/Perm + Mal + Fest")
         col3.metric("👔 Lavorati + Omesse", f"{c_lavorati_eff}", help=f"{c_lavorati} (Cartellino) + {final_omesse} (Omesse)")
-        col4.metric("⚠️ Omesse (Agenda)", final_omesse, help="Giorni lavorati ma non timbrati")
+        col4.metric("⚠️ Omesse", final_omesse, help="Giorni lavorati con omessa timbratura (dal cartellino)")
 
         # Dettaglio assenze (Restyling 5 colonne)
         c5, c6, c7, c8, c9 = st.columns(5)
         
-        lbl_ferie = "Assenze Totali"
-        val_ferie = gg_ferie_effettive
-        help_ferie = ""
-        
-        if use_source_ferie == "Agenda":
-            lbl_ferie = "🏖️ Ferie (Agenda)"
-            help_ferie = "Dati rilevati dal calendario"
-            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
-            c6.metric("📋 Permessi", "0.00") # Agenda non distingue bene ferie/permessi spesso
-
-        elif use_source_ferie == "Cartellino":
-            lbl_ferie = "🏖️ Ferie (Cartellino)"
-            help_ferie = "Giorni 'FER' contati dal cartellino"
-            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
+        if use_source_ferie == "Cartellino":
+            c5.metric("🏖️ Ferie (Cartellino)", f"{gg_ferie_effettive:.2f}")
             c6.metric("📋 Permessi", "0.00")
-
         else:
             # BUSTA (Source of Truth)
-            lbl_ferie = "🏖️ Assenze (Busta)"
             help_ferie = f"Ferie + Permessi ({ore_giorno_eff:.2f} h/gg calcolate su {c_gg_tot}gg lavorati)"
             
             # Colonna 5: Totale Assenze
-            c5.metric(lbl_ferie, f"{val_ferie:.2f}", help=help_ferie)
+            c5.metric("🏖️ Assenze (Busta)", f"{gg_ferie_effettive:.2f}", help=help_ferie)
             
             # Colonna 6: Ferie (Breakdown)
             c6.metric("🏖️ Ferie", f"{gg_ferie_busta_reali:.2f}", help=f"{ore_ferie_busta} ore")
             
             # Colonna 7: Permessi (Breakdown)
-            c7.metric("📋 Permessi", f"{gg_permessi:.2f}", help=f"{ore_permessi_busta} ore")
-
-        # Riempimento altre colonne se non usate sopra (Agenda/Cartellino usano c5 e c6, Busta usa c5,c6,c7)
-        if use_source_ferie != "Busta":
-             # Se non siamo in Busta mode, shiftiamo per riempire
-             c7.metric("⠀", "⠀") # Spacer
+            c7.metric("📋 Permessi", f"{gg_permessi_busta_reali:.2f}", help=f"{ore_permessi_busta} ore")
 
         c8.metric("🤒 Malattia", f"{gg_malattia:.2f}")
-        
-        # Colonna 9: Festività (solide) + Riposi (info)
-        c9.metric("🎉 Festività", f"{c_festivita}", help=f"Inclusi nel totale. Riposi ({c_riposi}) esclusi.")
+        c9.metric("🎉 Festività", f"{c_festivita:.2f}")
 
         # Mostra dettaglio ore dalla busta se disponibile
         if ore_ferie_busta > 0 or ore_permessi_busta > 0:
