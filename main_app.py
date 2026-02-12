@@ -248,57 +248,62 @@ def parse_cartellino_footer_metrics(pdf_path: str) -> dict:
     out = {
         "gg_presenza": 0.0,
         "ore_lavorate": 0.0,
-        "ore_ordinarie_pv": 0.0,
+        "ore_ordinarie": 0.0,
         "ore_malattia": 0.0,
+        "ore_ferie": 0.0,
+        "ore_permessi": 0.0,
+        "ore_festivita": 0.0,
     }
 
     def _to_float_it(x: str) -> float:
         try:
             x = (x or "").strip()
+            # Gestisce formati come 47.25 o 47,25
             x = x.replace(".", "").replace(",", ".")
             return float(x)
         except Exception:
             return 0.0
 
     lines = extract_lines_from_pdf_words(pdf_path) or []
-    for raw in lines:
-        ln = (raw or "").upper().replace("  ", " ").strip()
+    
+    # Debug: Cerca la riga dei totali (es. 110,75 10,25 10,25 14,00 47,25)
+    # Questa riga di solito precede i codici 0251, 0253.
+    for i, raw in enumerate(lines):
+        ln = (raw or "").upper().strip()
+        
+        # Cerca pattern di molti numeri in fila (almeno 3)
+        vals = re.findall(r"(\d+[\.,]\d+)", ln)
+        if len(vals) >= 4 and any("025" in l for l in lines[i:i+5]):
+            # Probabile riga dei totali colonne. 
+            # In Gottardo: ORD ... RIC FER
+            # ORD è il primo, RIC è il penultimo, FER è l'ultimo (se presenti)
+            out["ore_ordinarie"] = max(out["ore_ordinarie"], _to_float_it(vals[0]))
+            if len(vals) >= 2:
+                # FER è quasi sempre l'ultimo numero a destra
+                out["ore_ferie"] = max(out["ore_ferie"], _to_float_it(vals[-1]))
+            if len(vals) >= 3:
+                # RIC è di solito il penultimo
+                out["ore_festivita"] = max(out["ore_festivita"], _to_float_it(vals[-2]))
 
-        # 0265 GG PRESENZA ... 15,00
-        # (robusto: a volte "PRESENZA" non è sulla stessa riga del "0265")
+        # Cerca i codici specifici
         if "0265" in ln:
             m = re.search(r"\b0265\b.*?(\d+[\.,]\d+)", ln)
-            if m:
-                out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
+            if m: out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
 
-        # 0253 ORE LAVORATE ... 110,45
-        if "0253" in ln and "LAVORATE" in ln:
-            m = re.search(r"\b0253\b.*?LAVORATE.*?(\d+[\.,]\d+)", ln)
-            if m:
-                out["ore_lavorate"] = max(out["ore_lavorate"], _to_float_it(m.group(1)))
+        if "0253" in ln:
+            m = re.search(r"\b0253\b.*?(\d+[\.,]\d+)", ln)
+            if m: out["ore_lavorate"] = max(out["ore_lavorate"], _to_float_it(m.group(1)))
 
-        # 0251 ORE ORDINARIE (P.V ...) 104,45
-        if "0251" in ln and "ORDINARIE" in ln:
-            m = re.search(r"\b0251\b.*?ORDINARIE.*?(\d+[\.,]\d+)", ln)
-            if m:
-                out["ore_ordinarie_pv"] = max(out["ore_ordinarie_pv"], _to_float_it(m.group(1)))
+        if "2502" in ln or ("MAL" in ln and "CARENZA" in ln):
+            m = re.search(r"(\d+[\.,]\d+)", ln.split("100%")[-1] if "100%" in ln else ln)
+            if m: out["ore_malattia"] = max(out["ore_malattia"], _to_float_it(m.group(1)))
 
-        # MAL: CARENZA ... 2,00
-        if "MAL" in ln and "CARENZA" in ln:
-            m = re.search(r"\bCARENZA\b.*?(\d+[\.,]\d+)", ln)
-            if m:
-                out["ore_malattia"] = max(out["ore_malattia"], _to_float_it(m.group(1)))
-
-
-    # Fallback globale: se il footer viene spezzato su righe diverse
-    try:
-        full = " | ".join((x or "").upper() for x in lines)
+    # Fallback globale se spezzato
+    full = " | ".join((x or "").upper() for x in lines)
+    if not out["gg_presenza"]:
         m = re.search(r"\b0265\b.*?(\d+[\.,]\d+)", full)
-        if m:
-            out["gg_presenza"] = max(out["gg_presenza"], _to_float_it(m.group(1)))
-    except Exception:
-        pass
-
+        if m: out["gg_presenza"] = _to_float_it(m.group(1))
+    
     return out
 def analyze_with_fallback(file_path, prompt, tipo="documento"):
     """Analizza PDF con Gemini, fallback su DeepSeek."""
@@ -400,15 +405,12 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 - Formato: RES.PREC / SPETTANTI / FRUITE / SALDO
 
 **5. ASSENZE DEL MESE (IMPORTANTE!):**
-Cerca nella colonna centrale le voci relative a ferie/permessi fruiti nel mese corrente:
-- ore_ferie_mese: Cerca "FERIE GODUTE" (spesso voce 4521) -> prendi valore colonna ORE
-- ore_permessi_mese: Cerca "PERMESSI GODUTI" o "ROL GODUTI" (spesso voce 4529) -> prendi valore colonna ORE
-- ore_malattia_mese: Cerca righe con "MALATTIA" -> prendi valore colonna ORE
+Cerca nella colonna centrale le voci relative a ferie/permessi/malattia fruiti nel mese corrente:
+- ore_ferie_mese: Cerca "FERIE GODUTE" (voce 4521) -> prendi valore colonna "ORE/GG/MESI".
+- ore_permessi_mese: Cerca "PERMESSI GODUTI" o "ROL" (voce 4529) -> prendi valore colonna "ORE/GG/MESI".
+- gg_malattia_mese: Cerca righe con "MAL: CARENZA" o "MALATTIA" -> prendi valore colonna "ORE/GG/MESI". Se il valore è piccolo (es. 1.00, 2.00) e il valore unitario è alto (>50), sono GIORNI.
 
-**6. TREDICESIMA:**
-- e_tredicesima=true se trovi "TREDICESIMA"/"13MA"
-
-IMPORTANTE: Estrai i valori numerici con TUTTI i decimali presenti nel documento. Non arrotondare mai.
+IMPORTANTE: Estrai i valori numerici con TUTTI i decimali. Se trovi più righe di malattia, NON sommarle se sono una la trattenuta dell'altra (es. voce 2502 e 2650 spesso riportano lo stesso valore). Prendi il valore massimo.
 
 Output SOLO JSON:
 {
@@ -418,7 +420,7 @@ Output SOLO JSON:
   "trattenute": {"inps": 0.00, "irpef_netta": 0.00, "addizionali": 0.00},
   "ferie": {"residue_ap": 0.00, "maturate": 0.00, "godute": 0.00, "saldo": 0.00},
   "par": {"residue_ap": 0.00, "spettanti": 0.00, "fruite": 0.00, "saldo": 0.00},
-  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "ore_malattia": 0.00}
+  "assenze_mese": {"ore_ferie": 0.00, "ore_permessi": 0.00, "gg_malattia": 0.00}
 }
 """.strip()
 
@@ -516,7 +518,7 @@ def parse_cartellino_dettagliato(path):
         pass
 
 
-    # Footer metrics (deterministico): GG PRESENZA / ORE / MAL
+    # Footer metrics (deterministico): GG PRESENZA / ORE / MAL / FER / RIC
     try:
         fm = parse_cartellino_footer_metrics(path)
         if fm.get("gg_presenza", 0) > 0:
@@ -524,10 +526,14 @@ def parse_cartellino_dettagliato(path):
             result["giorni_lavorati"] = fm["gg_presenza"]
         if fm.get("ore_lavorate", 0) > 0:
             result["ore_lavorate"] = fm["ore_lavorate"]
-        if fm.get("ore_ordinarie_pv", 0) > 0:
-            result["ore_ordinarie_pv"] = fm["ore_ordinarie_pv"]
+        if fm.get("ore_ordinarie", 0) > 0:
+            result["ore_ordinarie_footer"] = fm["ore_ordinarie"]
         if fm.get("ore_malattia", 0) > 0:
             result["ore_malattia_footer"] = fm["ore_malattia"]
+        if fm.get("ore_ferie", 0) > 0:
+            result["ore_ferie_footer"] = fm["ore_ferie"]
+        if fm.get("ore_festivita", 0) > 0:
+            result["ore_festivita_footer"] = fm["ore_festivita"]
     except Exception:
         pass
     return result
@@ -1863,7 +1869,7 @@ if "res" in st.session_state:
 
         ore_ferie_busta = safe_float(assenze_busta.get("ore_ferie", 0))
         ore_permessi_busta = safe_float(assenze_busta.get("ore_permessi", 0))
-        ore_malattia_busta = safe_float(assenze_busta.get("ore_malattia", 0))
+        gg_malattia_busta = safe_float(assenze_busta.get("gg_malattia", 0))
         
         # 1. Calcolo dinamico ore/giorno (0253 / 0265)
         # Evita il fisso "8 ore" che crea discrepanze su part-time/turni
@@ -1877,18 +1883,22 @@ if "res" in st.session_state:
         # 2. Converti ore in giorni (float preciso)
         gg_ferie_busta_reali = ore_ferie_busta / ore_giorno_eff
         gg_permessi_busta_reali = ore_permessi_busta / ore_giorno_eff
-        gg_malattia_busta_reali = ore_malattia_busta / ore_giorno_eff
         
         # Totale Assenze Busta (Ferie + Permessi)
         # Manteniamo i float per la precisione nel "totale calcolato"
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = gg_ferie_busta_reali + gg_permessi_busta_reali
         
-        # Malattia: se c'è in busta (ore), usa quella convertita. Altrimenti usa cartellino.
-        if ore_malattia_busta > 0:
-             gg_malattia = gg_malattia_busta_reali
+        # Malattia: Busta (Ufficiale) o Cartellino
+        if gg_malattia_busta > 0:
+             gg_malattia = gg_malattia_busta
         else:
-             gg_malattia = c_malattia
+             # Se dal cartellino abbiamo ore, convertiamo. Se abbiamo già giorni, usiamo quelli.
+             c_mal_val = c.get("ore_malattia_footer", 0) or c.get("malattia", 0)
+             if c_mal_val > 5: # Presumibilmente ore
+                 gg_malattia = c_mal_val / ore_giorno_eff
+             else:
+                 gg_malattia = c_mal_val
              
         # Permessi (variabile di appoggio per UI)
         gg_permessi = gg_permessi_busta_reali
@@ -1909,13 +1919,15 @@ if "res" in st.session_state:
         use_source_ferie = "Busta" # Label for UI
 
         # LOGICA FERIE: Priorità Busta > Cartellino
+        c_ferie_val = c.get("ore_ferie_footer", 0) / ore_giorno_eff if c.get("ore_ferie_footer") else c_ferie
+
         if gg_assenze_busta > 0:
             gg_ferie_effettive = gg_assenze_busta
             # Info se c'è discrepanza con Cartellino
-            if c_ferie != gg_ferie_effettive:
-                 st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive:.2f} gg) come da documento ufficiale (Cartellino indica {c_ferie}).")
-        elif c_ferie > 0:
-            gg_ferie_effettive = c_ferie
+            if abs(c_ferie_val - gg_ferie_effettive) > 0.1:
+                 st.info(f"ℹ️ Ferie prese dalla Busta ({gg_ferie_effettive:.2f} gg) come da documento ufficiale (Cartellino indica {c_ferie_val:.2f}).")
+        elif c_ferie_val > 0:
+            gg_ferie_effettive = c_ferie_val
             use_source_ferie = "Cartellino"
         elif a_ferie > 0:
             gg_ferie_effettive = a_ferie
@@ -1932,13 +1944,16 @@ if "res" in st.session_state:
         # =====================================================================
         gg_pagati_busta = dg.get("giorni_pagati", 0)  # GG. INPS dalla busta
         
-        # TORNIAMO ALLA LOGICA PURA: CONTRONTO BUSTA vs CARTELLINO
-        # Omesse timbrature: sono giorni lavorati e vanno SEMPRE sommati se non già nel cartellino 
-        # (assumiamo che il cartellino NON le conti come lavorati se non timbrati)
         c_lavorati_eff = c_lavorati + final_omesse
 
+        # Consolidamento Festività: Footer o AI
+        if c.get("ore_festivita_footer"):
+             c_fest_val = c.get("ore_festivita_footer") / ore_giorno_eff
+             if abs(c_fest_val - c_festivita) > 0.5:
+                 c_festivita = c_fest_val
+
         # Totale calcolato (somma componenti)
-        # IMPORTANTE: c_riposi NON va sommato (non sono GG INPS)
+        # Se gg_malattia è già in giorni (valore basso), lo usiamo direttamente.
         tot_calcolato = c_lavorati_eff + gg_ferie_effettive + gg_malattia + c_festivita
         
         # Differenza
