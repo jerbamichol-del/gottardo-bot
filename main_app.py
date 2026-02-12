@@ -387,7 +387,7 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 **1. DATI GENERALI:**
 - NETTO: riga "PROGRESSIVI" colonna finale
 - GIORNI PAGATI: riga "GG. INPS"
-- ORE ORDINARIE: campo "ORE INAIL" o "ORE ORDINARIE" (valore totale del mese). NON fare calcoli fissi x 8.
+- ORE ORDINARIE: campo "ORE INAIL" o "ORE ORDINARIE". Cerca un valore tipicamente compreso tra 100 e 200 (es. 173,33). Ignora numeri piccoli sotto 50 se i giorni pagati sono alti.
 
 **2. COMPETENZE:**
 - base: Cerca "RETRIBUZIONE ORDINARIA" o "PAGA BASE" (voce 1000) -> valore nella colonna Competenze
@@ -1052,16 +1052,16 @@ if "res" in st.session_state:
         gg_malattia_busta = safe_float(assenze_busta.get("gg_malattia", 0))
         gg_festivita_busta = safe_float(assenze_busta.get("gg_festivita", 0))
         
-        # 1. Calcolo dinamico ore/giorno (0253 / 0265)
+        # 1. Calcolo dinamico ore/giorno (CONTRATTO 6/7)
+        # Per un full-time 6/7, il rapporto ore/giorno è tipicamente 6.66 (se 40h) o 6.33 (se 38h)
         c_ore_tot = c.get("ore_lavorate", 0) or 0.0
         c_gg_tot  = c.get("giorni_footer", 0) or c.get("giorni_lavorati", 0) or 0.0
         
-        # Heuristic for ratio: Gottardo uses often 8.0 or 6.66-6.9 (depending on contract)
-        ore_giorno_eff = 8.0
+        # Default per 6/7 (40h/6gg = 6.66)
+        ore_giorno_eff = 6.6666
+        
         if c_ore_tot > 0 and c_gg_tot > 0:
-            ore_giorno_raw = c_ore_tot / c_gg_tot
-            # Se il rapporto è vicino a 6.7/6.8 o 8.0 e farebbe tornare i conti, lo segnaliamo
-            ore_giorno_eff = ore_giorno_raw
+            ore_giorno_eff = c_ore_tot / c_gg_tot
             
         # 2. Converti assenze in giorni
         # Usiamo il rapporto dinamico per vedere quanti GIORNI effettivi sono stati pagati
@@ -1071,15 +1071,14 @@ if "res" in st.session_state:
         ore_assenze_busta = ore_ferie_busta + ore_permessi_busta
         gg_assenze_busta = gg_ferie_busta_reali + gg_permessi_busta_reali
 
-        # LOGICA DI RICONCILIAZIONE AVANZATA:
-        # Se i conti non tornano per poco, cerchiamo il "Rapporto Contrattuale Nascosto"
+        # LOGICA DI RICONCILIAZIONE AVANZATA (Ottimizzata per 6/7):
         quota_assenze_teorica = gg_pagati_busta - (c_lavorati + c_omesse + gg_malattia_busta + gg_festivita_busta)
         if quota_assenze_teorica > 0 and ore_assenze_busta > 0:
              rapporto_ideale = ore_assenze_busta / quota_assenze_teorica
-             # Se il rapporto ideale (es 6.66 o 6.9) è sensato per un contratto retail, usiamo quello
              if 6.0 <= rapporto_ideale <= 8.5:
-                 if abs(rapporto_ideale - ore_giorno_eff) > 0.05:
-                     st.info(f"💡 **Rapporto Assenze**: La busta sembra basarsi su **{rapporto_ideale:.2f} ore/giorno** (anziché {ore_giorno_eff:.2f}). Usando questo parametro, la coerenza è del 100%.")
+                 if abs(rapporto_ideale - ore_giorno_eff) > 0.02:
+                     tipo_c = "Full-Time 6/7" if abs(rapporto_ideale - 6.66) < 0.1 else "Dinamico"
+                     st.info(f"💡 **Contratto {tipo_c}**: La busta usa un rapporto di **{rapporto_ideale:.2f} ore/giorno**. I conti ora tornano al 100%.")
                      ore_giorno_eff = rapporto_ideale
                      gg_ferie_busta_reali = ore_ferie_busta / ore_giorno_eff
                      gg_permessi_busta_reali = ore_permessi_busta / ore_giorno_eff
@@ -1188,10 +1187,10 @@ if "res" in st.session_state:
         # VERIFICA COERENZA GG INPS
         # =====================================================================
         if gg_pagati_busta > 0:
-            if abs(diff_gg) == 0:
+            if abs(diff_gg) < 0.05:
                 msg_parts = [f"Lavorati Cartellino ({c_lavorati})"]
                 if final_omesse > 0: msg_parts.append(f"Omesse ({final_omesse})")
-                if gg_ferie_effettive > 0: msg_parts.append(f"Ferie ({gg_ferie_effettive})")
+                if gg_ferie_effettive > 0: msg_parts.append(f"Ferie ({gg_ferie_effettive:.2f})")
                 if gg_malattia > 0: msg_parts.append(f"Malattia ({gg_malattia})")
                 if c_festivita > 0: msg_parts.append(f"Festività ({c_festivita})")
                 
