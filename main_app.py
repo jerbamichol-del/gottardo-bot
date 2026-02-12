@@ -397,9 +397,9 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 - lordo_totale: Cerca "TOTALE COMPETENZE" in fondo alla colonna competenze
 
 **3. TRATTENUTE:**
-- inps: sezione I.N.P.S.
-- irpef_netta: sezione FISCALI
-- addizionali: add.reg + add.com
+- inps: sezione I.N.P.S. (ritenute previdenziali)
+- irpef_netta: voce "IRPEF NETTA" o sezione FISCALI
+- addizionali: Somma TUTTE le addizionali (Regionale, Comunale, Acconto)
 
 **4. FERIE/PAR (tabella in alto a destra):**
 - Formato: RES.PREC / SPETTANTI / FRUITE / SALDO
@@ -1285,10 +1285,15 @@ if "res" in st.session_state:
     with tab1:
         # Paga, Giorni e Ore in una riga
         k1, k2, k3, k4 = st.columns(4)
+        # Calcolo Ore Ordinarie (Fallback se 0)
+        ore_ordinarie_busta = safe_float_val(dg.get("ore_ordinarie", 0))
+        if ore_ordinarie_busta == 0 and gg_pagati_busta > 0:
+            ore_ordinarie_busta = gg_pagati_busta * ore_giorno_eff
+
         k1.metric("💵 NETTO", f"€ {netto:,.2f}")
         k2.metric("📊 Lordo", f"€ {lordo:,.2f}")
         k3.metric("📆 Giorni Pagati", dg.get("giorni_pagati", 0))
-        k4.metric("⏱️ Ore ordinarie (Busta)", dg.get("ore_ordinarie", 0))
+        k4.metric("⏱️ Ore ordinarie", f"{ore_ordinarie_busta:.2f}")
 
 
         st.markdown("---")
