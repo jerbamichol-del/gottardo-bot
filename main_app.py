@@ -386,8 +386,8 @@ Questo è un CEDOLINO PAGA GOTTARDO S.p.A. italiano. Estrai ESATTAMENTE:
 
 **1. DATI GENERALI:**
 - NETTO: riga "PROGRESSIVI" colonna finale (es. 788,61)
-- GIORNI PAGATI: riga "GG. INPS" (es. 26)
-- ORE ORDINARIE: "ORE INAIL" o giorni×8
+- GIORNI PAGATI: riga "GG. INPS" (es. 25)
+- ORE ORDINARIE: "ORE INAIL" o (GIORNI PAGATI × 8)
 
 **2. COMPETENZE:**
 - base: Cerca "RETRIBUZIONE ORDINARIA" o "PAGA BASE" (voce 1000) -> valore nella colonna Competenze
@@ -2015,8 +2015,8 @@ if "res" in st.session_state:
         # Mostra dettaglio ore dalla busta se disponibile
         if ore_ferie_busta > 0 or ore_permessi_busta > 0:
             st.caption(
-                f"📋 Dettaglio Busta: {ore_ferie_busta:.0f}h ferie + {ore_permessi_busta:.0f}h permessi = "
-                f"{ore_assenze_busta:.0f}h ({gg_assenze_busta:.2f} gg)"
+                f"📋 Dettaglio Busta: {ore_ferie_busta:.2f}h ferie + {ore_permessi_busta:.2f}h permessi = "
+                f"{ore_assenze_busta:.2f}h ({gg_assenze_busta:.2f} gg)"
             )
 
         st.markdown("---")
