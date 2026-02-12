@@ -1330,18 +1330,16 @@ if "res" in st.session_state:
             else:
                 label_ferie_tab = "🏖️ Ferie (Busta)"
             
-            k2.metric(label_ferie_tab, gg_ferie_effettive)
-            
-            k3.metric("🤒 Malattia", gg_malattia)
+            k2.metric(label_ferie_tab, f"{gg_ferie_effettive:.2f}")
+            k3.metric("🤒 Malattia", f"{gg_malattia:.2f}")
             k4.metric("⚠️ Omesse", final_omesse)
 
             st.markdown("---")
 
             k5, k6, k7 = st.columns(3)
-            k5.metric("📋 Permessi", gg_permessi)
-            
+            k5.metric("📋 Permessi", f"{gg_permessi:.2f}")
             k6.metric("💤 Riposi", c_riposi)
-            k7.metric("🎉 Festività", c_festivita)
+            k7.metric("🎉 Festività", f"{c_festivita:.2f}")
 
             if c.get("note"):
                 st.info(f"📝 {c['note']}")
